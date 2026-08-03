@@ -83,6 +83,9 @@ async def ask_openai(prompt: str) -> str:
 async def ask_anthropic(prompt: str) -> str:
     agent = AnthropicAgent()
     return await agent.run(prompt)
+    from agents.router import Router
+
+router = Router()
 
 @app.get(
     "/health",
