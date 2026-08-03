@@ -58,12 +58,14 @@ class AnalyzeResponse(BaseModel):
         "openai",
         "anthropic",
         "gemini",
+        "grok",
         "both",
     ]
 
     openai: str | None = None
     anthropic: str | None = None
     gemini: str | None = None
+    grok: str | None = None
     errors: dict[str, str] | None = None
 
 
