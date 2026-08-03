@@ -158,6 +158,7 @@ async def analyze(request: AnalyzeRequest):
     openai=result.get("openai"),
     anthropic=result.get("anthropic"),
     gemini=result.get("gemini"),
+    grok=result.get("grok"),
 )
         
 
