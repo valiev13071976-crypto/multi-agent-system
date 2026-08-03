@@ -149,6 +149,7 @@ async def analyze(request: AnalyzeRequest):
             openai=result.get("openai"),
             anthropic=result.get("anthropic"),
         )
+        
 
     except Exception as e:
         raise HTTPException(
