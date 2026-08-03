@@ -4,6 +4,7 @@ from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
 from agents.grok_agent import GrokAgent
+from agents.deepseek_agent import DeepSeekAgent
 
 
 class Router:
@@ -12,8 +13,10 @@ class Router:
         self.anthropic = AnthropicAgent()
         self.gemini = GeminiAgent()
         self.grok = GrokAgent()
+        self.deepseek = DeepSeekAgent()
 
     async def run(self, prompt: str, mode: str = "both"):
+
         if mode == "openai":
             return {
                 "model": "openai",
@@ -38,11 +41,18 @@ class Router:
                 "grok": await self.grok.run(prompt),
             }
 
-        openai_result, anthropic_result, gemini_result, grok_result = await asyncio.gather(
+        if mode == "deepseek":
+            return {
+                "model": "deepseek",
+                "deepseek": await self.deepseek.run(prompt),
+            }
+
+        openai_result, anthropic_result, gemini_result, grok_result, deepseek_result = await asyncio.gather(
             self.openai.run(prompt),
             self.anthropic.run(prompt),
             self.gemini.run(prompt),
             self.grok.run(prompt),
+            self.deepseek.run(prompt),
         )
 
         return {
@@ -51,4 +61,5 @@ class Router:
             "anthropic": anthropic_result,
             "gemini": gemini_result,
             "grok": grok_result,
+            "deepseek": deepseek_result,
         }
