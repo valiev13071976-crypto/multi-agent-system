@@ -6,6 +6,8 @@ import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
+from agents.openai_agent import OpenAIAgent
+from agents.anthropic_agent import AnthropicAgent
 
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
