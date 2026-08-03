@@ -21,6 +21,11 @@ class Router:
                 "model": "anthropic",
                 "anthropic": await self.anthropic.run(prompt),
             }
+            if mode == "gemini":
+    return {
+        "model": "gemini",
+        "gemini": await self.gemini.run(prompt),
+    }
 
         openai_result = await self.openai.run(prompt)
         anthropic_result = await self.anthropic.run(prompt)
