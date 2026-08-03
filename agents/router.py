@@ -1,3 +1,5 @@
+import asyncio
+
 from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
@@ -28,9 +30,11 @@ if mode == "gemini":
         "gemini": await self.gemini.run(prompt),
     }
 
-openai_result = await self.openai.run(prompt)
-anthropic_result = await self.anthropic.run(prompt)
-gemini_result = await self.gemini.run(prompt)
+openai_result, anthropic_result, gemini_result = await asyncio.gather(
+    self.openai.run(prompt),
+    self.anthropic.run(prompt),
+    self.gemini.run(prompt),
+)
 
 
 return {
