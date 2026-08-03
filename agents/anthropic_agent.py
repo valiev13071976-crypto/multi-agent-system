@@ -8,46 +8,53 @@ class AnthropicAgent:
         self.model = os.getenv("ANTHROPIC_MODEL")
 
         if not self.api_key:
-            raise ValueError("ANTHROPIC_API_KEY not found")
+            raise RuntimeError("ANTHROPIC_API_KEY is missing")
 
         if not self.model:
-            raise ValueError("ANTHROPIC_MODEL not found")
+            raise RuntimeError("ANTHROPIC_MODEL is missing")
 
     async def run(self, prompt: str) -> str:
-        print("ANTHROPIC RUN STARTED")
-        print("MODEL =", self.model)
+        print("=== ANTHROPIC REQUEST START ===")
+        print("MODEL:", self.model)
+
+        headers = {
+            "x-api-key": self.api_key,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+        }
+
+        payload = {
+            "model": self.model,
+            "max_tokens": 2048,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+        }
 
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 "https://api.anthropic.com/v1/messages",
-                headers={
-                    "x-api-key": self.api_key,
-                    "anthropic-version": "2023-06-01",
-                    "content-type": "application/json",
-                },
-                json={
-                    "model": self.model,
-                    "max_tokens": 2048,
-                    "messages": [
-                        {
-                            "role": "user",
-                            "content": prompt,
-                        }
-                    ],
-                },
+                headers=headers,
+                json=payload,
             )
 
-            if response.status_code != 200:
-                print("STATUS:", response.status_code)
-                print("BODY:", response.text)
-                raise RuntimeError(response.text)
+        print("STATUS:", response.status_code)
+        print("BODY:", response.text)
 
-            data = response.json()
+        if response.status_code != 200:
+            raise RuntimeError(
+                f"Anthropic API error {response.status_code}: {response.text}"
+            )
 
-            result = []
+        data = response.json()
 
-            for block in data.get("content", []):
-                if block.get("type") == "text":
-                    result.append(block.get("text", ""))
+        result = []
 
-            return "\n".join(result).strip()
+        for item in data.get("content", []):
+            if item.get("type") == "text":
+                result.append(item.get("text", ""))
+
+        return "\n".join(result).strip()
