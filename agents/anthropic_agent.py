@@ -34,7 +34,8 @@ class AnthropicAgent:
                 },
             )
 
-            response.raise_for_status()
+            if response.status_code != 200:
+    raise RuntimeError(response.text)
 
             data = response.json()
 
