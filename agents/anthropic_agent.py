@@ -33,10 +33,9 @@ class AnthropicAgent:
                     ],
                 },
             )
-
-            if response.status_code != 200:
-    print(response.status_code)
-    print(response.text)
+if response.status_code != 200:
+    print("STATUS:", response.status_code)
+    print("BODY:", response.text)
     raise RuntimeError(response.text)
 
             data = response.json()
