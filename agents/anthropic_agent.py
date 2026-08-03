@@ -15,7 +15,7 @@ class AnthropicAgent:
 
     async def run(self, prompt: str) -> str:
         print("=== ANTHROPIC REQUEST START ===")
-        print("MODEL:", self.model)
+        print("MODEL FROM ENV =", repr(self.model))
 
         headers = {
             "x-api-key": self.api_key,
