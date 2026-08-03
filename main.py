@@ -233,10 +233,11 @@ async def home() -> str:
 
     <div>
       <select id="mode">
-        <option value="both">OpenAI + Anthropic</option>
-        <option value="openai">Только OpenAI</option>
-        <option value="anthropic">Только Anthropic</option>
-      </select>
+    <option value="both">OpenAI + Anthropic + Gemini</option>
+    <option value="openai">Только OpenAI</option>
+    <option value="anthropic">Только Anthropic</option>
+    <option value="gemini">Только Gemini</option>
+</select>
 
       <button onclick="run()">Запустить анализ</button>
     </div>
