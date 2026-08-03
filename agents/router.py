@@ -17,7 +17,7 @@ class Router:
         "model": "openai",
         "openai": await self.openai.run(prompt),
     }
-
+    
 if mode == "anthropic":
     return {
         "model": "anthropic",
