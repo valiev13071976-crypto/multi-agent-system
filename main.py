@@ -47,9 +47,16 @@ class HealthResponse(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    mode: Literal["openai", "anthropic", "both"]
+    mode: Literal[
+        "openai",
+        "anthropic",
+        "gemini",
+        "both",
+    ]
+
     openai: str | None = None
     anthropic: str | None = None
+    gemini: str | None = None
     errors: dict[str, str] | None = None
 
 
