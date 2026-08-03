@@ -219,7 +219,7 @@ async def home() -> str:
 </head>
 <body>
   <div class="card">
-    <h1>Panda Multi-Agent TEST 123</h1>
+    <h1>TEST 123456</h1>
 
     <p>
       Отправляет одну задачу OpenAI, Anthropic
