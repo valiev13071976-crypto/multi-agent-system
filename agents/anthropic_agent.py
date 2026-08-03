@@ -15,6 +15,8 @@ class AnthropicAgent:
 
     async def run(self, prompt: str) -> str:
         print("ANTHROPIC RUN STARTED")
+        print("MODEL =", self.model)
+
         async with httpx.AsyncClient(timeout=120) as client:
             response = await client.post(
                 "https://api.anthropic.com/v1/messages",
@@ -34,10 +36,11 @@ class AnthropicAgent:
                     ],
                 },
             )
-if response.status_code != 200:
-    print("STATUS:", response.status_code)
-    print("BODY:", response.text)
-    raise RuntimeError(response.text)
+
+            if response.status_code != 200:
+                print("STATUS:", response.status_code)
+                print("BODY:", response.text)
+                raise RuntimeError(response.text)
 
             data = response.json()
 
