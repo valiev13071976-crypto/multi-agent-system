@@ -60,6 +60,7 @@ class AnalyzeResponse(BaseModel):
         "anthropic",
         "gemini",
         "grok",
+        "deepseek",
         "both",
     ]
 
@@ -67,6 +68,7 @@ class AnalyzeResponse(BaseModel):
     anthropic: str | None = None
     gemini: str | None = None
     grok: str | None = None
+    deepseek: str | None = None
     errors: dict[str, str] | None = None
 
 
@@ -160,6 +162,7 @@ async def analyze(request: AnalyzeRequest):
     anthropic=result.get("anthropic"),
     gemini=result.get("gemini"),
     grok=result.get("grok"),
+    deepseek=result.get("deepseek"),
 )
         
 
