@@ -1,5 +1,6 @@
 from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
+from agents.gemini_agent import GeminiAgent
 
 
 class Router:
