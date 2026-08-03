@@ -95,7 +95,6 @@ async def ask_gemini(prompt: str) -> str:
 router = Router()
     
 
-router = Router()
 
 @app.get(
     "/health",
