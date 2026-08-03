@@ -7,6 +7,7 @@ class Router:
     def __init__(self):
         self.openai = OpenAIAgent()
         self.anthropic = AnthropicAgent()
+        self.gemini = GeminiAgent()
 
     async def run(self, prompt: str, mode: str = "both"):
         if mode == "openai":
