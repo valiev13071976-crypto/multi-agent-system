@@ -145,10 +145,11 @@ async def analyze(request: AnalyzeRequest):
         )
 
         return AnalyzeResponse(
-            mode=result["model"],
-            openai=result.get("openai"),
-            anthropic=result.get("anthropic"),
-        )
+    mode=result["model"],
+    openai=result.get("openai"),
+    anthropic=result.get("anthropic"),
+    gemini=result.get("gemini"),
+)
         
 
     except Exception as e:
