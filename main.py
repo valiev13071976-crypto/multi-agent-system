@@ -109,56 +109,8 @@ async def ask_openai(prompt: str) -> str:
 
 
 async def ask_anthropic(prompt: str) -> str:
-    api_key = os.getenv("ANTHROPIC_API_KEY")
-    model = os.getenv("ANTHROPIC_MODEL")
-
-    if not api_key or not model:
-        raise RuntimeError(
-            "ANTHROPIC_API_KEY или ANTHROPIC_MODEL не настроены в Railway."
-        )
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
-            "https://api.anthropic.com/v1/messages",
-            headers={
-                "x-api-key": api_key,
-                "anthropic-version": "2023-06-01",
-                "content-type": "application/json",
-            },
-            json={
-                "model": model,
-                "max_tokens": 2048,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt,
-                    }
-                ],
-            },
-        )
-
-        response.raise_for_status()
-
-        payload = response.json()
-        parts: list[str] = []
-
-        for block in payload.get("content", []):
-            if not isinstance(block, dict):
-                continue
-
-            if block.get("type") == "text":
-                text = block.get("text")
-
-                if isinstance(text, str) and text.strip():
-                    parts.append(text.strip())
-
-        result = "\n".join(parts).strip()
-
-        if not result:
-            raise RuntimeError("Anthropic вернул пустой ответ.")
-
-        return result
-
+    agent = AnthropicAgent()
+    return await agent.run(prompt)
 
 @app.get(
     "/health",
