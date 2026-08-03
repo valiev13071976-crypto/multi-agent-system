@@ -77,36 +77,8 @@ def extract_openai_text(payload: dict[str, Any]) -> str:
 
 
 async def ask_openai(prompt: str) -> str:
-    api_key = os.getenv("OPENAI_API_KEY")
-    model = os.getenv("OPENAI_MODEL")
-
-    if not api_key or not model:
-        raise RuntimeError(
-            "OPENAI_API_KEY или OPENAI_MODEL не настроены в Railway."
-        )
-
-    async with httpx.AsyncClient(timeout=120) as client:
-        response = await client.post(
-            "https://api.openai.com/v1/responses",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": model,
-                "input": prompt,
-            },
-        )
-
-        response.raise_for_status()
-
-        text = extract_openai_text(response.json())
-
-        if not text:
-            raise RuntimeError("OpenAI вернул пустой ответ.")
-
-        return text
-
+    agent = OpenAIAgent()
+    return await agent.run(prompt)
 
 async def ask_anthropic(prompt: str) -> str:
     agent = AnthropicAgent()
