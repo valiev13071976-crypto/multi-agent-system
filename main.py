@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
+from agents.gemini_agent import GeminiAgent
 
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
