@@ -9,6 +9,7 @@ from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
 from agents.router import Router
+from agents.grok_agent import GrokAgent
 
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
@@ -34,7 +35,13 @@ class AnalyzeRequest(BaseModel):
         description="Задача или вопрос для моделей.",
         examples=["Проанализируй преимущества солнечной энергетики."],
     )
-    mode: Literal["openai", "anthropic", "both"] = Field(
+    mode: Literal[
+    "openai",
+    "anthropic",
+    "gemini",
+    "grok",
+    "both",
+] = Field(
         default="both",
         description="Какие модели использовать.",
     )
