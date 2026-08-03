@@ -13,33 +13,32 @@ class Router:
 
     async def run(self, prompt: str, mode: str = "both"):
         if mode == "openai":
-    return {
-        "model": "openai",
-        "openai": await self.openai.run(prompt),
-    }
-    
-if mode == "anthropic":
-    return {
-        "model": "anthropic",
-        "anthropic": await self.anthropic.run(prompt),
-    }
+            return {
+                "model": "openai",
+                "openai": await self.openai.run(prompt),
+            }
 
-if mode == "gemini":
-    return {
-        "model": "gemini",
-        "gemini": await self.gemini.run(prompt),
-    }
+        if mode == "anthropic":
+            return {
+                "model": "anthropic",
+                "anthropic": await self.anthropic.run(prompt),
+            }
 
-openai_result, anthropic_result, gemini_result = await asyncio.gather(
-    self.openai.run(prompt),
-    self.anthropic.run(prompt),
-    self.gemini.run(prompt),
-)
+        if mode == "gemini":
+            return {
+                "model": "gemini",
+                "gemini": await self.gemini.run(prompt),
+            }
 
+        openai_result, anthropic_result, gemini_result = await asyncio.gather(
+            self.openai.run(prompt),
+            self.anthropic.run(prompt),
+            self.gemini.run(prompt),
+        )
 
-return {
-    "model": "both",
-    "openai": openai_result,
-    "anthropic": anthropic_result,
-    "gemini": gemini_result,
-}
+        return {
+            "model": "both",
+            "openai": openai_result,
+            "anthropic": anthropic_result,
+            "gemini": gemini_result,
+        }
