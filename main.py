@@ -40,11 +40,12 @@ class AnalyzeRequest(BaseModel):
     "anthropic",
     "gemini",
     "grok",
+    "deepseek",
     "both",
 ] = Field(
-        default="both",
-        description="Какие модели использовать.",
-    )
+    default="both",
+    description="Какие модели использовать.",
+)
 
 
 class HealthResponse(BaseModel):
