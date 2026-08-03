@@ -81,10 +81,19 @@ async def ask_openai(prompt: str) -> str:
     agent = OpenAIAgent()
     return await agent.run(prompt)
 
+
 async def ask_anthropic(prompt: str) -> str:
     agent = AnthropicAgent()
     return await agent.run(prompt)
-    from agents.router import Router
+
+
+async def ask_gemini(prompt: str) -> str:
+    agent = GeminiAgent()
+    return await agent.run(prompt)
+
+
+router = Router()
+    
 
 router = Router()
 
