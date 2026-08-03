@@ -115,75 +115,30 @@ async def health() -> HealthResponse:
         "Отправляет запрос OpenAI, Anthropic или обеим моделям параллельно."
     ),
 )
-async def analyze(request: AnalyzeRequest) -> AnalyzeResponse:
+@app.post(
+    "/api/analyze",
+    response_model=AnalyzeResponse,
+    response_model_exclude_none=True,
+)
+async def analyze(request: AnalyzeRequest):
+
     try:
-        if request.mode == "openai":
-            result = await ask_openai(request.prompt)
-
-            return AnalyzeResponse(
-                mode="openai",
-                openai=result,
-            )
-
-        if request.mode == "anthropic":
-            result = await ask_anthropic(request.prompt)
-
-            return AnalyzeResponse(
-                mode="anthropic",
-                anthropic=result,
-            )
-
-        results = await asyncio.gather(
-            ask_openai(request.prompt),
-            ask_anthropic(request.prompt),
-            return_exceptions=True,
+        result = await router.run(
+            prompt=request.prompt,
+            mode=request.mode,
         )
-
-        openai_result: str | None = None
-        anthropic_result: str | None = None
-        errors: dict[str, str] = {}
-
-        if isinstance(results[0], Exception):
-            errors["openai"] = str(results[0])
-        else:
-            openai_result = results[0]
-
-        if isinstance(results[1], Exception):
-            errors["anthropic"] = str(results[1])
-        else:
-            anthropic_result = results[1]
-
-        if openai_result is None and anthropic_result is None:
-            raise HTTPException(
-                status_code=502,
-                detail=errors,
-            )
 
         return AnalyzeResponse(
-            mode="both",
-            openai=openai_result,
-            anthropic=anthropic_result,
-            errors=errors or None,
+            mode=result["model"],
+            openai=result.get("openai"),
+            anthropic=result.get("anthropic"),
         )
 
-    except httpx.HTTPStatusError as exc:
-        body = exc.response.text[:1000]
-
-        raise HTTPException(
-            status_code=502,
-            detail=(
-                f"Ошибка провайдера {exc.response.status_code}: {body}"
-            ),
-        ) from exc
-
-    except HTTPException:
-        raise
-
-    except Exception as exc:
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=str(exc),
-        ) from exc
+            detail=str(e),
+        )
 
 
 @app.get(
