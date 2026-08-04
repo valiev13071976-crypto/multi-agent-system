@@ -52,11 +52,12 @@ class HealthResponse(BaseModel):
 class AnalyzeResponse(BaseModel):
     mode: str
 
-    openai: str | None = None
-    anthropic: str | None = None
-    gemini: str | None = None
-    grok: str | None = None
-    deepseek: str | None = None
+    strategist: str | None = None
+    critic: str | None = None
+    researcher: str | None = None
+    technical: str | None = None
+    judge: str | None = None
+
     errors: dict | None = None
 
 
@@ -104,14 +105,16 @@ async def analyze(request: AnalyzeRequest):
 
 
         return AnalyzeResponse(
-            mode=result.get("model", request.mode),
-            openai=result.get("openai"),
-            anthropic=result.get("anthropic"),
-            gemini=result.get("gemini"),
-            grok=result.get("grok"),
-            deepseek=result.get("deepseek"),
-            errors=result.get("errors"),
-        )
+    mode=result.get("model", request.mode),
+
+    strategist=result.get("strategist"),
+    critic=result.get("critic"),
+    researcher=result.get("researcher"),
+    technical=result.get("technical"),
+    judge=result.get("judge"),
+
+    errors=result.get("errors"),
+)
 
 
     except Exception as e:
