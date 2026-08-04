@@ -57,7 +57,9 @@ class AnalyzeResponse(BaseModel):
     researcher: str | None = None
     trend_agent: str | None = None
     technical: str | None = None
-    judge: str | None = None
+
+    peer_review: dict | None = None
+    judge: dict | None = None
 
     openai: str | None = None
     anthropic: str | None = None
@@ -119,6 +121,8 @@ async def analyze(request: AnalyzeRequest):
     researcher=result.get("researcher"),
     trend_agent=result.get("trend_agent"),
     technical=result.get("technical"),
+
+    peer_review=result.get("peer_review"),
     judge=result.get("judge"),
 
     openai=result.get("openai"),
