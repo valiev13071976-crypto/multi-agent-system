@@ -6,6 +6,7 @@ from agents.gemini_agent import GeminiAgent
 from agents.grok_agent import GrokAgent
 from agents.deepseek_agent import DeepSeekAgent
 from agents.judge import Judge
+from agents.peer_review import PeerReview
 
 
 class Router:
@@ -14,31 +15,34 @@ class Router:
 
     Поток:
     Context
-    ↓
+        ↓
     Эксперты
-    ↓
+        ↓
+    Peer Review
+        ↓
     Judge
-    ↓
+        ↓
     Итоговое решение
     """
 
     def __init__(self):
-
         self.strategist = OpenAIAgent()
         self.critic = AnthropicAgent()
         self.researcher = GeminiAgent()
         self.trend_agent = GrokAgent()
         self.technical = DeepSeekAgent()
-        self.judge = Judge()
 
+        self.peer_review = PeerReview()
+        self.judge = Judge()
 
     async def run(
         self,
         prompt: str,
-        mode: str = "both"
+        mode: str = "both",
     ):
 
         expert_tasks = [
+
             self.strategist.run(
                 f"""
 Ты Стратег Panda Multi-Agent.
@@ -117,17 +121,27 @@ class Router:
             ),
         ]
 
-
         results = await asyncio.gather(
             *expert_tasks,
-            return_exceptions=True
+            return_exceptions=True,
         )
 
+        expert_answers = {
+            "strategist": str(results[0]),
+            "critic": str(results[1]),
+            "researcher": str(results[2]),
+            "trend_agent": str(results[3]),
+            "technical": str(results[4]),
+        }
+
+        peer_review = await self.peer_review.review(
+            expert_answers
+        )
 
         judge_prompt = f"""
 Ты главный судья Panda Multi-Agent.
 
-Проанализируй ответы всех экспертов.
+Проанализируй ответы экспертов.
 
 СТРАТЕГ:
 {results[0]}
@@ -138,31 +152,39 @@ class Router:
 ИССЛЕДОВАТЕЛЬ:
 {results[2]}
 
-АНАЛИТИК ТРЕНДОВ:
+ТРЕНДЫ:
 {results[3]}
 
 ТЕХНИЧЕСКИЙ ЭКСПЕРТ:
 {results[4]}
 
+ВЗАИМНАЯ ПРОВЕРКА:
 
-Сделай итог:
+{peer_review}
+
+Сформируй:
 
 1. Лучшее решение.
-2. Аргументы.
-3. Риски.
-4. Конкретный план действий.
+2. Почему оно лучше.
+3. Основные риски.
+4. План действий.
+5. Итоговую уверенность.
 """
 
-
-        judge_result = await self.judge.run(judge_prompt)
-
+        judge_result = await self.judge.run(
+            judge_prompt
+        )
 
         return {
             "model": "multi-agent",
+
             "strategist": str(results[0]),
             "critic": str(results[1]),
             "researcher": str(results[2]),
             "trend_agent": str(results[3]),
             "technical": str(results[4]),
-            "judge": str(judge_result),
+
+            "peer_review": peer_review,
+
+            "judge": judge_result,
         }
