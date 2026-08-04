@@ -55,6 +55,7 @@ class AnalyzeResponse(BaseModel):
     strategist: str | None = None
     critic: str | None = None
     researcher: str | None = None
+    trend_agent: str | None = None
     technical: str | None = None
     judge: str | None = None
 
@@ -116,6 +117,7 @@ async def analyze(request: AnalyzeRequest):
     strategist=result.get("strategist"),
     critic=result.get("critic"),
     researcher=result.get("researcher"),
+    trend_agent=result.get("trend_agent"),
     technical=result.get("technical"),
     judge=result.get("judge"),
 
