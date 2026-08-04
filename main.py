@@ -1,23 +1,20 @@
-import asyncio
 import os
-from typing import Any, Literal
-import httpx
+from typing import Literal
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
-from agents.openai_agent import OpenAIAgent
-from agents.anthropic_agent import AnthropicAgent
-from agents.gemini_agent import GeminiAgent
+
 from agents.router import Router
-from agents.grok_agent import GrokAgent
 from agents.context_manager import ContextManager
 
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
 
+
 app = FastAPI(
     title="Panda Multi-Agent",
-    description="API для отправки запросов моделям OpenAI и Anthropic.",
+    description="API мультиагентной системы Panda.",
     version="1.0.0",
     servers=[
         {
@@ -34,19 +31,16 @@ class AnalyzeRequest(BaseModel):
         min_length=1,
         max_length=30000,
         description="Задача или вопрос для моделей.",
-        examples=["Проанализируй преимущества солнечной энергетики."],
     )
+
     mode: Literal[
-    "openai",
-    "anthropic",
-    "gemini",
-    "grok",
-    "deepseek",
-    "both",
-] = Field(
-    default="both",
-    description="Какие модели использовать.",
-)
+        "openai",
+        "anthropic",
+        "gemini",
+        "grok",
+        "deepseek",
+        "both",
+    ] = "both"
 
 
 class HealthResponse(BaseModel):
@@ -56,118 +50,72 @@ class HealthResponse(BaseModel):
 
 
 class AnalyzeResponse(BaseModel):
-    mode: Literal[
-        "openai",
-        "anthropic",
-        "gemini",
-        "grok",
-        "deepseek",
-        "both",
-    ]
+    mode: str
 
     openai: str | None = None
     anthropic: str | None = None
     gemini: str | None = None
     grok: str | None = None
     deepseek: str | None = None
-    errors: dict[str, str] | None = None
+    errors: dict | None = None
 
-
-def extract_openai_text(payload: dict[str, Any]) -> str:
-    direct = payload.get("output_text")
-
-    if isinstance(direct, str) and direct.strip():
-        return direct.strip()
-
-    parts: list[str] = []
-
-    for item in payload.get("output", []):
-        if not isinstance(item, dict):
-            continue
-
-        for content in item.get("content", []):
-            if not isinstance(content, dict):
-                continue
-
-            text = content.get("text")
-
-            if isinstance(text, str) and text.strip():
-                parts.append(text.strip())
-
-    return "\n".join(parts).strip()
-
-
-async def ask_openai(prompt: str) -> str:
-    agent = OpenAIAgent()
-    return await agent.run(prompt)
-
-
-async def ask_anthropic(prompt: str) -> str:
-    agent = AnthropicAgent()
-    return await agent.run(prompt)
-
-
-async def ask_gemini(prompt: str) -> str:
-    agent = GeminiAgent()
-    return await agent.run(prompt)
 
 
 router = Router()
-    
+
+context_manager = ContextManager()
+
 
 
 @app.get(
     "/health",
     response_model=HealthResponse,
-    operation_id="checkHealth",
-    summary="Проверить состояние сервера",
 )
-async def health() -> HealthResponse:
+async def health():
+
     return HealthResponse(
         status="ok",
         openai_configured=bool(
-            os.getenv("OPENAI_API_KEY") and os.getenv("OPENAI_MODEL")
+            os.getenv("OPENAI_API_KEY")
         ),
         anthropic_configured=bool(
-            os.getenv("ANTHROPIC_API_KEY") and os.getenv("ANTHROPIC_MODEL")
+            os.getenv("ANTHROPIC_API_KEY")
         ),
     )
 
 
+
 @app.post(
     "/api/analyze",
     response_model=AnalyzeResponse,
-    response_model_exclude_none=True,
-    operation_id="analyzeWithModels",
-    summary="Отправить запрос моделям",
-    description=(
-        "Отправляет запрос OpenAI, Anthropic или обеим моделям параллельно."
-    ),
-)
-@app.post(
-    "/api/analyze",
-    response_model=AnalyzeResponse,
-    response_model_exclude_none=True,
 )
 async def analyze(request: AnalyzeRequest):
 
     try:
+
+        prepared_context = await context_manager.prepare(
+            request.prompt
+        )
+
         result = await router.run(
-            prompt=request.prompt,
+            prompt=str(prepared_context),
             mode=request.mode,
         )
 
+
         return AnalyzeResponse(
-    mode=result["model"],
-    openai=result.get("openai"),
-    anthropic=result.get("anthropic"),
-    gemini=result.get("gemini"),
-    grok=result.get("grok"),
-    deepseek=result.get("deepseek"),
-)
-        
+            mode=result.get("model", request.mode),
+            openai=result.get("openai"),
+            anthropic=result.get("anthropic"),
+            gemini=result.get("gemini"),
+            grok=result.get("grok"),
+            deepseek=result.get("deepseek"),
+            errors=result.get("errors"),
+        )
+
 
     except Exception as e:
+
         raise HTTPException(
             status_code=500,
             detail=str(e),
