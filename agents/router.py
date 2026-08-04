@@ -5,6 +5,7 @@ from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
 from agents.grok_agent import GrokAgent
 from agents.deepseek_agent import DeepSeekAgent
+from agents.judge import Judge
 
 
 class Router:
@@ -33,6 +34,7 @@ class Router:
         self.researcher = GeminiAgent()
         self.trend_agent = GrokAgent()
         self.technical = DeepSeekAgent()
+        self.judge = Judge()
 
 
     async def run(
@@ -110,12 +112,37 @@ class Router:
             *expert_tasks,
             return_exceptions=True
         )
+        judge_prompt = f"""
+Ты главный судья Panda Multi-Agent.
+
+Проанализируй ответы экспертов:
+
+СТРАТЕГ:
+{results[0]}
+
+КРИТИК:
+{results[1]}
+
+ИССЛЕДОВАТЕЛЬ:
+{results[2]}
+
+ТЕХНИЧЕСКИЙ ЭКСПЕРТ:
+{results[3]}
+
+Сделай итог:
+- лучшее решение;
+- риски;
+- конкретный план действий.
+"""
+
+judge_result = await self.judge.run(judge_prompt)
 
 
         return {
-            "model": "multi-agent",
-            "strategist": str(results[0]),
-            "critic": str(results[1]),
-            "researcher": str(results[2]),
-            "technical": str(results[3]),
-        }
+    "model": "multi-agent",
+    "strategist": str(results[0]),
+    "critic": str(results[1]),
+    "researcher": str(results[2]),
+    "technical": str(results[3]),
+    "judge": str(judge_result),
+}
