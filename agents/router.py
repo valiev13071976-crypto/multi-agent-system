@@ -7,95 +7,115 @@ from agents.grok_agent import GrokAgent
 from agents.deepseek_agent import DeepSeekAgent
 
 
-SYSTEM_RULES = """
-Ты работаешь как часть мультиагентной аналитической системы Panda Multi-Agent.
-
-Правила:
-- анализируй задачу глубоко;
-- используй факты и проверенные данные;
-- не давай поверхностных ответов;
-- предлагай практическое решение;
-- учитывай бизнес, риски, стоимость и эффективность.
-
-Роли:
-OpenAI — стратегический анализ и итоговые решения.
-Anthropic — анализ документов, логика и риски.
-Gemini — поиск информации и сравнение данных.
-Grok — тренды и актуальная информация.
-DeepSeek — технические решения и автоматизация.
-"""
-
-
 class Router:
+    """
+    Главный оркестратор Panda Multi-Agent v1.0
+
+    Поток:
+    Context
+    ↓
+    Эксперты
+    ↓
+    Peer Review (позже)
+    ↓
+    Fact Validator (позже)
+    ↓
+    Judge (позже)
+    """
+
     def __init__(self):
-        self.openai = OpenAIAgent()
-        self.anthropic = AnthropicAgent()
-        self.gemini = GeminiAgent()
-        self.grok = GrokAgent()
-        self.deepseek = DeepSeekAgent()
+
+        # временно используем модели как экспертов
+        # позже заменим на отдельные роли
+
+        self.strategist = OpenAIAgent()
+        self.critic = AnthropicAgent()
+        self.researcher = GeminiAgent()
+        self.trend_agent = GrokAgent()
+        self.technical = DeepSeekAgent()
 
 
-    async def run(self, prompt: str, mode: str = "both"):
+    async def run(
+        self,
+        prompt: str,
+        mode: str = "both"
+    ):
 
-        final_prompt = f"""
-{SYSTEM_RULES}
+        expert_tasks = [
+            self.strategist.run(
+                f"""
+Ты Стратег.
 
-Задача пользователя:
+Задача:
 
 {prompt}
+
+Дай:
+- стратегию;
+- варианты;
+- расчёты;
+- риски.
 """
+            ),
 
+            self.critic.run(
+                f"""
+Ты Критик.
 
-        if mode == "openai":
-            return {
-                "model": "openai",
-                "openai": await self.openai.run(final_prompt),
-            }
+Задача:
 
+{prompt}
 
-        if mode == "anthropic":
-            return {
-                "model": "anthropic",
-                "anthropic": await self.anthropic.run(final_prompt),
-            }
+Найди:
+- слабые места;
+- риски;
+- ошибки предположений.
+"""
+            ),
 
+            self.researcher.run(
+                f"""
+Ты Исследователь.
 
-        if mode == "gemini":
-            return {
-                "model": "gemini",
-                "gemini": await self.gemini.run(final_prompt),
-            }
+Задача:
 
+{prompt}
 
-        if mode == "grok":
-            return {
-                "model": "grok",
-                "grok": await self.grok.run(final_prompt),
-            }
+Дай:
+- факты;
+- данные;
+- источники;
+- проверки.
+"""
+            ),
 
+            self.technical.run(
+                f"""
+Ты Технический эксперт.
 
-        if mode == "deepseek":
-            return {
-                "model": "deepseek",
-                "deepseek": await self.deepseek.run(final_prompt),
-            }
+Задача:
+
+{prompt}
+
+Дай:
+- техническое решение;
+- ограничения;
+- архитектуру.
+"""
+            ),
+        ]
 
 
         results = await asyncio.gather(
-            self.openai.run(final_prompt),
-            self.anthropic.run(final_prompt),
-            self.gemini.run(final_prompt),
-            self.grok.run(final_prompt),
-            self.deepseek.run(final_prompt),
-            return_exceptions=True,
+            *expert_tasks,
+            return_exceptions=True
         )
 
 
         return {
-            "model": "both",
-            "openai": str(results[0]),
-            "anthropic": str(results[1]),
-            "gemini": str(results[2]),
-            "grok": str(results[3]),
-            "deepseek": str(results[4]),
+            "model": "multi-agent",
+            "strategist": str(results[0]),
+            "critic": str(results[1]),
+            "researcher": str(results[2]),
+            "technical": str(results[3]),
         }
