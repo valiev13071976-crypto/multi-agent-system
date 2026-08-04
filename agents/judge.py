@@ -1,50 +1,28 @@
-import logging
-
-
 class Judge:
     """
-    Финальный судья Panda Multi-Agent.
+    Финальный оценщик Panda Multi-Agent.
 
-    Задачи:
-    - сравнение ответов агентов;
-    - поиск противоречий;
-    - выбор лучшего решения;
-    - формирование итогового вывода.
+    Получает ответы экспертов
+    и формирует итоговое решение.
     """
 
     def __init__(self):
-        self.name = "judge"
+        self.name = "Judge"
 
-    async def evaluate(self, answers: dict) -> dict:
-        """
-        Анализирует ответы всех агентов.
-        """
 
-        logging.info("Judge started evaluation")
-
-        valid_answers = {
-            key: value
-            for key, value in answers.items()
-            if value
-        }
-
-        if not valid_answers:
-            return {
-                "decision": "Нет доступных ответов",
-                "reasoning": "Все агенты вернули пустой результат",
-                "confidence": 0,
-            }
-
-        combined = "\n\n".join(
-            [
-                f"{agent.upper()}:\n{answer}"
-                for agent, answer in valid_answers.items()
-            ]
-        )
+    async def run(self, prompt: str):
 
         return {
-            "decision": "Сформирован общий анализ агентов",
-            "reasoning": combined,
-            "agents_used": list(valid_answers.keys()),
-            "confidence": 80,
+            "role": self.name,
+            "decision": "Анализ выполнен",
+            "analysis": prompt,
+            "risks": [
+                "Проверить исходные данные",
+                "Проверить ограничения решения"
+            ],
+            "action_plan": [
+                "Выбрать оптимальный вариант",
+                "Проверить реализацию",
+                "Измерить результат"
+            ]
         }
