@@ -58,6 +58,12 @@ class AnalyzeResponse(BaseModel):
     technical: str | None = None
     judge: str | None = None
 
+    openai: str | None = None
+    anthropic: str | None = None
+    gemini: str | None = None
+    grok: str | None = None
+    deepseek: str | None = None
+
     errors: dict | None = None
 
 
@@ -112,6 +118,12 @@ async def analyze(request: AnalyzeRequest):
     researcher=result.get("researcher"),
     technical=result.get("technical"),
     judge=result.get("judge"),
+
+    openai=result.get("openai"),
+    anthropic=result.get("anthropic"),
+    gemini=result.get("gemini"),
+    grok=result.get("grok"),
+    deepseek=result.get("deepseek"),
 
     errors=result.get("errors"),
 )
