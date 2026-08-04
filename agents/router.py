@@ -17,17 +17,12 @@ class Router:
     ↓
     Эксперты
     ↓
-    Peer Review (позже)
+    Judge
     ↓
-    Fact Validator (позже)
-    ↓
-    Judge (позже)
+    Итоговое решение
     """
 
     def __init__(self):
-
-        # временно используем модели как экспертов
-        # позже заменим на отдельные роли
 
         self.strategist = OpenAIAgent()
         self.critic = AnthropicAgent()
@@ -46,7 +41,7 @@ class Router:
         expert_tasks = [
             self.strategist.run(
                 f"""
-Ты Стратег.
+Ты Стратег Panda Multi-Agent.
 
 Задача:
 
@@ -54,7 +49,7 @@ class Router:
 
 Дай:
 - стратегию;
-- варианты;
+- варианты решения;
 - расчёты;
 - риски.
 """
@@ -62,7 +57,7 @@ class Router:
 
             self.critic.run(
                 f"""
-Ты Критик.
+Ты Критик Panda Multi-Agent.
 
 Задача:
 
@@ -77,7 +72,7 @@ class Router:
 
             self.researcher.run(
                 f"""
-Ты Исследователь.
+Ты Исследователь Panda Multi-Agent.
 
 Задача:
 
@@ -91,9 +86,24 @@ class Router:
 """
             ),
 
+            self.trend_agent.run(
+                f"""
+Ты Аналитик трендов Panda Multi-Agent.
+
+Задача:
+
+{prompt}
+
+Дай:
+- актуальные тренды;
+- изменения рынка;
+- новые возможности.
+"""
+            ),
+
             self.technical.run(
                 f"""
-Ты Технический эксперт.
+Ты Технический эксперт Panda Multi-Agent.
 
 Задача:
 
@@ -112,10 +122,12 @@ class Router:
             *expert_tasks,
             return_exceptions=True
         )
+
+
         judge_prompt = f"""
 Ты главный судья Panda Multi-Agent.
 
-Проанализируй ответы экспертов:
+Проанализируй ответы всех экспертов.
 
 СТРАТЕГ:
 {results[0]}
@@ -126,23 +138,31 @@ class Router:
 ИССЛЕДОВАТЕЛЬ:
 {results[2]}
 
-ТЕХНИЧЕСКИЙ ЭКСПЕРТ:
+АНАЛИТИК ТРЕНДОВ:
 {results[3]}
 
+ТЕХНИЧЕСКИЙ ЭКСПЕРТ:
+{results[4]}
+
+
 Сделай итог:
-- лучшее решение;
-- риски;
-- конкретный план действий.
+
+1. Лучшее решение.
+2. Аргументы.
+3. Риски.
+4. Конкретный план действий.
 """
 
-judge_result = await self.judge.run(judge_prompt)
+
+        judge_result = await self.judge.run(judge_prompt)
 
 
         return {
-    "model": "multi-agent",
-    "strategist": str(results[0]),
-    "critic": str(results[1]),
-    "researcher": str(results[2]),
-    "technical": str(results[3]),
-    "judge": str(judge_result),
-}
+            "model": "multi-agent",
+            "strategist": str(results[0]),
+            "critic": str(results[1]),
+            "researcher": str(results[2]),
+            "trend_agent": str(results[3]),
+            "technical": str(results[4]),
+            "judge": str(judge_result),
+        }
