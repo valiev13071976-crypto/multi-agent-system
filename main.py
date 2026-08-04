@@ -10,6 +10,7 @@ from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
 from agents.router import Router
 from agents.grok_agent import GrokAgent
+from agents.context_manager import ContextManager
 
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
