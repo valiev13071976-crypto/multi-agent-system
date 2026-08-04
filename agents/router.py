@@ -7,6 +7,7 @@ from agents.grok_agent import GrokAgent
 from agents.deepseek_agent import DeepSeekAgent
 from agents.judge import Judge
 from agents.peer_review import PeerReview
+from agents.fact_validator import FactValidator
 
 
 class Router:
@@ -33,6 +34,7 @@ class Router:
         self.technical = DeepSeekAgent()
 
         self.peer_review = PeerReview()
+        self.fact_validator = FactValidator()
         self.judge = Judge()
 
     async def run(
@@ -137,6 +139,9 @@ class Router:
         peer_review = await self.peer_review.review(
             expert_answers
         )
+        fact_report = await self.fact_validator.validate(
+    expert_answers
+)
 
         judge_prompt = f"""
 Ты главный судья Panda Multi-Agent.
@@ -162,6 +167,10 @@ class Router:
 
 {peer_review}
 
+ПРОВЕРКА ФАКТОВ:
+
+{fact_report}
+
 Сформируй:
 
 1. Лучшее решение.
@@ -176,15 +185,16 @@ class Router:
         )
 
         return {
-            "model": "multi-agent",
+    "model": "multi-agent",
 
-            "strategist": str(results[0]),
-            "critic": str(results[1]),
-            "researcher": str(results[2]),
-            "trend_agent": str(results[3]),
-            "technical": str(results[4]),
+    "strategist": str(results[0]),
+    "critic": str(results[1]),
+    "researcher": str(results[2]),
+    "trend_agent": str(results[3]),
+    "technical": str(results[4]),
 
-            "peer_review": peer_review,
+    "peer_review": peer_review,
+    "fact_validation": fact_report,
 
-            "judge": judge_result,
-        }
+    "judge": judge_result,
+}
