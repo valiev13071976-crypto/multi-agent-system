@@ -1,26 +1,43 @@
 class Judge:
     """
     Финальный оценщик Panda Multi-Agent.
-
-    Получает ответы экспертов и
-    формирует итоговое решение.
     """
 
     def __init__(self):
         self.name = "Judge"
 
-    async def run(self, prompt: str):
+    async def run(
+        self,
+        experts=None,
+        peer_review=None,
+        fact_report=None,
+        prompt=None,
+    ):
+
+        # Совместимость со старой V1
+        if prompt is None:
+            prompt = ""
+
+            if experts:
+                prompt += f"ЭКСПЕРТЫ:\n{experts}\n\n"
+
+            if peer_review:
+                prompt += f"PEER REVIEW:\n{peer_review}\n\n"
+
+            if fact_report:
+                prompt += f"FACT REPORT:\n{fact_report}\n"
 
         confidence = 90
 
-        if "Exception" in prompt or "Traceback" in prompt:
+        text = str(prompt)
+
+        if "Exception" in text or "Traceback" in text:
             confidence -= 40
 
-        if "ошибка" in prompt.lower():
+        if "ошибка" in text.lower():
             confidence -= 20
 
-        if confidence < 0:
-            confidence = 0
+        confidence = max(confidence, 0)
 
         return {
             "role": self.name,
@@ -28,18 +45,18 @@ class Judge:
             "summary": "Финальный анализ успешно сформирован.",
 
             "best_solution": (
-                "Использовать решение, которое подтверждается "
-                "большинством экспертов и имеет минимальные риски."
+                "Использовать решение, подтвержденное большинством "
+                "экспертов и проверкой фактов."
             ),
 
             "confidence": confidence,
 
-            "analysis": prompt,
+            "analysis": text,
 
             "risks": [
                 "Проверить исходные данные",
                 "Проверить фактические источники",
-                "Проверить ограничения выбранного решения"
+                "Проверить ограничения выбранного решения",
             ],
 
             "action_plan": [
@@ -47,6 +64,6 @@ class Judge:
                 "Проверить реализацию",
                 "Провести тестирование",
                 "Измерить результат",
-                "Скорректировать стратегию при необходимости"
-            ]
+                "Скорректировать стратегию при необходимости",
+            ],
         }
