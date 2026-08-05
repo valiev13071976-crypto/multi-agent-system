@@ -1,6 +1,8 @@
 import os
 from typing import Literal
 
+from dotenv import load_dotenv
+
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
@@ -9,6 +11,7 @@ from agents.router import Router
 from agents.router_v2 import RouterV2
 from agents.context_manager import ContextManager
 
+load_dotenv()
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
 
