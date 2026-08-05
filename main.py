@@ -72,7 +72,7 @@ class AnalyzeResponse(BaseModel):
 
 
 
-USE_V2 = False
+USE_V2 = True
 
 router = RouterV2() if USE_V2 else Router()
 
