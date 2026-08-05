@@ -6,6 +6,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agents.router import Router
+from agents.router_v2 import RouterV2
 from agents.context_manager import ContextManager
 
 
@@ -71,7 +72,9 @@ class AnalyzeResponse(BaseModel):
 
 
 
-router = Router()
+USE_V2 = False
+
+router = RouterV2() if USE_V2 else Router()
 
 context_manager = ContextManager()
 
