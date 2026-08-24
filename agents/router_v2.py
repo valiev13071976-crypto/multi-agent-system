@@ -1,5 +1,3 @@
-import os
-
 from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
@@ -20,6 +18,8 @@ from agents.role_registry import (
     compose_prompt,
     get_role_prompt,
 )
+from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
+from agents.model_router import ModelRouter
 
 
 ALLOWED_MODE_VALUES = (
@@ -33,13 +33,13 @@ ALLOWED_MODE_VALUES = (
 
 ALLOWED_MODES = frozenset(ALLOWED_MODE_VALUES)
 
-PROVIDER_IDS = (
-    "openai",
-    "anthropic",
-    "gemini",
-    "grok",
-    "deepseek",
-)
+PROVIDER_CLASSES = {
+    "openai": OpenAIAgent,
+    "anthropic": AnthropicAgent,
+    "gemini": GeminiAgent,
+    "grok": GrokAgent,
+    "deepseek": DeepSeekAgent,
+}
 
 
 class InvalidModeError(ValueError):
@@ -59,35 +59,25 @@ class NoProvidersAvailableError(Exception):
     pass
 
 
-def _maybe_agent(agent_cls, key_env: str, model_env: str):
-    if os.getenv(key_env) and os.getenv(model_env):
-        return agent_cls()
-    return None
-
-
 class RouterV2:
     """
     Panda Multi-Agent V2
     """
 
     def __init__(self):
+        registry = ProviderRegistry.from_env()
+        self.provider_registry = registry
+        self.model_router = ModelRouter(registry)
 
         expert_manager = ExpertManager(
-            openai=_maybe_agent(
-                OpenAIAgent, "OPENAI_API_KEY", "OPENAI_MODEL"
-            ),
-            anthropic=_maybe_agent(
-                AnthropicAgent, "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"
-            ),
-            gemini=_maybe_agent(
-                GeminiAgent, "GEMINI_API_KEY", "GEMINI_MODEL"
-            ),
-            grok=_maybe_agent(
-                GrokAgent, "XAI_API_KEY", "XAI_MODEL"
-            ),
-            deepseek=_maybe_agent(
-                DeepSeekAgent, "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"
-            ),
+            **{
+                provider_id: (
+                    PROVIDER_CLASSES[provider_id]()
+                    if registry.is_available(provider_id)
+                    else None
+                )
+                for provider_id in PROVIDER_IDS
+            }
         )
 
         self.pipeline = Pipeline(
@@ -99,24 +89,20 @@ class RouterV2:
             supervisor=Supervisor(),
             decision_memory=DecisionMemory(),
         )
+        self.last_decision = None
 
     def provider_status(self) -> dict:
-        manager = self.pipeline.expert_manager
-        return {
-            provider_id: manager.get_provider(provider_id) is not None
-            for provider_id in PROVIDER_IDS
-        }
+        return self.provider_registry.status()
 
     def has_available_providers(self) -> bool:
         return any(self.provider_status().values())
 
-    def _available_agents(self):
+    def _agents_for_decision(self, decision):
         manager = self.pipeline.expert_manager
         selected = []
-        for provider_id in PROVIDER_IDS:
+        for provider_id in decision.provider_ids:
             agent = manager.get_provider(provider_id)
-            if agent is not None:
-                selected.append((provider_id, agent))
+            selected.append((provider_id, agent))
         return selected
 
     async def run(
@@ -136,22 +122,29 @@ class RouterV2:
         resolved_role = DEFAULT_ROLE if role is None else role
         get_role_prompt(resolved_role)
 
-        composed = compose_prompt(resolved_role, prompt)
+        decision = self.model_router.decide(
+            mode=resolved_mode,
+            role_id=resolved_role,
+        )
+        self.last_decision = decision
 
-        if resolved_mode == "both":
-            selected = self._available_agents()
-            if not selected:
-                raise NoProvidersAvailableError()
-            return await self.pipeline.execute(composed, selected=selected)
+        composed = compose_prompt(decision.role_id, prompt)
+        selected = self._agents_for_decision(decision)
 
-        agent = self.pipeline.expert_manager.get_provider(resolved_mode)
-        if agent is None:
-            raise ProviderNotConfiguredError(
-                provider=resolved_mode,
-                mode=resolved_mode,
+        if decision.reason == "explicit_provider":
+            provider_id = decision.provider_ids[0]
+            agent = selected[0][1]
+            if agent is None:
+                raise ProviderNotConfiguredError(
+                    provider=provider_id,
+                    mode=resolved_mode,
+                )
+            return await self.pipeline.execute(
+                composed,
+                selected=[(provider_id, agent)],
             )
 
-        return await self.pipeline.execute(
-            composed,
-            selected=[(resolved_mode, agent)],
-        )
+        if not selected or any(agent is None for _, agent in selected):
+            raise NoProvidersAvailableError()
+
+        return await self.pipeline.execute(composed, selected=selected)
