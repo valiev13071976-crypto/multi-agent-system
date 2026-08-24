@@ -15,6 +15,11 @@ from agents.core.expert_manager import ExpertManager
 from agents.core.response_formatter import ResponseFormatter
 from agents.core.decision_memory import DecisionMemory
 from agents.core.supervisor import Supervisor
+from agents.role_registry import (
+    DEFAULT_ROLE,
+    compose_prompt,
+    get_role_prompt,
+)
 
 
 ALLOWED_MODE_VALUES = (
@@ -28,15 +33,13 @@ ALLOWED_MODE_VALUES = (
 
 ALLOWED_MODES = frozenset(ALLOWED_MODE_VALUES)
 
-PROVIDER_SLOTS = (
-    ("openai", "strategist"),
-    ("anthropic", "critic"),
-    ("gemini", "researcher"),
-    ("grok", "trend_agent"),
-    ("deepseek", "technical"),
+PROVIDER_IDS = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "grok",
+    "deepseek",
 )
-
-PROVIDER_SLOT = dict(PROVIDER_SLOTS)
 
 
 class InvalidModeError(ValueError):
@@ -70,19 +73,19 @@ class RouterV2:
     def __init__(self):
 
         expert_manager = ExpertManager(
-            strategist=_maybe_agent(
+            openai=_maybe_agent(
                 OpenAIAgent, "OPENAI_API_KEY", "OPENAI_MODEL"
             ),
-            critic=_maybe_agent(
+            anthropic=_maybe_agent(
                 AnthropicAgent, "ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"
             ),
-            researcher=_maybe_agent(
+            gemini=_maybe_agent(
                 GeminiAgent, "GEMINI_API_KEY", "GEMINI_MODEL"
             ),
-            trend_agent=_maybe_agent(
+            grok=_maybe_agent(
                 GrokAgent, "XAI_API_KEY", "XAI_MODEL"
             ),
-            technical=_maybe_agent(
+            deepseek=_maybe_agent(
                 DeepSeekAgent, "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"
             ),
         )
@@ -100,11 +103,8 @@ class RouterV2:
     def provider_status(self) -> dict:
         manager = self.pipeline.expert_manager
         return {
-            "openai": manager.strategist is not None,
-            "anthropic": manager.critic is not None,
-            "gemini": manager.researcher is not None,
-            "grok": manager.trend_agent is not None,
-            "deepseek": manager.technical is not None,
+            provider_id: manager.get_provider(provider_id) is not None
+            for provider_id in PROVIDER_IDS
         }
 
     def has_available_providers(self) -> bool:
@@ -113,40 +113,45 @@ class RouterV2:
     def _available_agents(self):
         manager = self.pipeline.expert_manager
         selected = []
-        for _provider, slot in PROVIDER_SLOTS:
-            agent = getattr(manager, slot)
+        for provider_id in PROVIDER_IDS:
+            agent = manager.get_provider(provider_id)
             if agent is not None:
-                selected.append((slot, agent))
+                selected.append((provider_id, agent))
         return selected
 
     async def run(
         self,
         prompt: str,
         mode: str | None = None,
+        role: str | None = None,
     ):
         if mode is None:
-            resolved = "both"
+            resolved_mode = "both"
         else:
-            resolved = mode
+            resolved_mode = mode
 
-        if resolved not in ALLOWED_MODES:
+        if resolved_mode not in ALLOWED_MODES:
             raise InvalidModeError(mode)
 
-        if resolved == "both":
+        resolved_role = DEFAULT_ROLE if role is None else role
+        get_role_prompt(resolved_role)
+
+        composed = compose_prompt(resolved_role, prompt)
+
+        if resolved_mode == "both":
             selected = self._available_agents()
             if not selected:
                 raise NoProvidersAvailableError()
-            return await self.pipeline.execute(prompt, selected=selected)
+            return await self.pipeline.execute(composed, selected=selected)
 
-        slot = PROVIDER_SLOT[resolved]
-        agent = getattr(self.pipeline.expert_manager, slot)
+        agent = self.pipeline.expert_manager.get_provider(resolved_mode)
         if agent is None:
             raise ProviderNotConfiguredError(
-                provider=resolved,
-                mode=resolved,
+                provider=resolved_mode,
+                mode=resolved_mode,
             )
 
         return await self.pipeline.execute(
-            prompt,
-            selected=[(slot, agent)],
+            composed,
+            selected=[(resolved_mode, agent)],
         )

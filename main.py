@@ -15,6 +15,11 @@ from agents.router_v2 import (
     ProviderNotConfiguredError,
     RouterV2,
 )
+from agents.role_registry import (
+    ALLOWED_ROLE_VALUES,
+    DEFAULT_ROLE,
+    InvalidRoleError,
+)
 from agents.context_manager import ContextManager
 
 load_dotenv()
@@ -49,6 +54,14 @@ class AnalyzeRequest(BaseModel):
             "enum": list(ALLOWED_MODE_VALUES),
         },
         description="Какой LLM provider вызывать.",
+    )
+
+    role: str = Field(
+        default=DEFAULT_ROLE,
+        json_schema_extra={
+            "enum": list(ALLOWED_ROLE_VALUES),
+        },
+        description="Какую expert role instruction использовать.",
     )
 
 
@@ -104,6 +117,7 @@ async def analyze(request: AnalyzeRequest):
         result = await router.run(
             prompt=str(prepared_context),
             mode=request.mode,
+            role=request.role,
         )
 
         return AnalyzeResponse(
@@ -126,6 +140,16 @@ async def analyze(request: AnalyzeRequest):
                 "error": "invalid_mode",
                 "message": "Unknown analyze mode.",
                 "mode": e.mode,
+            },
+        )
+
+    except InvalidRoleError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_role",
+                "message": "Unknown analyze role.",
+                "role": e.role,
             },
         )
 

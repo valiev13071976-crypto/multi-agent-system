@@ -10,14 +10,6 @@ from tests.test_smoke import CONTRACT_KEYS, load_app
 
 USER_PROMPT = "Найди поставщика"
 
-PROVIDER_SLOTS = {
-    "openai": "strategist",
-    "anthropic": "critic",
-    "gemini": "researcher",
-    "grok": "trend_agent",
-    "deepseek": "technical",
-}
-
 PROVIDER_ENV = {
     "openai": ("OPENAI_API_KEY", "OPENAI_MODEL"),
     "anthropic": ("ANTHROPIC_API_KEY", "ANTHROPIC_MODEL"),
@@ -39,13 +31,11 @@ def env_for(*providers):
 def mock_provider_runs(manager, *providers):
     mocks = {}
     for provider in providers:
-        slot = PROVIDER_SLOTS[provider]
-        mocks[provider] = AsyncMock(return_value=f"successful {slot} answer")
+        mocks[provider] = AsyncMock(return_value=f"successful {provider} answer")
     stack = ExitStack()
     for provider, mock_run in mocks.items():
-        slot = PROVIDER_SLOTS[provider]
         stack.enter_context(
-            patch.object(getattr(manager, slot), "run", new=mock_run)
+            patch.object(getattr(manager, provider), "run", new=mock_run)
         )
     return stack, mocks
 
@@ -149,9 +139,9 @@ class ModeRoutingTests(unittest.TestCase):
             OPENAI_API_KEY="fake-key",
             OPENAI_MODEL="fake-model",
         )
-        mock_run = AsyncMock(return_value="successful strategist answer")
+        mock_run = AsyncMock(return_value="successful openai answer")
         with patch.object(
-            main_mod.router.pipeline.expert_manager.strategist,
+            main_mod.router.pipeline.expert_manager.openai,
             "run",
             new=mock_run,
         ):

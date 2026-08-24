@@ -50,7 +50,7 @@ class ContextTests(unittest.TestCase):
             return "successful strategist answer"
 
         with patch.object(
-            main_mod.router.pipeline.expert_manager.strategist,
+            main_mod.router.pipeline.expert_manager.openai,
             "run",
             new=fake_run,
         ):
@@ -62,7 +62,9 @@ class ContextTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(captured), 1)
-        self.assertEqual(captured[0], USER_PROMPT)
+        self.assertIn("USER TASK:", captured[0])
+        self.assertIn(USER_PROMPT, captured[0])
+        self.assertIn("РОЛЬ: Стратег.", captured[0])
         self.assertNotIn("{'context':", captured[0])
         self.assertNotIn("{'user_request':", captured[0])
         self.assertNotIn("'cleaned':", captured[0])
@@ -80,7 +82,7 @@ class ContextTests(unittest.TestCase):
         mock_run = AsyncMock(return_value="successful strategist answer")
 
         with patch.object(
-            main_mod.router.pipeline.expert_manager.strategist,
+            main_mod.router.pipeline.expert_manager.openai,
             "run",
             new=mock_run,
         ):
@@ -92,7 +94,8 @@ class ContextTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(mock_run.await_count, 1)
-        mock_run.assert_awaited_once_with(USER_PROMPT)
+        self.assertEqual(mock_run.await_args.args[0].count("USER TASK:"), 1)
+        self.assertIn(USER_PROMPT, mock_run.await_args.args[0])
 
     def test_mode_openai_runs_only_openai(self):
         main_mod = load_app(
@@ -105,8 +108,8 @@ class ContextTests(unittest.TestCase):
         openai_run = AsyncMock(return_value="successful strategist answer")
         anthropic_run = AsyncMock(return_value="successful critic answer")
 
-        with patch.object(manager.strategist, "run", new=openai_run), patch.object(
-            manager.critic,
+        with patch.object(manager.openai, "run", new=openai_run), patch.object(
+            manager.anthropic,
             "run",
             new=anthropic_run,
         ):
@@ -119,7 +122,8 @@ class ContextTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(openai_run.await_count, 1)
         self.assertEqual(anthropic_run.await_count, 0)
-        openai_run.assert_awaited_once_with(USER_PROMPT)
+        self.assertIn(USER_PROMPT, openai_run.await_args.args[0])
+        self.assertIn("USER TASK:", openai_run.await_args.args[0])
 
         payload = response.json()
         for key in CONTRACT_KEYS:

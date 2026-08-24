@@ -48,6 +48,8 @@ def load_app(**overrides):
     env = _provider_env(**overrides)
     with patch.dict(os.environ, env, clear=False):
         with patch("dotenv.load_dotenv", return_value=False):
+            import agents.role_registry as role_registry_mod
+            importlib.reload(role_registry_mod)
             import agents.router_v2 as router_v2_mod
             importlib.reload(router_v2_mod)
             import main as main_mod
@@ -94,7 +96,7 @@ class SmokeTests(unittest.TestCase):
             OPENAI_MODEL="fake-model",
         )
         with patch.object(
-            main_mod.router.pipeline.expert_manager.strategist,
+            main_mod.router.pipeline.expert_manager.openai,
             "run",
             new=AsyncMock(return_value="successful strategist answer"),
         ):
@@ -125,11 +127,11 @@ class SmokeTests(unittest.TestCase):
         )
         manager = main_mod.router.pipeline.expert_manager
         with patch.object(
-            manager.strategist,
+            manager.openai,
             "run",
             new=AsyncMock(side_effect=RuntimeError("openai failed")),
         ), patch.object(
-            manager.critic,
+            manager.anthropic,
             "run",
             new=AsyncMock(return_value="successful critic answer"),
         ):
@@ -147,7 +149,7 @@ class SmokeTests(unittest.TestCase):
         self.assertNotIn("openai failed", payload["analysis"])
         self.assertIn("successful critic answer", payload["analysis"])
         self.assertEqual(
-            manager.last_errors["strategist"]["type"],
+            manager.last_errors["openai"]["type"],
             "RuntimeError",
         )
 

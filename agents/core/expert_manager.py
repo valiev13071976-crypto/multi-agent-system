@@ -1,40 +1,47 @@
 import asyncio
 
 
+PROVIDER_IDS = (
+    "openai",
+    "anthropic",
+    "gemini",
+    "grok",
+    "deepseek",
+)
+
+
 class ExpertManager:
     """
-    Запускает всех экспертов одновременно.
+    Запускает выбранных providers одновременно.
     """
 
     def __init__(
         self,
-        strategist,
-        critic,
-        researcher,
-        trend_agent,
-        technical,
+        openai=None,
+        anthropic=None,
+        gemini=None,
+        grok=None,
+        deepseek=None,
     ):
-        self.strategist = strategist
-        self.critic = critic
-        self.researcher = researcher
-        self.trend_agent = trend_agent
-        self.technical = technical
+        self.openai = openai
+        self.anthropic = anthropic
+        self.gemini = gemini
+        self.grok = grok
+        self.deepseek = deepseek
         self.last_errors = {}
+
+    def get_provider(self, provider_id: str):
+        if provider_id not in PROVIDER_IDS:
+            return None
+        return getattr(self, provider_id)
 
     async def run(self, prompt: str, selected=None):
 
         if selected is None:
-            roles = [
-                ("strategist", self.strategist),
-                ("critic", self.critic),
-                ("researcher", self.researcher),
-                ("trend_agent", self.trend_agent),
-                ("technical", self.technical),
-            ]
             available = [
-                (role, agent)
-                for role, agent in roles
-                if agent is not None
+                (provider_id, self.get_provider(provider_id))
+                for provider_id in PROVIDER_IDS
+                if self.get_provider(provider_id) is not None
             ]
         else:
             available = list(selected)
@@ -51,14 +58,14 @@ class ExpertManager:
 
         experts = {}
 
-        for (role, _), result in zip(available, results):
+        for (provider_id, _), result in zip(available, results):
             if isinstance(result, BaseException):
-                self.last_errors[role] = {
+                self.last_errors[provider_id] = {
                     "type": type(result).__name__,
                     "message": str(result),
                 }
                 continue
 
-            experts[role] = str(result)
+            experts[provider_id] = str(result)
 
         return experts
