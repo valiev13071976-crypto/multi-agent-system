@@ -19,27 +19,46 @@ class ExpertManager:
         self.researcher = researcher
         self.trend_agent = trend_agent
         self.technical = technical
+        self.last_errors = {}
 
+    async def run(self, prompt: str, selected=None):
 
-    async def run(self, prompt: str):
+        if selected is None:
+            roles = [
+                ("strategist", self.strategist),
+                ("critic", self.critic),
+                ("researcher", self.researcher),
+                ("trend_agent", self.trend_agent),
+                ("technical", self.technical),
+            ]
+            available = [
+                (role, agent)
+                for role, agent in roles
+                if agent is not None
+            ]
+        else:
+            available = list(selected)
 
-        tasks = [
-            self.strategist.run(prompt),
-            self.critic.run(prompt),
-            self.researcher.run(prompt),
-            self.trend_agent.run(prompt),
-            self.technical.run(prompt),
-        ]
+        self.last_errors = {}
+
+        if not available:
+            return {}
 
         results = await asyncio.gather(
-            *tasks,
+            *[agent.run(prompt) for _, agent in available],
             return_exceptions=True,
         )
 
-        return {
-            "strategist": str(results[0]),
-            "critic": str(results[1]),
-            "researcher": str(results[2]),
-            "trend_agent": str(results[3]),
-            "technical": str(results[4]),
-        }
+        experts = {}
+
+        for (role, _), result in zip(available, results):
+            if isinstance(result, BaseException):
+                self.last_errors[role] = {
+                    "type": type(result).__name__,
+                    "message": str(result),
+                }
+                continue
+
+            experts[role] = str(result)
+
+        return experts

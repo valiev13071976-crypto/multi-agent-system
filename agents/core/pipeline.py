@@ -21,15 +21,14 @@ class Pipeline:
         self.supervisor = supervisor
         self.decision_memory = decision_memory
 
-    async def execute(self, prompt: str):
+    async def execute(self, prompt: str, selected=None):
 
-        experts = await self.expert_manager.run(prompt)
+        experts = await self.expert_manager.run(prompt, selected=selected)
 
         peer = await self.peer_review.review(experts)
 
         facts = await self.fact_validator.validate(
             experts,
-            peer,
         )
 
         decision = await self.judge.run(

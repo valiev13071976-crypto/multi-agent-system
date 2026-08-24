@@ -18,20 +18,20 @@ class ContextManager:
     async def prepare(self, user_request: str, extra_context=None):
         """
         Подготавливает контекст перед отправкой агентам.
+
+        Возвращает исходный user_request как чистый str,
+        обрезанный до max_chars. extra_context принимается,
+        но в возвращаемый текст не смешивается.
         """
 
-        context = {
-            "user_request": user_request,
-            "additional_context": extra_context or {},
-            "cleaned": True
-        }
+        text = user_request if isinstance(user_request, str) else str(user_request)
 
-        context = self.remove_empty(context)
-        context = self.limit_size(context)
+        if len(text) > self.max_chars:
+            text = text[:self.max_chars]
 
         logging.info("Context prepared successfully")
 
-        return context
+        return text
 
     def remove_empty(self, data):
         """

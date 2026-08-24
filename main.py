@@ -8,7 +8,13 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agents.router import Router
-from agents.router_v2 import RouterV2
+from agents.router_v2 import (
+    ALLOWED_MODE_VALUES,
+    InvalidModeError,
+    NoProvidersAvailableError,
+    ProviderNotConfiguredError,
+    RouterV2,
+)
 from agents.context_manager import ContextManager
 
 load_dotenv()
@@ -37,41 +43,28 @@ class AnalyzeRequest(BaseModel):
         description="Задача или вопрос для моделей.",
     )
 
-    mode: Literal[
-        "openai",
-        "anthropic",
-        "gemini",
-        "grok",
-        "deepseek",
-        "both",
-    ] = "both"
+    mode: str = Field(
+        default="both",
+        json_schema_extra={
+            "enum": list(ALLOWED_MODE_VALUES),
+        },
+        description="Какой LLM provider вызывать.",
+    )
 
 
 class HealthResponse(BaseModel):
     status: Literal["ok"]
-    openai_configured: bool
-    anthropic_configured: bool
+    providers: dict[str, bool]
 
 
 class AnalyzeResponse(BaseModel):
-    mode: str
-
-    strategist: str | None = None
-    critic: str | None = None
-    researcher: str | None = None
-    trend_agent: str | None = None
-    technical: str | None = None
-
-    peer_review: dict | None = None
-    judge: dict | None = None
-
-    openai: str | None = None
-    anthropic: str | None = None
-    gemini: str | None = None
-    grok: str | None = None
-    deepseek: str | None = None
-
-    errors: dict | None = None
+    summary: str
+    best_solution: str
+    analysis: str
+    risks: list
+    action_plan: list
+    confidence: int | float
+    role: str
 
 
 
@@ -91,12 +84,7 @@ async def health():
 
     return HealthResponse(
         status="ok",
-        openai_configured=bool(
-            os.getenv("OPENAI_API_KEY")
-        ),
-        anthropic_configured=bool(
-            os.getenv("ANTHROPIC_API_KEY")
-        ),
+        providers=router.provider_status(),
     )
 
 
@@ -118,28 +106,48 @@ async def analyze(request: AnalyzeRequest):
             mode=request.mode,
         )
 
-
         return AnalyzeResponse(
-    mode=result.get("model", request.mode),
+            summary=result.get("summary", ""),
+            best_solution=result.get("best_solution", ""),
+            analysis=result.get("analysis", ""),
+            risks=result.get("risks", []),
+            action_plan=result.get("action_plan", []),
+            confidence=result.get("confidence", 0),
+            role=result.get("role", "Judge"),
+        )
 
-    strategist=result.get("strategist"),
-    critic=result.get("critic"),
-    researcher=result.get("researcher"),
-    trend_agent=result.get("trend_agent"),
-    technical=result.get("technical"),
+    except HTTPException:
+        raise
 
-    peer_review=result.get("peer_review"),
-    judge=result.get("judge"),
+    except InvalidModeError as e:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "invalid_mode",
+                "message": "Unknown analyze mode.",
+                "mode": e.mode,
+            },
+        )
 
-    openai=result.get("openai"),
-    anthropic=result.get("anthropic"),
-    gemini=result.get("gemini"),
-    grok=result.get("grok"),
-    deepseek=result.get("deepseek"),
+    except ProviderNotConfiguredError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "provider_not_configured",
+                "message": "The selected LLM provider is not configured.",
+                "mode": e.mode,
+                "provider": e.provider,
+            },
+        )
 
-    errors=result.get("errors"),
-)
-
+    except NoProvidersAvailableError:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "no_providers_available",
+                "message": "No LLM providers are configured.",
+            },
+        )
 
     except Exception as e:
 
