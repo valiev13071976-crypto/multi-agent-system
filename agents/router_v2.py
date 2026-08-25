@@ -31,6 +31,7 @@ ALLOWED_MODE_VALUES = (
     "grok",
     "deepseek",
     "both",
+    "auto",
 )
 
 ALLOWED_MODES = frozenset(ALLOWED_MODE_VALUES)

@@ -7,8 +7,10 @@ from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 
 REASON_EXPLICIT_PROVIDER = "explicit_provider"
 REASON_ALL_AVAILABLE_PROVIDERS = "all_available_providers"
+REASON_AUTO_PROVIDER = "auto_provider"
 
 EXPLICIT_MODES = frozenset(PROVIDER_IDS)
+MODE_AUTO = "auto"
 
 
 @dataclass(frozen=True)
@@ -44,6 +46,26 @@ class ModelRouter:
                 provider_ids=provider_ids,
                 models=models,
                 reason=REASON_ALL_AVAILABLE_PROVIDERS,
+            )
+
+        if mode == MODE_AUTO:
+            selected = None
+            for provider_id in self.registry.auto_provider_order:
+                if self.registry.is_available(provider_id):
+                    selected = provider_id
+                    break
+            if selected is None:
+                return RoutingDecision(
+                    role_id=role_id,
+                    provider_ids=(),
+                    models={},
+                    reason=REASON_AUTO_PROVIDER,
+                )
+            return RoutingDecision(
+                role_id=role_id,
+                provider_ids=(selected,),
+                models={selected: self.registry.model(selected)},
+                reason=REASON_AUTO_PROVIDER,
             )
 
         provider_ids = (mode,)

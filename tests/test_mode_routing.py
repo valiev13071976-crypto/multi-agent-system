@@ -20,7 +20,9 @@ PROVIDER_ENV = {
 
 
 def env_for(*providers):
-    overrides = {}
+    overrides = {
+        "AUTO_PROVIDER_ORDER": "",
+    }
     for provider in providers:
         key_env, model_env = PROVIDER_ENV[provider]
         overrides[key_env] = "fake-key"
