@@ -187,6 +187,7 @@ class RouterV2:
                 composed,
                 selected=[(provider_id, agent)],
                 task_id=self.last_task_id,
+                category=routing_category,
             )
 
         if not selected or any(agent is None for _, agent in selected):
@@ -196,4 +197,5 @@ class RouterV2:
             composed,
             selected=selected,
             task_id=self.last_task_id,
+            category=routing_category,
         )

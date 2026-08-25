@@ -1,47 +1,51 @@
+import re
+
+from agents.validators.models import STATUS_UNKNOWN, ValidationResult
+from security.redaction import redact
+
+
+SOURCE_URL_RE = re.compile(r"https?://|www\.", re.I)
+SOURCE_MARKER_RE = re.compile(r"\b(?:source|источник)\b", re.I)
+
+
 class FactValidator:
     """
-    Проверка фактов Panda Multi-Agent.
-
-    Проверяет:
-    - противоречия;
-    - отсутствие данных;
-    - потенциально сомнительные утверждения.
+    P3A factual validation without external evidence.
+    Does not claim facts are verified.
     """
 
     def __init__(self):
         self.name = "FactValidator"
 
-    async def validate(self, expert_answers: dict):
+    def _sources_present(self, experts: dict) -> bool:
+        for answer in (experts or {}).values():
+            text = str(answer or "")
+            if SOURCE_URL_RE.search(text) or SOURCE_MARKER_RE.search(text):
+                return True
+        return False
 
-        report = {
-            "verified": [],
-            "warnings": [],
-            "unverified": [],
-            "confidence": 100,
-        }
+    def _claims_present(self, experts: dict) -> bool:
+        for answer in (experts or {}).values():
+            if len(str(answer or "").strip()) >= 8:
+                return True
+        return False
 
-        for role, answer in expert_answers.items():
-
-            text = str(answer).lower()
-
-            if "не знаю" in text:
-                report["warnings"].append(
-                    f"{role}: указал недостаток данных"
-                )
-                report["confidence"] -= 10
-
-            if "возможно" in text:
-                report["warnings"].append(
-                    f"{role}: использует неопределённость"
-                )
-                report["confidence"] -= 5
-
-            if "источник" in text:
-                report["verified"].append(
-                    f"{role}: указал источник"
-                )
-
-        if report["confidence"] < 0:
-            report["confidence"] = 0
-
-        return report
+    async def validate(self, expert_answers: dict, *, category: str | None = None):
+        claims_present = self._claims_present(expert_answers)
+        sources_present = self._sources_present(expert_answers)
+        issues = ["no_external_evidence"]
+        if sources_present:
+            issues.append("sources_mentioned_unverified")
+        return ValidationResult(
+            validator_id="fact",
+            status=STATUS_UNKNOWN,
+            score=0.0,
+            issues=tuple(redact(item) for item in issues),
+            evidence={
+                "claims_present": claims_present,
+                "sources_present": sources_present,
+                "evidence_available": False,
+                "category": category or "",
+            },
+            reason="no_external_evidence",
+        )
