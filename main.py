@@ -24,6 +24,7 @@ from agents.role_registry import (
 )
 from agents.context_manager import ContextManager
 from security.redaction import redact
+import uuid
 
 load_dotenv()
 
@@ -113,15 +114,17 @@ async def analyze(request: AnalyzeRequest):
 
     try:
 
-        prepared_context = await context_manager.prepare(
-            request.prompt
+        task_id = str(uuid.uuid4())
+        result = await router.workflow_engine.execute(
+            request.prompt,
+            request.mode,
+            request.role,
+            context_manager=context_manager,
+            run_router=router.run,
+            task_id=task_id,
         )
-
-        result = await router.run(
-            prompt=str(prepared_context),
-            mode=request.mode,
-            role=request.role,
-        )
+        router.last_task_id = task_id
+        router.last_workflow_id = router.workflow_engine.last_workflow_id
 
         return AnalyzeResponse(
             summary=result.get("summary", ""),

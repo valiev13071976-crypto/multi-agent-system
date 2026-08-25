@@ -29,6 +29,7 @@ from config.pricing import load_budget_limits, load_price_quotes
 from finops.service import FinOpsService
 from tools.gateway import ToolGateway
 from tools.search.null_provider import NullSearchProvider
+from workflow.engine import WorkflowEngine
 
 
 ALLOWED_MODE_VALUES = (
@@ -115,7 +116,9 @@ class RouterV2:
         self.last_classification = None
         self.last_route_context = None
         self.last_task_id = None
+        self.last_workflow_id = None
         self.task_classifier = TaskClassifier()
+        self.workflow_engine = WorkflowEngine()
 
     def provider_status(self) -> dict:
         return self.provider_registry.status()
@@ -136,70 +139,100 @@ class RouterV2:
         prompt: str,
         mode: str | None = None,
         role: str | None = None,
+        task_id: str | None = None,
+        lifecycle=None,
     ):
         if mode is None:
             resolved_mode = "both"
         else:
             resolved_mode = mode
 
-        if resolved_mode not in ALLOWED_MODES:
-            raise InvalidModeError(mode)
+        started_route = False
+        try:
+            if lifecycle is not None:
+                started_route = await lifecycle.begin("route")
 
-        self.last_task_id = str(uuid.uuid4())
+            if resolved_mode not in ALLOWED_MODES:
+                raise InvalidModeError(mode)
 
-        requested_role = DEFAULT_ROLE if role is None else role
-        self.last_classification = None
-        self.last_route_context = None
+            self.last_task_id = task_id or self.last_task_id or str(uuid.uuid4())
+            if lifecycle is not None:
+                self.last_workflow_id = lifecycle.workflow_id
 
-        if requested_role == ROLE_AUTO:
-            self.last_classification = self.task_classifier.classify(prompt)
-            resolved_role = self.last_classification.role_id
-            routing_category = self.last_classification.category
-            category_source = "classifier"
-        else:
-            resolved_role = requested_role
-            routing_category = routing_category_for_role(resolved_role)
-            category_source = "role_mapping"
+            requested_role = DEFAULT_ROLE if role is None else role
+            self.last_classification = None
+            self.last_route_context = None
 
-        get_role_prompt(resolved_role)
+            if requested_role == ROLE_AUTO:
+                self.last_classification = self.task_classifier.classify(prompt)
+                resolved_role = self.last_classification.role_id
+                routing_category = self.last_classification.category
+                category_source = "classifier"
+            else:
+                resolved_role = requested_role
+                routing_category = routing_category_for_role(resolved_role)
+                category_source = "role_mapping"
 
-        self.last_route_context = {
-            "category": routing_category,
-            "source": category_source,
-            "policy": self.provider_registry.auto_routing_policy,
-        }
+            get_role_prompt(resolved_role)
 
-        decision = self.model_router.decide(
-            mode=resolved_mode,
-            role_id=resolved_role,
-            category=routing_category,
-        )
-        self.last_decision = decision
+            self.last_route_context = {
+                "category": routing_category,
+                "source": category_source,
+                "policy": self.provider_registry.auto_routing_policy,
+            }
 
-        composed = compose_prompt(decision.role_id, prompt)
-        selected = self._agents_for_decision(decision)
-
-        if decision.reason == "explicit_provider":
-            provider_id = decision.provider_ids[0]
-            agent = selected[0][1]
-            if agent is None:
-                raise ProviderNotConfiguredError(
-                    provider=provider_id,
-                    mode=resolved_mode,
-                )
-            return await self.pipeline.execute(
-                composed,
-                selected=[(provider_id, agent)],
-                task_id=self.last_task_id,
+            decision = self.model_router.decide(
+                mode=resolved_mode,
+                role_id=resolved_role,
                 category=routing_category,
             )
+            self.last_decision = decision
 
-        if not selected or any(agent is None for _, agent in selected):
-            raise NoProvidersAvailableError()
+            composed = compose_prompt(decision.role_id, prompt)
+            selected = self._agents_for_decision(decision)
 
-        return await self.pipeline.execute(
-            composed,
-            selected=selected,
-            task_id=self.last_task_id,
-            category=routing_category,
-        )
+            if lifecycle is not None and started_route:
+                await lifecycle.end(
+                    "route",
+                    metadata={
+                        "reason": decision.reason,
+                        "provider_count": len(decision.provider_ids),
+                    },
+                )
+
+            if decision.reason == "explicit_provider":
+                provider_id = decision.provider_ids[0]
+                agent = selected[0][1]
+                if agent is None:
+                    raise ProviderNotConfiguredError(
+                        provider=provider_id,
+                        mode=resolved_mode,
+                    )
+                return await self.pipeline.execute(
+                    composed,
+                    selected=[(provider_id, agent)],
+                    task_id=self.last_task_id,
+                    category=routing_category,
+                    lifecycle=lifecycle,
+                )
+
+            if not selected or any(agent is None for _, agent in selected):
+                raise NoProvidersAvailableError()
+
+            return await self.pipeline.execute(
+                composed,
+                selected=selected,
+                task_id=self.last_task_id,
+                category=routing_category,
+                lifecycle=lifecycle,
+            )
+        except Exception as exc:
+            if lifecycle is not None:
+                from workflow.engine import error_code_for
+                from workflow.models import STEP_COMPLETED, STEP_ROUTE
+
+                state = lifecycle.manager.get(lifecycle.workflow_id)
+                route = state.step(STEP_ROUTE)
+                if route is None or route.status != STEP_COMPLETED:
+                    await lifecycle.fail(STEP_ROUTE, error_code_for(exc))
+            raise
