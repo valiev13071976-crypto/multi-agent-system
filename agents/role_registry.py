@@ -12,6 +12,10 @@ DEFAULT_ROLE = "strategist"
 
 USER_TASK_MARKER = "USER TASK:"
 
+# Bump when role registry mapping or prompt wiring changes.
+ROLE_REGISTRY_VERSION = "1.0.0"
+PROMPT_VERSION = "1.0.0"
+
 ALLOWED_ROLE_VALUES = (
     "strategist",
     "critic",
@@ -27,6 +31,15 @@ ROLE_PROMPTS = {
     "trend_agent": TREND_AGENT_PROMPT,
     "technical": TECHNICAL_PROMPT,
 }
+
+
+def role_version_metadata(role_id: str) -> dict:
+    """Internal metadata only — not part of public /api/analyze contract."""
+    return {
+        "role_id": role_id,
+        "role_version": ROLE_REGISTRY_VERSION,
+        "prompt_version": PROMPT_VERSION,
+    }
 
 
 class InvalidRoleError(ValueError):

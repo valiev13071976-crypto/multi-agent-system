@@ -10,6 +10,7 @@ from agents.validators.models import (
 
 
 VALIDATOR_ID = "consistency"
+VALIDATOR_VERSION = "1.0.0"
 
 NEAR_EXACT_RATIO = 0.95
 

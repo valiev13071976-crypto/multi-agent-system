@@ -61,6 +61,9 @@ AUTO_ROUTING_POLICIES = (
 )
 DEFAULT_AUTO_ROUTING_POLICY = POLICY_PRIORITY
 
+# Bump when ranking / selection semantics change (evals pin this).
+ROUTING_POLICY_VERSION = "1.0.0"
+
 QUALITY_RANK = {
     "premium": 2,
     "standard": 1,

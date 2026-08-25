@@ -8,14 +8,20 @@ from agents.validators.models import (
 from security.redaction import redact
 
 
+JUDGE_VERSION = "1.0.0"
+
+
 class Judge:
     """
     Deterministic aggregator of expert answers and validator results.
     """
 
+    judge_version = JUDGE_VERSION
+
     def __init__(self, observability=None):
         self.name = "Judge"
         self.observability = observability
+        self.judge_version = JUDGE_VERSION
 
     def _legacy_run(self, prompt: str) -> dict:
         confidence = 90

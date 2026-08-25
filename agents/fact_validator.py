@@ -24,16 +24,22 @@ SOURCE_URL_RE = re.compile(r"https?://|www\.", re.I)
 SOURCE_MARKER_RE = re.compile(r"\b(?:source|источник)\b", re.I)
 SKIP_EXTERNAL_CATEGORIES = frozenset({"strategy", "critique", "technical"})
 
+VALIDATOR_ID = "fact"
+VALIDATOR_VERSION = "1.0.0"
+
 
 class FactValidator:
     """
     Factual validation. External search goes only through ToolGateway.
     """
 
+    validator_version = VALIDATOR_VERSION
+
     def __init__(self, gateway=None, observability=None):
         self.name = "FactValidator"
         self.gateway = gateway
         self.observability = observability
+        self.validator_version = VALIDATOR_VERSION
 
     def _sources_present(self, experts: dict) -> bool:
         for answer in (experts or {}).values():

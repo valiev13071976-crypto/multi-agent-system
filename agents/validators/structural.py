@@ -8,6 +8,7 @@ from agents.validators.models import (
 
 
 VALIDATOR_ID = "structural"
+VALIDATOR_VERSION = "1.0.0"
 
 PLACEHOLDER_RE = re.compile(
     r"^(?:n/?a|none|null|todo|tbd|placeholder|\.{3,}|…|\[(?:empty|placeholder)\])$",

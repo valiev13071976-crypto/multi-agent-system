@@ -14,6 +14,7 @@ from agents.model_profile import (
     POLICY_PRIORITY,
     POLICY_QUALITY,
     QUALITY_RANK,
+    ROUTING_POLICY_VERSION,
     balanced_score,
     routing_category_for_role,
 )
@@ -37,10 +38,16 @@ class RoutingDecision:
     provider_ids: tuple[str, ...]
     models: Mapping[str, str]
     reason: str
+    routing_policy_version: str = ROUTING_POLICY_VERSION
 
     def __post_init__(self):
         object.__setattr__(self, "provider_ids", tuple(self.provider_ids))
         object.__setattr__(self, "models", MappingProxyType(dict(self.models)))
+        object.__setattr__(
+            self,
+            "routing_policy_version",
+            self.routing_policy_version or ROUTING_POLICY_VERSION,
+        )
 
 
 class NoCapableProviderError(Exception):

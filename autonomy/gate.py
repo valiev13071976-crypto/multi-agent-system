@@ -21,7 +21,7 @@ from autonomy.models import (
     SIDE_EFFECT_TYPES,
     utc_now,
 )
-from autonomy.policy import ApprovalPolicy
+from autonomy.policy import POLICY_VERSION, ApprovalPolicy
 from autonomy.risk import ActionRiskClassifier
 from autonomy.store import (
     InMemoryCapabilityTokenStore,
@@ -224,6 +224,9 @@ class AutonomyGate:
                 "autonomy_level": level,
                 "token_claims": public_token,
                 "approval_status": getattr(approval, "status", None),
+                "policy_version": getattr(
+                    self.policy, "policy_version", POLICY_VERSION
+                ),
             },
         )
         blob = str(dict(decision.metadata))

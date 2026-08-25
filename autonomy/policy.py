@@ -49,9 +49,14 @@ NEVER_AUTO_ALLOW_TYPES = frozenset(
     }
 )
 
+# Explicit policy identity for evals / observability (bump when decide() semantics change).
+POLICY_VERSION = "1.0.0"
+
 
 class ApprovalPolicy:
     """Deterministic autonomy policy. No LLM. Deny-by-default."""
+
+    policy_version = POLICY_VERSION
 
     def decide(self, ctx: dict) -> tuple[str, str]:
         action_type = ctx["action_type"]
