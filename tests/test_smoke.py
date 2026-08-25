@@ -6,6 +6,18 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 
+GITHUB_WRITE_ENV_KEYS = (
+    "GITHUB_WRITE_ADAPTER_ENABLED",
+    "GITHUB_WRITE_DRY_RUN",
+    "GITHUB_WRITE_KILL_SWITCH",
+    "GITHUB_WRITE_PROBE_ON_STARTUP",
+    "GITHUB_WRITE_REQUIRE_PROBE_SUCCESS",
+    "GITHUB_WRITE_READINESS_TTL_SECONDS",
+    "GITHUB_WRITE_TIMEOUT_SECONDS",
+    "GITHUB_ALLOWED_REPOSITORIES",
+    "GITHUB_WRITE_TOKEN",
+)
+
 PROVIDER_ENV_KEYS = (
     "OPENAI_API_KEY",
     "OPENAI_MODEL",
@@ -106,6 +118,7 @@ HEALTH_PROVIDERS = (
 
 def _provider_env(**overrides):
     env = {key: "" for key in PROVIDER_ENV_KEYS}
+    env.update({key: "" for key in GITHUB_WRITE_ENV_KEYS})
     env.update(overrides)
     return env
 

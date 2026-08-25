@@ -21,9 +21,25 @@ class SideEffectRuntime:
     activation: GitHubWriteActivationService
     audit: SideEffectAuditLog
     composition_error: str | None = None
+    startup_probe_ran: bool = False
 
     def health(self):
         return self.activation.health()
+
+    async def start(self):
+        """Optional read-only readiness probe. Never mutates. Never dry-runs an action."""
+
+        if self.composition_error or not self.config.enabled:
+            return self.activation.readiness
+        if not self.config.probe_on_startup:
+            return self.activation.readiness
+        try:
+            result = await self.activation.refresh()
+        except Exception:
+            self.startup_probe_ran = True
+            return self.activation.readiness
+        self.startup_probe_ran = True
+        return result
 
 
 def compose_side_effect_runtime(

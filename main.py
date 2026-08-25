@@ -1,4 +1,5 @@
 import os
+from contextlib import asynccontextmanager
 from typing import Literal
 
 from dotenv import load_dotenv
@@ -31,19 +32,6 @@ import uuid
 load_dotenv()
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
-
-
-app = FastAPI(
-    title="Panda Multi-Agent",
-    description="API мультиагентной системы Panda.",
-    version="1.0.0",
-    servers=[
-        {
-            "url": PUBLIC_URL,
-            "description": "Railway production server",
-        }
-    ],
-)
 
 
 class AnalyzeRequest(BaseModel):
@@ -97,6 +85,26 @@ side_effect_runtime = compose_side_effect_runtime(
     secrets=EnvSecretStore(), isolate_errors=True
 )
 
+
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    """Read-only repo probe if GITHUB_WRITE_PROBE_ON_STARTUP=true. No writes."""
+    await side_effect_runtime.start()
+    yield
+
+
+app = FastAPI(
+    title="Panda Multi-Agent",
+    description="API мультиагентной системы Panda.",
+    version="1.0.0",
+    servers=[
+        {
+            "url": PUBLIC_URL,
+            "description": "Railway production server",
+        }
+    ],
+    lifespan=lifespan,
+)
 
 
 @app.get(
