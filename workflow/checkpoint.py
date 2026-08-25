@@ -5,6 +5,8 @@ APPROVAL_CHECKPOINT_KEYS = (
     "decision_id",
     "required_approval",
     "approval_id",
+    "action_fingerprint",
+    "approval_class",
 )
 
 

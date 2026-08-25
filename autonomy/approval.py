@@ -61,8 +61,10 @@ class ApprovalService:
             current,
             status=status,
             approved_by=approved_by,
+            resolved_by=approved_by,
             resolved_at=utc_now(),
             reason_code=reason_code,
+            version=current.version + 1,
         )
         self.store.put(updated)
         return updated

@@ -20,10 +20,25 @@ class ApprovalStore:
     def put(self, record: ApprovalRecord) -> None:
         raise NotImplementedError
 
+    def create(self, record: ApprovalRecord) -> None:
+        self.put(record)
+
+    def save(self, record: ApprovalRecord) -> None:
+        self.put(record)
+
     def get(self, approval_id: str) -> ApprovalRecord | None:
         raise NotImplementedError
 
     def list_for_action(self, action_id: str) -> tuple[ApprovalRecord, ...]:
+        raise NotImplementedError
+
+    def find_pending_by_action(self, action_id: str) -> ApprovalRecord | None:
+        raise NotImplementedError
+
+    def list_pending(self) -> tuple[ApprovalRecord, ...]:
+        raise NotImplementedError
+
+    def list_by_workflow(self, workflow_id: str) -> tuple[ApprovalRecord, ...]:
         raise NotImplementedError
 
 
@@ -66,6 +81,26 @@ class InMemoryApprovalStore(ApprovalStore):
     def list_for_action(self, action_id: str) -> tuple[ApprovalRecord, ...]:
         return tuple(
             item for item in self._items.values() if item.action_id == action_id
+        )
+
+    def find_pending_by_action(self, action_id: str) -> ApprovalRecord | None:
+        from autonomy.models import APPROVAL_PENDING
+
+        for item in self._items.values():
+            if item.action_id == action_id and item.status == APPROVAL_PENDING:
+                return item
+        return None
+
+    def list_pending(self) -> tuple[ApprovalRecord, ...]:
+        from autonomy.models import APPROVAL_PENDING
+
+        return tuple(
+            item for item in self._items.values() if item.status == APPROVAL_PENDING
+        )
+
+    def list_by_workflow(self, workflow_id: str) -> tuple[ApprovalRecord, ...]:
+        return tuple(
+            item for item in self._items.values() if item.workflow_id == workflow_id
         )
 
 

@@ -64,13 +64,16 @@ class WorkflowEngine:
         protected_steps: frozenset[str] = frozenset(),
         step_names=ANALYZE_STEPS,
         autonomy_gate: AutonomyGate | None = None,
+        hitl_service=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
         self.autonomy_gate = autonomy_gate
+        self.hitl_service = hitl_service
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
+        self.last_permit_id = None
 
     def create(self, task_id: str) -> str:
         state = self.state_manager.create(task_id=task_id)
@@ -99,30 +102,32 @@ class WorkflowEngine:
             self.autonomy_gate = AutonomyGate()
         return self.autonomy_gate
 
+    def _hitl(self):
+        from hitl.service import HITLService
+
+        if self.hitl_service is None:
+            gate = self._gate()
+            self.hitl_service = HITLService(
+                gate=gate,
+                state_manager=self.state_manager,
+                store=gate.approvals.store,
+            )
+        return self.hitl_service
+
     def evaluate_action(self, action, **kwargs):
-        """Policy lives in AutonomyGate. Engine only applies workflow effects."""
+        """Policy lives in AutonomyGate. HITL owns approval lifecycle."""
+        requested_by = kwargs.pop("requested_by", "system")
+        now = kwargs.get("now")
         gate = self._gate()
         decision = gate.evaluate(action, **kwargs)
         if decision.decision == DECISION_REQUIRE_APPROVAL:
-            state = self.state_manager.get(action.workflow_id)
-            if state.status != STATUS_WAITING_APPROVAL:
-                self.state_manager.wait_for_approval(action.workflow_id)
-            record = gate.approvals.create_pending(
-                workflow_id=action.workflow_id,
-                task_id=action.task_id,
-                action_id=action.action_id,
-                decision_id=decision.decision_id,
+            record = self._hitl().request_approval(
+                action,
+                decision,
+                requested_by=requested_by,
+                now=now,
             )
             self.last_approval_id = record.approval_id
-            self.state_manager.checkpoint(
-                action.workflow_id,
-                extra_payload={
-                    "action_id": action.action_id,
-                    "decision_id": decision.decision_id,
-                    "required_approval": True,
-                    "approval_id": record.approval_id,
-                },
-            )
         return decision
 
     def resolve_action_approval(
@@ -190,14 +195,38 @@ class WorkflowEngine:
                 manager.fail_step(workflow_id, current, error_code_for(exc))
             raise
 
-    async def resume(self, workflow_id: str, handlers: dict | None = None):
+    async def resume(
+        self,
+        workflow_id: str,
+        handlers: dict | None = None,
+        *,
+        execution_permit=None,
+        action=None,
+    ):
         state = self.state_manager.get(workflow_id)
         if state.status in TERMINAL_STATUSES:
             return {"ran": False, "reason": "terminal", "status": state.status}
+        if execution_permit is not None:
+            self._hitl().permits.validate(
+                execution_permit,
+                action=action,
+            )
+            current = self.state_manager.get(workflow_id)
+            if current.status == STATUS_WAITING_APPROVAL:
+                self.state_manager.approve(workflow_id)
+            self.last_permit_id = execution_permit.permit_id
+            return {
+                "ran": False,
+                "reason": "ready_for_execution",
+                "ready_for_execution": True,
+                "permit_id": execution_permit.permit_id,
+                "status": self.state_manager.get(workflow_id).status,
+            }
         if state.status == STATUS_WAITING_APPROVAL:
             return {
                 "ran": False,
                 "reason": "waiting_approval",
+                "ready_for_execution": False,
                 "status": state.status,
             }
         handlers = handlers or {}

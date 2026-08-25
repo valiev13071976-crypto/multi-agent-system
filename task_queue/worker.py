@@ -3,6 +3,13 @@ from dataclasses import dataclass
 
 from autonomy.errors import AutonomyDeniedError
 from autonomy.gate import queue_side_effect_permitted
+from hitl.errors import (
+    ExecutionPermitConsumedError,
+    ExecutionPermitExpiredError,
+    ExecutionPermitMismatchError,
+    ExecutionPermitRevokedError,
+)
+from hitl.permit import PermitService
 from task_queue.errors import QueueTimeoutError
 from task_queue.models import STATUS_CANCELLED, QueueTask
 from task_queue.queue import TaskQueue
@@ -72,6 +79,19 @@ class TaskWorker:
     def require_autonomy_allow(self, decision) -> None:
         if not queue_side_effect_permitted(decision):
             raise AutonomyDeniedError("autonomy_not_allow")
+
+    def require_execution_permit(self, permit, action=None, *, now=None) -> None:
+        if permit is None:
+            raise AutonomyDeniedError("execution_permit_required")
+        try:
+            PermitService().validate(permit, action=action, now=now)
+        except (
+            ExecutionPermitExpiredError,
+            ExecutionPermitConsumedError,
+            ExecutionPermitRevokedError,
+            ExecutionPermitMismatchError,
+        ) as exc:
+            raise AutonomyDeniedError(str(exc)) from exc
 
     async def run_once(self) -> QueueTask | None:
         task = self.queue.dequeue()

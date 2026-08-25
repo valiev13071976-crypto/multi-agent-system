@@ -195,10 +195,22 @@ class ApprovalRecord:
     created_at: datetime
     resolved_at: datetime | None = None
     reason_code: str | None = None
+    approval_class: str = "standard"
+    requested_by: str = ""
+    resolved_by: str | None = None
+    requested_at: datetime | None = None
+    expires_at: datetime | None = None
+    version: int = 1
+    action_fingerprint: str = ""
+    required_approvals: int = 1
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.status not in APPROVAL_STATUSES:
             raise ValueError(f"Invalid approval status: {self.status!r}")
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+        if self.requested_at is None:
+            object.__setattr__(self, "requested_at", self.created_at)
 
 
 @dataclass(frozen=True)
