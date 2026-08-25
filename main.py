@@ -22,6 +22,7 @@ from agents.role_registry import (
     InvalidRoleError,
 )
 from agents.context_manager import ContextManager
+from security.redaction import redact
 
 load_dotenv()
 
@@ -188,7 +189,7 @@ async def analyze(request: AnalyzeRequest):
 
         raise HTTPException(
             status_code=500,
-            detail=str(e),
+            detail=redact(str(e)),
         )
 
 
