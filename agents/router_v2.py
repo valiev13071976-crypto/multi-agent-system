@@ -27,6 +27,8 @@ from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier
 from config.pricing import load_budget_limits, load_price_quotes
 from finops.service import FinOpsService
+from tools.gateway import ToolGateway
+from tools.search.null_provider import NullSearchProvider
 
 
 ALLOWED_MODE_VALUES = (
@@ -98,10 +100,12 @@ class RouterV2:
             finops=self.finops,
         )
 
+        self.tool_gateway = ToolGateway(NullSearchProvider())
+
         self.pipeline = Pipeline(
             expert_manager=expert_manager,
             peer_review=PeerReview(),
-            fact_validator=FactValidator(),
+            fact_validator=FactValidator(gateway=self.tool_gateway),
             judge=Judge(),
             response_formatter=ResponseFormatter(),
             supervisor=Supervisor(),

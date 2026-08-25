@@ -60,7 +60,16 @@ class Judge:
             "Проверить исходные данные",
             "Проверить ограничения выбранного решения",
         ]
-        if fact is not None and fact.reason == "no_external_evidence":
+        if fact is not None and fact.status == STATUS_FAIL:
+            risks.append("Внешние источники противоречат утверждениям")
+        elif fact is not None and fact.reason in (
+            "no_external_evidence",
+            "insufficient_evidence",
+            "external_evidence_timeout",
+            "external_evidence_unavailable",
+            "low_trust_only",
+            "no_extractable_claims",
+        ):
             risks.append("Факты не подтверждены внешними источниками")
         if consistency is not None and consistency.status == STATUS_FAIL:
             risks.append("Ответы экспертов содержат прямое противоречие")
@@ -124,7 +133,7 @@ class Judge:
             "summary": "Финальный анализ успешно сформирован.",
             "best_solution": (
                 "Синтез ответов экспертов без скрытого приоритета provider. "
-                "Внешняя проверка фактов недоступна."
+                "Внешняя проверка фактов учитывается только при независимых источниках."
             ),
             "confidence": confidence,
             "analysis": self._analysis(experts),

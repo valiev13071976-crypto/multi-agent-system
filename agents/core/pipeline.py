@@ -38,6 +38,11 @@ class Pipeline:
             task_id=task_id,
         )
         provider_errors = getattr(self.expert_manager, "last_errors", {}) or {}
+        gateway = getattr(self.fact_validator, "gateway", None)
+        if gateway is not None:
+            gateway.task_id = task_id or ""
+            if hasattr(gateway, "reset_budget"):
+                gateway.reset_budget()
 
         structural = self.structural_validator.validate_experts(experts)
         peer = await self.peer_review.review(experts, errors=provider_errors)

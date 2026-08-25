@@ -22,13 +22,17 @@ def compute_confidence(inputs: ConfidenceInputs) -> float:
         score += 0.10
     if inputs.sources_present:
         score += 0.05
+    if inputs.factual_status == STATUS_PASS:
+        score += 0.10
     if inputs.structural_fail or inputs.successful_experts == 0:
         score -= 0.20
     if inputs.consistency_status == STATUS_FAIL:
         score -= 0.15
     if inputs.failed_providers >= 1:
         score -= 0.10
-    if (
+    if inputs.factual_status == STATUS_FAIL:
+        score -= 0.20
+    elif (
         inputs.factual_status in (STATUS_UNKNOWN, STATUS_WARN)
         and (inputs.category or "") in FACT_HEAVY_CATEGORIES
     ):
