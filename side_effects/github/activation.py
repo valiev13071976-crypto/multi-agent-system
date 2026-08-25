@@ -45,6 +45,7 @@ class GitHubWriteActivationService:
         registered: bool = False,
         composition_error: str | None = None,
         persistence_ready: bool = True,
+        persistence_unavailable_reason: str = "side_effect_persistence_unavailable",
     ):
         self._config = config
         self._transport = transport
@@ -52,6 +53,9 @@ class GitHubWriteActivationService:
         self._registered = bool(registered)
         self._composition_error = composition_error
         self._persistence_ready = bool(persistence_ready)
+        self._persistence_unavailable_reason = str(
+            persistence_unavailable_reason or "side_effect_persistence_unavailable"
+        )
         self._readiness: GitHubReadinessResult | None = None
         self._state = self._derive_state()
         self._emit_state()
@@ -106,7 +110,7 @@ class GitHubWriteActivationService:
         if self._config.kill_switch:
             return "github_write_kill_switch_active"
         if not self._config.dry_run and not self._persistence_ready:
-            return "side_effect_persistence_unavailable"
+            return self._persistence_unavailable_reason
         if self._config.dry_run:
             return "github_write_dry_run_active"
         if self._readiness is None:
@@ -234,7 +238,7 @@ class GitHubWriteActivationService:
                 allowed=False,
                 dry_run=False,
                 blocked=True,
-                reason_code="side_effect_persistence_unavailable",
+                reason_code=self._persistence_unavailable_reason,
                 checked_at=stamp,
             )
         repo_decision = self._repository_decision(action, stamp, purpose)

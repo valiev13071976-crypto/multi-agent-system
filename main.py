@@ -84,6 +84,9 @@ context_manager = ContextManager()
 side_effect_runtime = compose_side_effect_runtime(
     secrets=EnvSecretStore(), isolate_errors=True
 )
+# Production auto-wiring: share composed workflow/HITL/persistence with analyze engine.
+if side_effect_runtime.workflow_engine is not None:
+    router.workflow_engine = side_effect_runtime.workflow_engine
 
 
 @asynccontextmanager

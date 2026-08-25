@@ -249,7 +249,11 @@ def build_side_effect_persistence(
 
 
 def attach_protected_persistence(engine, bundle: SideEffectPersistenceBundle, *, authority=None):
-    """Wire durable approval/permit/workflow stores into an existing WorkflowEngine."""
+    """Compatibility helper: wire an external WorkflowEngine to a persistence bundle.
+
+    Production composition uses compose_side_effect_runtime() / build_protected_services()
+    and does not require this call. Idempotent when stores already match the bundle.
+    """
 
     from hitl.authority import InMemoryApprovalAuthority, ROLE_PRIVILEGED_APPROVER
     from hitl.permit import PermitService
@@ -257,9 +261,21 @@ def attach_protected_persistence(engine, bundle: SideEffectPersistenceBundle, *,
     from workflow.state_manager import StateManager
 
     gate = engine._gate()
+    if gate.approvals.store is bundle.approval_store and (
+        engine.hitl_service is not None
+        and getattr(engine.hitl_service, "store", None) is bundle.approval_store
+        and getattr(getattr(engine.hitl_service, "permits", None), "store", None)
+        is bundle.permit_store
+        and engine.state_manager._store is bundle.workflow_runtime_store
+    ):
+        return engine
+
     gate.approvals.store = bundle.approval_store
+    gate.idempotency = bundle.idempotency_registry
     engine.state_manager = StateManager(store=bundle.workflow_runtime_store)
     auth = authority
+    if auth is None and engine.hitl_service is not None:
+        auth = engine.hitl_service.authority
     if auth is None:
         auth = InMemoryApprovalAuthority()
         auth.grant("reviewer-1", ROLE_PRIVILEGED_APPROVER)
