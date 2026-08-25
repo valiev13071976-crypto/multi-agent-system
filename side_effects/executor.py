@@ -137,6 +137,7 @@ class SideEffectExecutor:
         self.trace = []
         adapter_started = False
         permit_consumed = False
+        adapter_result = None
         authorization_type = None
         authorization_id = ""
         started_at = stamp
@@ -274,7 +275,13 @@ class SideEffectExecutor:
             if adapter is not None:
                 mutated = bool(getattr(adapter, "mutated", False))
             uncertain = adapter_started and (
-                error_code in {"finalization_failed", "adapter_failed_after_write"}
+                error_code
+                in {
+                    "finalization_failed",
+                    "adapter_failed_after_write",
+                    "external_write_timeout_uncertain",
+                    "external_verification_uncertain",
+                }
                 or (isinstance(exc, asyncio.TimeoutError) and mutated)
             )
             if uncertain:
@@ -319,6 +326,13 @@ class SideEffectExecutor:
                     reason_code=str(error_code),
                 )
             completed_at = ctx.stamp()
+            extra_meta = {}
+            ext_ref = None
+            rb_ref = None
+            if adapter_result is not None:
+                extra_meta = dict(adapter_result.metadata)
+                ext_ref = adapter_result.external_reference
+                rb_ref = adapter_result.rollback_reference
             result = SideEffectExecutionResult(
                 execution_id=execution_id,
                 workflow_id=action.workflow_id,
@@ -331,7 +345,14 @@ class SideEffectExecutor:
                 completed_at=completed_at,
                 outcome=outcome,
                 error_code=str(error_code),
-                metadata={"permit_consumed": permit_consumed, "adapter_started": adapter_started},
+                external_reference=ext_ref,
+                rollback_reference=rb_ref,
+                reversible=bool(adapter_result.reversible) if adapter_result is not None else False,
+                metadata={
+                    "permit_consumed": permit_consumed,
+                    "adapter_started": adapter_started,
+                    **extra_meta,
+                },
             )
             self._save_record(
                 result,

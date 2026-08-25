@@ -1,12 +1,16 @@
 from datetime import datetime, timedelta, timezone
 
-from autonomy.capabilities import CAP_EXTERNAL_WRITE, CapabilitySet
+from autonomy.capabilities import CAP_EXTERNAL_WRITE, CAP_GITHUB_ISSUE_LABEL_WRITE, CapabilitySet
 from autonomy.gate import AutonomyGate, build_proposed_action
 from hitl.authority import (
     InMemoryApprovalAuthority,
     ROLE_PRIVILEGED_APPROVER,
 )
 from hitl.service import HITLService
+from side_effects.github.adapter import GitHubIssueLabelAdapter
+from side_effects.github.config import GitHubWriteAdapterConfig
+from side_effects.github.models import GITHUB_TOOL_ID, OP_ENSURE_PRESENT
+from side_effects.github.transport import FakeGitHubTransport
 from side_effects.reconciliation import SideEffectReconciliationService
 from side_effects.executor import SideEffectExecutor
 from side_effects.models import (
@@ -145,3 +149,94 @@ async def issue_permit(engine, action, level="executor_confirmed"):
         **kwargs,
     )
     return permit
+
+
+GITHUB_CAPS = (CAP_EXTERNAL_WRITE, CAP_GITHUB_ISSUE_LABEL_WRITE)
+GITHUB_RESOURCE = "github://octo/hello/issues/1/labels/bug"
+
+
+def github_eval_kwargs(level="executor_confirmed", capabilities=None):
+    names = capabilities if capabilities is not None else GITHUB_CAPS
+    return eval_kwargs(level, capabilities=names)
+
+
+def github_action(workflow_id, task_id="task-se", **kwargs):
+    return se_action(
+        workflow_id,
+        task_id=task_id,
+        tool_id=kwargs.pop("tool_id", GITHUB_TOOL_ID),
+        operation=kwargs.pop("operation", OP_ENSURE_PRESENT),
+        resource=kwargs.pop("resource", GITHUB_RESOURCE),
+        tool_trust_level=kwargs.pop(
+            "tool_trust_level", TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE
+        ),
+        requested_capabilities=kwargs.pop("requested_capabilities", GITHUB_CAPS),
+        metadata=kwargs.pop("metadata", {"reversible": True}),
+        **kwargs,
+    )
+
+
+def github_runtime(
+    *,
+    config=None,
+    transport=None,
+    timeout_seconds=15.0,
+):
+    engine = WorkflowEngine()
+    workflow_id = engine.create("task-se")
+    engine.state_manager.plan(workflow_id)
+    engine.state_manager.start(workflow_id)
+    fake = transport or FakeGitHubTransport()
+    cfg = config or GitHubWriteAdapterConfig(
+        enabled=True,
+        allowed_repositories=("octo/hello",),
+        timeout_seconds=timeout_seconds,
+    )
+    adapter = GitHubIssueLabelAdapter(config=cfg, transport=fake)
+    registry = SideEffectAdapterRegistry()
+    registry.register(adapter)
+    executor = SideEffectExecutor(registry, gate=engine._gate())
+    engine.side_effect_executor = executor
+    authority = InMemoryApprovalAuthority()
+    authority.grant("reviewer-1", ROLE_PRIVILEGED_APPROVER)
+    engine.hitl_service = HITLService(
+        gate=engine._gate(),
+        state_manager=engine.state_manager,
+        store=engine._gate().approvals.store,
+        authority=authority,
+        approval_ttl_seconds=3600,
+        permit_ttl_seconds=300,
+    )
+    return engine, workflow_id, adapter, executor, fake
+
+
+def github_recon_runtime(**kwargs):
+    recon_timeout = kwargs.pop("recon_timeout", 0.05)
+    engine, workflow_id, adapter, executor, fake = github_runtime(**kwargs)
+    service = SideEffectReconciliationService(
+        execution_store=executor.store,
+        idempotency=engine._gate().idempotency,
+        registry=executor.registry,
+        audit=executor.audit,
+        state_manager=engine.state_manager,
+        timeout_seconds=recon_timeout,
+    )
+    executor.reconciliation_service = service
+    engine.reconciliation_service = service
+    return engine, workflow_id, adapter, executor, fake, service
+
+
+async def github_execute(executor, action, engine, context=None, **extra):
+    permit = await issue_permit(engine, action)
+    ctx_obj = context if context is not None else SideEffectExecutionContext(now=T0)
+    return await executor.execute(
+        action,
+        permit=permit,
+        context=ctx_obj,
+        gate=engine._gate(),
+        hitl=engine._hitl(),
+        state_manager=engine.state_manager,
+        evaluate_kwargs=github_eval_kwargs(),
+        **extra,
+    )
+

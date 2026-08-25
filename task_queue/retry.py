@@ -43,7 +43,10 @@ NON_RETRYABLE_CODES = frozenset(
         "side_effect_execution_denied",
         "side_effect_idempotency_conflict",
         "reconciliation_still_uncertain",
-        "reconciliation_manual_review",
+        "github_rate_limited",
+        "github_timeout_uncertain",
+        "external_write_timeout_uncertain",
+        "external_verification_uncertain",
     }
 )
 

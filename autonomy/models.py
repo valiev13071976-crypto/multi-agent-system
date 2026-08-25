@@ -113,6 +113,7 @@ FORBIDDEN_METADATA_KEYS = frozenset(
         "encryption_key",
         "panda_encryption_key",
         "panda_capability_signing_key",
+        "github_write_token",
         "raw_body",
         "raw_provider",
         "bearer",

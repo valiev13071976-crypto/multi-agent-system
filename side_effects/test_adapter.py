@@ -221,6 +221,7 @@ class InMemoryReversibleWriteAdapter:
                 if not_found_is_authoritative_failure is None
                 else not_found_is_authoritative_failure
             ),
+            idempotency_mode=current.idempotency_mode,
         )
 
     async def reconcile(self, execution_record, action, context) -> AdapterReconciliationResult:

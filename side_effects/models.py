@@ -197,6 +197,7 @@ class SideEffectToolDescriptor:
     supports_reconciliation: bool = False
     reconciliation_authoritative: bool = False
     not_found_is_authoritative_failure: bool = False
+    idempotency_mode: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "capabilities_required", tuple(self.capabilities_required))
