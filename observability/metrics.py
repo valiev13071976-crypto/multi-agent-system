@@ -25,6 +25,8 @@ ALLOWED_LABEL_KEYS = frozenset(
         "memory_type",
         "sensitivity",
         "scope_type",
+        "document_type",
+        "parser_id",
     }
 )
 
@@ -103,6 +105,14 @@ class MetricsCollector:
     memory_dedup_total: int = 0
     memory_forget_total: int = 0
     memory_denied_total: int = 0
+    document_ingest_total: int = 0
+    document_parse_total: int = 0
+    document_parse_failure_total: int = 0
+    document_chunk_total: int = 0
+    document_dedup_total: int = 0
+    document_bytes_total: int = 0
+    spreadsheet_sheet_total: int = 0
+    spreadsheet_range_extract_total: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})
@@ -219,6 +229,14 @@ class MetricsCollector:
                 "memory_dedup_total": self.memory_dedup_total,
                 "memory_forget_total": self.memory_forget_total,
                 "memory_denied_total": self.memory_denied_total,
+                "document_ingest_total": self.document_ingest_total,
+                "document_parse_total": self.document_parse_total,
+                "document_parse_failure_total": self.document_parse_failure_total,
+                "document_chunk_total": self.document_chunk_total,
+                "document_dedup_total": self.document_dedup_total,
+                "document_bytes_total": self.document_bytes_total,
+                "spreadsheet_sheet_total": self.spreadsheet_sheet_total,
+                "spreadsheet_range_extract_total": self.spreadsheet_range_extract_total,
                 "latency": latency,
                 "by_label": by_label,
             }

@@ -145,6 +145,7 @@ class SideEffectRuntime:
     observability: ObservabilityRuntime | None = None
     recovery_orchestrator: object | None = None
     memory_runtime: object | None = None
+    document_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -228,6 +229,16 @@ class SideEffectRuntime:
                     self.memory_runtime is None
                     or self.memory_runtime.health().get("persistence_ready", True)
                 ),
+                document_status=(
+                    (self.document_runtime.health().get("document_status") or "healthy")
+                    if self.document_runtime is not None
+                    else "healthy"
+                ),
+                documents_enabled=bool(self.document_runtime is not None),
+                document_persistence_ready=bool(
+                    self.document_runtime is None
+                    or self.document_runtime.health().get("persistence_ready", True)
+                ),
             )
             meta["observability"] = {
                 "overall_status": snap.overall_status,
@@ -248,6 +259,8 @@ class SideEffectRuntime:
             }
         if self.memory_runtime is not None:
             meta["memory"] = dict(self.memory_runtime.health())
+        if self.document_runtime is not None:
+            meta["documents"] = dict(self.document_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -298,6 +311,11 @@ class SideEffectRuntime:
         if self.memory_runtime is not None and hasattr(self.memory_runtime, "close"):
             try:
                 self.memory_runtime.close()
+            except Exception:
+                pass
+        if self.document_runtime is not None and hasattr(self.document_runtime, "close"):
+            try:
+                self.document_runtime.close()
             except Exception:
                 pass
 
@@ -490,6 +508,32 @@ def _finalize_runtime(
     if memory_runtime is not None:
         engine.memory_service = memory_runtime.service
 
+    document_runtime = None
+    from documents.runtime import build_document_runtime, document_config
+
+    doc_cfg = document_config(env)
+    shared_doc = None
+    if doc_cfg["backend"] in {"sqlite", "durable"} and not doc_cfg["db_path"]:
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_doc = persistence.connection
+    try:
+        document_runtime = build_document_runtime(
+            env=env,
+            encryption=getattr(persistence, "encryption", None),
+            observability=obs,
+            memory_service=memory_runtime.service if memory_runtime else None,
+            shared_connection=shared_doc,
+        )
+    except Exception:
+        document_runtime = None
+    if document_runtime is not None:
+        engine.document_service = document_runtime.service
+
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -509,6 +553,7 @@ def _finalize_runtime(
         observability=obs,
         recovery_orchestrator=recovery,
         memory_runtime=memory_runtime,
+        document_runtime=document_runtime,
     )
 
 

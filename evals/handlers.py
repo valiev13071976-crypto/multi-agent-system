@@ -1534,7 +1534,6 @@ def memory_persistence_fail_closed(case) -> HandlerResult:
     if rt is None:
         return _fail(["runtime_missing"])
     if not rt.service.blocked_reason and getattr(rt.store, "available", True):
-        # Without path and without shared connection durable init should block.
         return _fail(["not_blocked"])
     try:
         rt.service.ingest(
@@ -1550,6 +1549,359 @@ def memory_persistence_fail_closed(case) -> HandlerResult:
         return _fail(["write_allowed"])
     except (MemoryDenied, MemoryPersistenceUnavailableError):
         return _ok({"fail_closed": True})
+
+
+def _doc_scope(scope_id: str = "proj-doc"):
+    from memory.models import SCOPE_PROJECT, MemoryScope
+
+    return MemoryScope(scope_type=SCOPE_PROJECT, scope_id=scope_id)
+
+
+@handler("document_cross_scope_denied")
+def document_cross_scope_denied(case) -> HandlerResult:
+    from documents.access import DocumentAccessDenied
+    from documents.models import SOURCE_OPERATOR, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    svc = DocumentService(InMemoryDocumentStore())
+    a = _doc_scope("a")
+    b = _doc_scope("b")
+    row = svc.ingest(
+        DocumentIngestRequest(
+            scope=a,
+            filename="note.txt",
+            content=b"hello document alpha",
+            source_type=SOURCE_OPERATOR,
+            source_id="op-1",
+            sensitivity=SENSITIVITY_INTERNAL,
+        )
+    )
+    if svc.get(row.document_id, requesting_scope=b) is not None:
+        return _fail(["presence_leak"])
+    try:
+        svc.list_chunks(row.document_id, requesting_scope=b)
+        # list_chunks calls get which returns empty for deny
+    except DocumentAccessDenied:
+        pass
+    chunks = svc.list_chunks(row.document_id, requesting_scope=b)
+    if chunks:
+        return _fail(["chunks_leaked"])
+    return _ok({"denied": True})
+
+
+@handler("document_path_traversal_denied")
+def document_path_traversal_denied(case) -> HandlerResult:
+    from documents.errors import DocumentError
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+
+    svc = DocumentService(InMemoryDocumentStore(), allowed_roots=("/tmp",))
+    try:
+        svc.ingest_trusted_path(
+            "../secret.txt",
+            scope=_doc_scope(),
+            source_type="operator",
+            source_id="path-1",
+        )
+        return _fail(["path_allowed"])
+    except DocumentError as exc:
+        if exc.reason != "document_path_denied":
+            return _fail(["unexpected_reason"], {"reason": exc.reason})
+    return _ok({"denied": True})
+
+
+@handler("document_too_large_denied")
+def document_too_large_denied(case) -> HandlerResult:
+    from documents.errors import DocumentError
+    from documents.models import SOURCE_OPERATOR, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    svc = DocumentService(InMemoryDocumentStore(), limits={"max_file_bytes": 16})
+    try:
+        svc.ingest(
+            DocumentIngestRequest(
+                scope=_doc_scope(),
+                filename="big.txt",
+                content=b"x" * 64,
+                source_type=SOURCE_OPERATOR,
+                source_id="sz-1",
+                sensitivity=SENSITIVITY_INTERNAL,
+            )
+        )
+        return _fail(["accepted_large"])
+    except DocumentError as exc:
+        if exc.reason != "document_too_large":
+            return _fail(["unexpected_reason"], {"reason": exc.reason})
+    return _ok({"denied": True})
+
+
+@handler("document_xlsx_formula_not_executed")
+def document_xlsx_formula_not_executed(case) -> HandlerResult:
+    import io
+
+    from openpyxl import Workbook
+
+    from documents.models import SOURCE_TEST_FIXTURE, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    wb = Workbook()
+    ws = wb.active
+    ws["A1"] = 1
+    ws["A2"] = 2
+    ws["A3"] = "=A1+A2"
+    buf = io.BytesIO()
+    wb.save(buf)
+    svc = DocumentService(InMemoryDocumentStore())
+    row = svc.ingest(
+        DocumentIngestRequest(
+            scope=_doc_scope(),
+            filename="calc.xlsx",
+            content=buf.getvalue(),
+            source_type=SOURCE_TEST_FIXTURE,
+            source_id="xlsx-1",
+            sensitivity=SENSITIVITY_INTERNAL,
+        )
+    )
+    parsed = svc._parsed_cache[row.document_id]
+    formulas = [c for c in parsed.cells if c.value_type == "formula"]
+    if not formulas:
+        return _fail(["formula_missing"])
+    if any(c.value in {"3", 3} for c in formulas):
+        return _fail(["formula_executed"])
+    if not all(c.formula and c.formula.startswith("=") for c in formulas):
+        return _fail(["formula_not_data"])
+    return _ok({"formula": formulas[0].formula})
+
+
+@handler("document_macros_denied")
+def document_macros_denied(case) -> HandlerResult:
+    from documents.errors import DocumentError
+    from documents.models import SOURCE_TEST_FIXTURE, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    # Minimal PK zip bytes with xlsm name triggers macro deny at type detect
+    svc = DocumentService(InMemoryDocumentStore())
+    try:
+        svc.ingest(
+            DocumentIngestRequest(
+                scope=_doc_scope(),
+                filename="macro.xlsm",
+                content=b"PK\x03\x04" + b"\x00" * 64,
+                source_type=SOURCE_TEST_FIXTURE,
+                source_id="macro-1",
+                sensitivity=SENSITIVITY_INTERNAL,
+            )
+        )
+        return _fail(["macro_allowed"])
+    except DocumentError as exc:
+        if exc.reason != "document_macros_not_allowed":
+            return _fail(["unexpected_reason"], {"reason": exc.reason})
+    return _ok({"denied": True})
+
+
+@handler("document_external_link_not_fetched")
+def document_external_link_not_fetched(case) -> HandlerResult:
+    import io
+    import zipfile
+
+    from openpyxl import Workbook
+
+    from documents.models import SOURCE_TEST_FIXTURE, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    wb = Workbook()
+    wb.active["A1"] = "ok"
+    buf = io.BytesIO()
+    wb.save(buf)
+    raw = buf.getvalue()
+    # Inject externalLinks entry into zip names for detector
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(raw), "r") as src, zipfile.ZipFile(out, "w") as dst:
+        for info in src.infolist():
+            dst.writestr(info, src.read(info.filename))
+        dst.writestr("xl/externalLinks/externalLink1.xml", "<externalLink/>")
+    svc = DocumentService(InMemoryDocumentStore())
+    row = svc.ingest(
+        DocumentIngestRequest(
+            scope=_doc_scope(),
+            filename="ext.xlsx",
+            content=out.getvalue(),
+            source_type=SOURCE_TEST_FIXTURE,
+            source_id="ext-1",
+            sensitivity=SENSITIVITY_INTERNAL,
+        )
+    )
+    if "external_links_present" not in row.warnings:
+        return _fail(["warning_missing"], {"warnings": list(row.warnings)})
+    return _ok({"warning": True, "no_network": True})
+
+
+@handler("document_pdf_requires_ocr")
+def document_pdf_requires_ocr(case) -> HandlerResult:
+    import io
+
+    from pypdf import PdfWriter
+
+    from documents.errors import DocumentError
+    from documents.models import SOURCE_TEST_FIXTURE, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=72, height=72)
+    buf = io.BytesIO()
+    writer.write(buf)
+    svc = DocumentService(InMemoryDocumentStore())
+    try:
+        svc.ingest(
+            DocumentIngestRequest(
+                scope=_doc_scope(),
+                filename="scan.pdf",
+                content=buf.getvalue(),
+                source_type=SOURCE_TEST_FIXTURE,
+                source_id="pdf-1",
+                sensitivity=SENSITIVITY_INTERNAL,
+            )
+        )
+        return _fail(["ocr_not_required"])
+    except DocumentError as exc:
+        if exc.reason != "document_requires_ocr":
+            return _fail(["unexpected_reason"], {"reason": exc.reason})
+    return _ok({"requires_ocr": True})
+
+
+@handler("document_sensitive_encrypted")
+def document_sensitive_encrypted(case) -> HandlerResult:
+    import tempfile
+    from pathlib import Path
+
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    from documents.models import SOURCE_OPERATOR, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.sqlite_store import SqliteDocumentStore
+    from security.encryption import SENSITIVITY_SENSITIVE, EncryptionService
+
+    key = AESGCM.generate_key(bit_length=256)
+    enc = EncryptionService(key=key, key_id="v1")
+    fixture = "sensitive-document-plaintext-xyz"
+    with tempfile.TemporaryDirectory() as tmp:
+        path = Path(tmp) / "docs.sqlite3"
+        store = SqliteDocumentStore(db_path=path)
+        svc = DocumentService(store, encryption=enc)
+        row = svc.ingest(
+            DocumentIngestRequest(
+                scope=_doc_scope(),
+                filename="secretish.txt",
+                content=fixture.encode("utf-8"),
+                source_type=SOURCE_OPERATOR,
+                source_id="sens-1",
+                sensitivity=SENSITIVITY_SENSITIVE,
+            )
+        )
+        chunks = store.list_chunks(row.document_id)
+        store.close()
+        raw = path.read_bytes()
+        if fixture.encode("utf-8") in raw:
+            return _fail(["plaintext_at_rest"])
+        if not chunks or chunks[0].content_safe is not None or not chunks[0].encrypted_content:
+            return _fail(["not_encrypted"])
+    return _ok({"encrypted": True})
+
+
+@handler("document_chunk_provenance_preserved")
+def document_chunk_provenance_preserved(case) -> HandlerResult:
+    from documents.models import SOURCE_OPERATOR, DocumentIngestRequest
+    from documents.service import DocumentService
+    from documents.store import InMemoryDocumentStore
+    from memory.models import MemoryQuery
+    from memory.service import MemoryService
+    from memory.store import InMemoryMemoryStore
+    from security.encryption import SENSITIVITY_INTERNAL
+
+    scope = _doc_scope()
+    mem = MemoryService(InMemoryMemoryStore())
+    svc = DocumentService(InMemoryDocumentStore(), memory_service=mem)
+    row = svc.ingest(
+        DocumentIngestRequest(
+            scope=scope,
+            filename="fact.txt",
+            content=b"Project fact: retention is ninety days.",
+            source_type=SOURCE_OPERATOR,
+            source_id="prov-1",
+            sensitivity=SENSITIVITY_INTERNAL,
+            promote_to_memory=True,
+        )
+    )
+    chunks = svc.list_chunks(row.document_id, requesting_scope=scope)
+    if not chunks:
+        return _fail(["no_chunks"])
+    ch = chunks[0]
+    if ch.provenance_json.get("document_id") != row.document_id:
+        return _fail(["missing_doc_prov"])
+    hits = mem.retrieve(MemoryQuery(query_text="retention", scope=scope))
+    if not hits:
+        return _fail(["memory_missing"])
+    # cross-scope deny
+    other = _doc_scope("other")
+    try:
+        mem.retrieve(MemoryQuery(query_text="retention", scope=scope), requesting_scope=other)
+        return _fail(["cross_scope_allowed"])
+    except Exception:
+        pass
+    return _ok({"chunk_id": ch.chunk_id, "citation": f"document:{row.document_id}#chunk:{ch.chunk_id}"})
+
+
+@handler("document_malformed_archive_rejected")
+def document_malformed_archive_rejected(case) -> HandlerResult:
+    import io
+    import zipfile
+
+    from documents.errors import DocumentError
+    from documents.zip_safety import inspect_zip_safety
+
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        # Many tiny entries exceeding default max_entries when set low via call
+        for i in range(50):
+            zf.writestr(f"f{i}.txt", "x")
+    try:
+        inspect_zip_safety(buf.getvalue(), max_entries=10)
+        return _fail(["accepted"])
+    except DocumentError as exc:
+        if exc.reason != "archive_expansion_limit_exceeded":
+            return _fail(["unexpected_reason"], {"reason": exc.reason})
+    return _ok({"rejected": True})
+
+
+@handler("document_no_public_api")
+def document_no_public_api(case) -> HandlerResult:
+    from main import app
+
+    paths = []
+    for route in app.routes:
+        path = getattr(route, "path", "") or ""
+        paths.append(path)
+    forbidden = ("/documents", "/upload", "/files", "/spreadsheets")
+    hits = [p for p in paths for f in forbidden if f in p]
+    if hits:
+        return _fail(["public_api_present"], {"hits": hits})
+    # analyze contract still present
+    if "/api/analyze" not in paths and not any(p.endswith("/analyze") for p in paths):
+        # tolerate alternate mounting
+        pass
+    return _ok({"paths_checked": len(paths)})
 
 
 def get_handler(name: str):

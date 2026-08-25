@@ -20,7 +20,7 @@ from agents.validators.consistency import VALIDATOR_VERSION as CONSISTENCY_VALID
 from agents.validators.structural import VALIDATOR_VERSION as STRUCTURAL_VALIDATOR_VERSION
 
 # Eval suite
-CORE_SUITE_VERSION = "1.3.0"
+CORE_SUITE_VERSION = "1.4.0"
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -120,4 +120,31 @@ def memory_retrieval_policy_snapshot() -> dict:
 
     snap = retrieval_policy_snapshot()
     snap["memory_retrieval_version"] = MEMORY_RETRIEVAL_VERSION
+    return snap
+
+
+def document_policy_snapshot() -> dict:
+    from documents.models import DOCUMENT_POLICY_VERSION
+    from documents.retention import document_policy_snapshot as snap_fn
+
+    snap = snap_fn()
+    snap["document_policy_version"] = DOCUMENT_POLICY_VERSION
+    return snap
+
+
+def document_parser_registry_snapshot() -> dict:
+    from documents.models import DOCUMENT_PARSER_REGISTRY_VERSION
+    from documents.parsers import parser_registry_snapshot
+
+    snap = parser_registry_snapshot()
+    snap["document_parser_registry_version"] = DOCUMENT_PARSER_REGISTRY_VERSION
+    return snap
+
+
+def document_chunker_snapshot() -> dict:
+    from documents.chunker import chunker_policy_snapshot
+    from documents.models import DOCUMENT_CHUNKER_VERSION
+
+    snap = chunker_policy_snapshot()
+    snap["document_chunker_version"] = DOCUMENT_CHUNKER_VERSION
     return snap

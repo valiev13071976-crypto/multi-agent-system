@@ -69,6 +69,7 @@ class WorkflowEngine:
         reconciliation_service=None,
         observability=None,
         memory_service=None,
+        document_service=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
@@ -78,6 +79,7 @@ class WorkflowEngine:
         self.reconciliation_service = reconciliation_service
         self.observability = observability
         self.memory_service = memory_service
+        self.document_service = document_service
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
@@ -89,6 +91,12 @@ class WorkflowEngine:
             return ()
         results = self.memory_service.retrieve(query, requesting_scope=requesting_scope)
         return self.memory_service.build_context(results)
+
+    def ingest_document(self, request, *, requesting_scope=None):
+        """Optional DI: scoped document ingest via DocumentService."""
+        if self.document_service is None:
+            raise RuntimeError("document_service_unavailable")
+        return self.document_service.ingest(request, requesting_scope=requesting_scope)
 
     def _obs_ctx(self, workflow_id: str = "", task_id: str = ""):
         obs = self.observability

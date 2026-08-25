@@ -298,6 +298,9 @@ class ObservabilityRuntime:
         memory_status: str = "healthy",
         memory_enabled: bool = False,
         memory_persistence_ready: bool = True,
+        document_status: str = "healthy",
+        documents_enabled: bool = False,
+        document_persistence_ready: bool = True,
     ) -> OperationalHealthSnapshot:
         snap = self.metrics.snapshot()
         return build_operational_health(
@@ -320,6 +323,9 @@ class ObservabilityRuntime:
             memory_status=memory_status,
             memory_enabled=memory_enabled,
             memory_persistence_ready=memory_persistence_ready,
+            document_status=document_status,
+            documents_enabled=documents_enabled,
+            document_persistence_ready=document_persistence_ready,
         )
 
     def list_events(self) -> tuple[OperationalEvent, ...]:

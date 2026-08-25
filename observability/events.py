@@ -85,6 +85,16 @@ EVENT_TYPES = frozenset(
         "memory.forgotten",
         "memory.expired",
         "memory.denied",
+        "document.ingested",
+        "document.parsed",
+        "document.partial",
+        "document.failed",
+        "document.chunked",
+        "document.deduplicated",
+        "document.deleted",
+        "document.denied",
+        "spreadsheet.inspected",
+        "spreadsheet.range_extracted",
     }
 )
 

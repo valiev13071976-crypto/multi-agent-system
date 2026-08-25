@@ -17,6 +17,9 @@ from evals.versions import (
     judge_snapshot,
     memory_policy_snapshot,
     memory_retrieval_policy_snapshot,
+    document_chunker_snapshot,
+    document_parser_registry_snapshot,
+    document_policy_snapshot,
     policy_snapshot,
     prompt_content_hash,
     routing_policy_snapshot,
@@ -175,6 +178,41 @@ def build_version_registry() -> VersionRegistry:
             artifact_id="memory_retrieval_policy",
             version=MEMORY_RETRIEVAL_VERSION,
             content_hash=content_hash(mem_ret),
+        )
+    )
+
+    # Documents / spreadsheets (P14)
+    from documents.models import (
+        DOCUMENT_CHUNKER_VERSION,
+        DOCUMENT_PARSER_REGISTRY_VERSION,
+        DOCUMENT_POLICY_VERSION,
+    )
+
+    doc_pol = document_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="document_policy",
+            version=DOCUMENT_POLICY_VERSION,
+            content_hash=content_hash(doc_pol),
+        )
+    )
+    doc_reg = document_parser_registry_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="document_parser_registry",
+            version=DOCUMENT_PARSER_REGISTRY_VERSION,
+            content_hash=content_hash(doc_reg),
+        )
+    )
+    doc_chunk = document_chunker_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="document_chunker",
+            version=DOCUMENT_CHUNKER_VERSION,
+            content_hash=content_hash(doc_chunk),
         )
     )
 
