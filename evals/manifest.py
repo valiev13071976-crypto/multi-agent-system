@@ -132,6 +132,28 @@ def build_version_registry() -> VersionRegistry:
         )
     )
 
+    # Budget guard policy
+    from finops.budget_models import BUDGET_POLICY_VERSION
+    from finops.budget_policy import budget_policy_snapshot, load_advanced_budget_policies
+    from finops.models import BudgetLimits
+
+    budget_policies = load_advanced_budget_policies(
+        limits=BudgetLimits(
+            per_task=None, per_day=None, per_month=None, unknown_cost_policy="allow"
+        )
+    )
+    # Snapshot includes version constant + policy schema even when empty env limits.
+    snap = budget_policy_snapshot(budget_policies)
+    snap["budget_policy_version"] = BUDGET_POLICY_VERSION
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="budget_guard",
+            version=BUDGET_POLICY_VERSION,
+            content_hash=content_hash(snap),
+        )
+    )
+
     # Suite marker
     reg.register(
         ArtifactVersion(

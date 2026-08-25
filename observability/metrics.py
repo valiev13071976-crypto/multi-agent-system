@@ -17,6 +17,8 @@ ALLOWED_LABEL_KEYS = frozenset(
         "model_family",
         "status",
         "error_code_class",
+        "scope_type",
+        "decision",
     }
 )
 
@@ -76,6 +78,13 @@ class MetricsCollector:
     provider_calls_total: int = 0
     provider_failure_total: int = 0
     finops_budget_denied_total: int = 0
+    budget_reservations_total: int = 0
+    budget_reservation_denied_total: int = 0
+    budget_degrade_total: int = 0
+    budget_terminate_total: int = 0
+    budget_reserved_amount: int = 0
+    budget_spent_amount: int = 0
+    budget_released_amount: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})

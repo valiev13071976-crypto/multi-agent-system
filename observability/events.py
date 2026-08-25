@@ -61,6 +61,13 @@ EVENT_TYPES = frozenset(
         "finops.recorded",
         "finops.budget_denied",
         "finops.unknown_cost",
+        "budget.evaluated",
+        "budget.reserved",
+        "budget.reconciled",
+        "budget.released",
+        "budget.degraded",
+        "budget.terminated",
+        "budget.forecasted",
     }
 )
 

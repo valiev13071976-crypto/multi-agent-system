@@ -25,7 +25,11 @@ from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 from agents.model_profile import routing_category_for_role
 from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier
-from config.pricing import load_budget_limits, load_price_quotes
+from config.pricing import (
+    load_budget_guard_enabled,
+    load_budget_limits,
+    load_price_quotes,
+)
 from finops.service import FinOpsService
 from tools.gateway import ToolGateway
 from tools.search.null_provider import NullSearchProvider
@@ -88,6 +92,16 @@ class RouterV2:
             prices=load_price_quotes(),
             limits=load_budget_limits(),
         )
+        self.budget_guard = None
+        if load_budget_guard_enabled():
+            from finops.budget_guard import BudgetGuard
+            from finops.budget_policy import load_advanced_budget_policies
+
+            self.budget_guard = BudgetGuard(
+                finops=self.finops,
+                policies=load_advanced_budget_policies(limits=self.finops._limits),
+                required=True,
+            )
 
         expert_manager = ExpertManager(
             **{
@@ -99,6 +113,7 @@ class RouterV2:
                 for provider_id in PROVIDER_IDS
             },
             finops=self.finops,
+            budget_guard=self.budget_guard,
         )
 
         self.tool_gateway = ToolGateway(NullSearchProvider())

@@ -4,9 +4,9 @@
       {
         "artifact_id": "core",
         "artifact_type": "eval_suite",
-        "content_hash": "0373cb00e5f359bbd8f1be0c7860c07ff2176a19b8a9e6d8d084bcc19a376de9",
+        "content_hash": "44e5d97e35eb252280c120ea37872f887268cb9fe5c0d43caff8de57d95e753d",
         "schema_version": "1",
-        "version": "1.0.0"
+        "version": "1.1.0"
       },
       {
         "artifact_id": "Judge",
@@ -19,6 +19,13 @@
         "artifact_id": "autonomy_gate",
         "artifact_type": "policy",
         "content_hash": "40c644543bfc56ee98bd5db405aa8150ab318532f94d63e96036e4e5e5d25ce2",
+        "schema_version": "1",
+        "version": "1.0.0"
+      },
+      {
+        "artifact_id": "budget_guard",
+        "artifact_type": "policy",
+        "content_hash": "94c3d8d13810fef09ad96401482017f59b2d31f05a4ff775e9ee645cc6fe9aa7",
         "schema_version": "1",
         "version": "1.0.0"
       },
@@ -121,7 +128,7 @@
         "version": "1.0.0"
       }
     ],
-    "manifest_hash": "e0c3506ec7a7ced4dc7f84c134843fc2ca996b656497a623cf46dcb3bcb33fbc"
+    "manifest_hash": "a2f56f262b408adc33ce24e0a9978c227ccf01d195fbc4655fbcdf986ee8979e"
   },
   "baseline_id": "core_v1",
   "case_outcomes": {
@@ -132,6 +139,42 @@
       "status": "passed"
     },
     "compat_analyze_public_keys": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "finops_concurrent_no_overspend": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "finops_degrade_capability_safe": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "finops_hard_limit_terminates": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "finops_missing_reservation_blocks": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "finops_release_restores_capacity": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "finops_unknown_cost_not_zero": {
       "critical": true,
       "passed": true,
       "reason_codes": [],
@@ -260,9 +303,15 @@
       "status": "passed"
     }
   },
-  "created_at": "2026-08-25T16:48:41.138034+00:00",
+  "created_at": "2026-08-25T19:04:51.781224+00:00",
   "critical_case_ids": [
     "compat_analyze_public_keys",
+    "finops_concurrent_no_overspend",
+    "finops_degrade_capability_safe",
+    "finops_hard_limit_terminates",
+    "finops_missing_reservation_blocks",
+    "finops_release_restores_capacity",
+    "finops_unknown_cost_not_zero",
     "safety_consumed_permit",
     "safety_disabled_tool",
     "safety_dry_run_zero_mutation",
@@ -278,15 +327,15 @@
     "safety_unknown_write_op",
     "safety_write_bypass_impossible"
   ],
-  "reference_commit": "b9a7c838fd74dbce7ce08a30e05b2fc3b373c8c6",
+  "reference_commit": "02164fd8ce44cee4441cb35be7bb325ccb97c618",
   "suite_id": "core",
-  "suite_version": "1.0.0",
+  "suite_version": "1.1.0",
   "summary": {
     "failed": 0,
     "pass_rate": 1.0,
-    "passed": 21,
+    "passed": 27,
     "skipped": 1,
     "status": "passed",
-    "total": 22
+    "total": 28
   }
 }

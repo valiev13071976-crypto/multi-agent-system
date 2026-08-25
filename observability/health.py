@@ -64,6 +64,12 @@ def build_operational_health(
     tool_failures_recent: int = 0,
     provider_failures_recent: int = 0,
     dead_letter_threshold: int = 10,
+    finops_status: str = HEALTH_HEALTHY,
+    budget_persistence_ready: bool = True,
+    budget_enforcement_required: bool = False,
+    budget_soft_threshold: bool = False,
+    budget_uncertain: bool = False,
+    budget_hard_exhausted: bool = False,
     now: datetime | None = None,
 ) -> OperationalHealthSnapshot:
     persistence_status = HEALTH_HEALTHY if persistence_ready else HEALTH_DEGRADED
@@ -92,6 +98,14 @@ def build_operational_health(
     if uncertain_side_effects > 0 or pending_reconciliations > 0:
         recon_status = HEALTH_DEGRADED
 
+    finops = finops_status if finops_status in HEALTH_STATUSES else HEALTH_HEALTHY
+    if budget_soft_threshold or budget_uncertain:
+        finops = _worst(finops, HEALTH_DEGRADED)
+    if budget_enforcement_required and not budget_persistence_ready:
+        finops = HEALTH_BLOCKED
+    if budget_hard_exhausted:
+        finops = HEALTH_BLOCKED
+
     overall = _worst(
         persistence_status,
         protected_status,
@@ -100,6 +114,7 @@ def build_operational_health(
         queue_status,
         provider_status,
         recon_status,
+        finops,
         HEALTH_HEALTHY,
     )
     return OperationalHealthSnapshot(
@@ -111,7 +126,7 @@ def build_operational_health(
         protected_state_status=protected_status,
         queue_status=queue_status,
         provider_status=provider_status,
-        finops_status=HEALTH_HEALTHY,
+        finops_status=finops,
         reconciliation_status=recon_status,
         active_workflows=int(active_workflows),
         waiting_approval=int(waiting_approval),

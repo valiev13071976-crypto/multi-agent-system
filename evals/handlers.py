@@ -847,6 +847,208 @@ def version_bump_invariant_demo(case) -> HandlerResult:
         return _fail(["unexpected_assertion"], {"error": str(exc)})
 
 
+@handler("finops_hard_limit_terminates")
+def finops_hard_limit_terminates(case) -> HandlerResult:
+    from decimal import Decimal
+
+    from finops.budget_guard import BudgetGuard
+    from finops.budget_models import DECISION_TERMINATE, BudgetPolicy, SCOPE_GLOBAL
+    from finops.models import BudgetLimits, PriceQuote
+    from finops.service import FinOpsService
+
+    quote = PriceQuote("openai", "m", Decimal("1"), Decimal("1"), "USD", True)
+    finops = FinOpsService(
+        prices={("openai", "m"): quote},
+        limits=BudgetLimits(None, None, None, "allow"),
+    )
+    guard = BudgetGuard(
+        finops=finops,
+        policies=(
+            BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("5")),
+        ),
+        required=True,
+    )
+    d = guard.evaluate(
+        task_id="t",
+        provider="openai",
+        model="m",
+        estimated_cost=Decimal("6"),
+    )
+    if d.decision == DECISION_TERMINATE:
+        return _ok({"decision": d.decision, "reason": d.reason_code})
+    return _fail(["expected_terminate"], {"decision": d.decision})
+
+
+@handler("finops_missing_reservation_blocks")
+def finops_missing_reservation_blocks(case) -> HandlerResult:
+    from decimal import Decimal
+    from unittest.mock import AsyncMock
+
+    from agents.core.expert_manager import ExpertManager, FinOpsBudgetDeniedError
+    from agents.provider_result import ProviderResult
+    from finops.budget_guard import BudgetGuard
+    from finops.budget_models import BudgetPolicy, SCOPE_GLOBAL
+    from finops.budget_store import BudgetPersistenceUnavailableError, InMemoryBudgetStore
+    from finops.models import BudgetLimits, PriceQuote
+    from finops.service import FinOpsService
+
+    class BoomStore(InMemoryBudgetStore):
+        def begin_reserve_transaction(self):
+            raise BudgetPersistenceUnavailableError()
+
+    quote = PriceQuote("openai", "m", Decimal("1"), Decimal("1"), "USD", True)
+    finops = FinOpsService(prices={("openai", "m"): quote}, limits=BudgetLimits(None, None, None, "allow"))
+    guard = BudgetGuard(
+        finops=finops,
+        policies=(BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("100")),),
+        store=BoomStore(),
+        required=True,
+    )
+
+    class Agent:
+        model = "m"
+
+        async def run(self, prompt):
+            return ProviderResult("x", "openai", "m", 1000, 500, 1500)
+
+    manager = ExpertManager(openai=Agent(), finops=finops, budget_guard=guard)
+    try:
+        _run_async(manager.run("p"))
+        return _fail(["expected_block"])
+    except FinOpsBudgetDeniedError as exc:
+        if manager.provider_calls == 0 and "budget_persistence" in exc.reason:
+            return _ok({"reason": exc.reason, "provider_calls": 0})
+        return _fail(["unexpected_reason"], {"reason": exc.reason, "calls": manager.provider_calls})
+
+
+@handler("finops_concurrent_no_overspend")
+def finops_concurrent_no_overspend(case) -> HandlerResult:
+    from concurrent.futures import ThreadPoolExecutor
+    from decimal import Decimal
+
+    from finops.budget_guard import BudgetGuard, BudgetGuardError
+    from finops.budget_models import BudgetPolicy, SCOPE_GLOBAL
+    from finops.models import BudgetLimits, PriceQuote
+    from finops.service import FinOpsService
+
+    quote = PriceQuote("openai", "m", Decimal("1"), Decimal("1"), "USD", True)
+    finops = FinOpsService(prices={("openai", "m"): quote}, limits=BudgetLimits(None, None, None, "allow"))
+    guard = BudgetGuard(
+        finops=finops,
+        policies=(BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("10")),),
+        required=True,
+    )
+
+    def try_reserve(i):
+        try:
+            return guard.reserve(
+                task_id=f"t{i}",
+                provider="openai",
+                model="m",
+                estimated_cost=Decimal("7"),
+            )
+        except BudgetGuardError:
+            return None
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(try_reserve, range(2)))
+    ok = [r for r in results if r is not None]
+    reserved = guard.ledger.get_reserved("global")
+    if len(ok) == 1 and reserved <= Decimal("10"):
+        return _ok({"reserved": str(reserved), "wins": len(ok)})
+    return _fail(["overspend"], {"reserved": str(reserved), "wins": len(ok)})
+
+
+@handler("finops_release_restores_capacity")
+def finops_release_restores_capacity(case) -> HandlerResult:
+    from decimal import Decimal
+
+    from finops.budget_guard import BudgetGuard
+    from finops.budget_models import BudgetPolicy, SCOPE_GLOBAL
+    from finops.models import BudgetLimits, PriceQuote
+    from finops.service import FinOpsService
+
+    quote = PriceQuote("openai", "m", Decimal("1"), Decimal("1"), "USD", True)
+    finops = FinOpsService(prices={("openai", "m"): quote}, limits=BudgetLimits(None, None, None, "allow"))
+    guard = BudgetGuard(
+        finops=finops,
+        policies=(BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("10")),),
+        required=True,
+    )
+    r = guard.reserve(task_id="t", provider="openai", model="m", estimated_cost=Decimal("8"))
+    guard.release(r.reservation_id)
+    remaining = guard.get_remaining_budget("global")
+    if remaining == Decimal("10"):
+        return _ok({"remaining": str(remaining)})
+    return _fail(["capacity_not_restored"], {"remaining": str(remaining)})
+
+
+@handler("finops_degrade_capability_safe")
+def finops_degrade_capability_safe(case) -> HandlerResult:
+    from decimal import Decimal
+
+    from finops.budget_guard import BudgetGuard
+    from finops.budget_models import DECISION_TERMINATE, BudgetPolicy, SCOPE_GLOBAL
+    from finops.models import BudgetLimits, PriceQuote
+    from finops.service import FinOpsService
+
+    prices = {
+        ("openai", "expensive"): PriceQuote("openai", "expensive", Decimal("10"), Decimal("10"), "USD", True),
+        ("anthropic", "cheap"): PriceQuote("anthropic", "cheap", Decimal("1"), Decimal("1"), "USD", True),
+    }
+    finops = FinOpsService(prices=prices, limits=BudgetLimits(None, None, None, "allow"))
+    guard = BudgetGuard(
+        finops=finops,
+        policies=(
+            BudgetPolicy(
+                "g",
+                SCOPE_GLOBAL,
+                hard_limit=Decimal("20"),
+                soft_limit=Decimal("15"),
+                degrade_threshold=Decimal("15"),
+            ),
+        ),
+        required=True,
+    )
+    # Spend down so remaining is soft
+    guard.store.add_spent("global:", Decimal("10"))
+    d = guard.evaluate(
+        task_id="t",
+        provider="openai",
+        model="expensive",
+        estimated_cost=Decimal("6"),
+        capable_candidates=(),  # no capable cheaper → TERMINATE
+    )
+    if d.decision == DECISION_TERMINATE:
+        return _ok({"decision": d.decision})
+    return _fail(["expected_terminate_no_capable"], {"decision": d.decision})
+
+
+@handler("finops_unknown_cost_not_zero")
+def finops_unknown_cost_not_zero(case) -> HandlerResult:
+    from finops.budget_guard import BudgetGuard
+    from finops.budget_models import BudgetPolicy, SCOPE_GLOBAL, DECISION_TERMINATE
+    from finops.models import BudgetLimits
+    from finops.service import FinOpsService
+    from decimal import Decimal
+
+    finops = FinOpsService(
+        prices={},
+        limits=BudgetLimits(None, None, None, "deny"),
+    )
+    guard = BudgetGuard(
+        finops=finops,
+        policies=(BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("10")),),
+        required=True,
+    )
+    d = guard.evaluate(
+        task_id="t", provider="openai", model="m", estimated_cost=None
+    )
+    if d.decision == DECISION_TERMINATE and d.requested_cost is None:
+        return _ok({"decision": d.decision, "reason": d.reason_code})
+    return _fail(["unknown_became_free"], {"decision": d.decision})
+
+
 def get_handler(name: str):
     if name not in HANDLER_REGISTRY:
         raise KeyError(f"unknown_handler:{name}")

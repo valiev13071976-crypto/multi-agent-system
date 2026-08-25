@@ -105,9 +105,11 @@ class ModelRouter:
         mode: str,
         role_id: str,
         category: str | None = None,
+        budget_constraints=None,
     ) -> RoutingDecision:
         if mode == "both":
             provider_ids = self.registry.available_provider_ids()
+            provider_ids = self._apply_budget_constraints(provider_ids, budget_constraints)
             return self._decision(
                 role_id,
                 provider_ids,
@@ -116,16 +118,38 @@ class ModelRouter:
 
         if mode == MODE_AUTO:
             requested_category = category or routing_category_for_role(role_id)
-            return self._decide_auto(role_id, requested_category)
+            return self._decide_auto(
+                role_id, requested_category, budget_constraints=budget_constraints
+            )
 
         provider_ids = (mode,)
+        provider_ids = self._apply_budget_constraints(provider_ids, budget_constraints)
+        if not provider_ids and budget_constraints is not None:
+            return self._decision(role_id, (), REASON_EXPLICIT_PROVIDER)
         return self._decision(role_id, provider_ids, REASON_EXPLICIT_PROVIDER)
 
-    def _decide_auto(self, role_id: str, category: str) -> RoutingDecision:
+    def _apply_budget_constraints(
+        self, provider_ids: tuple[str, ...], budget_constraints
+    ) -> tuple[str, ...]:
+        if budget_constraints is None:
+            return tuple(provider_ids)
+        excluded = set(getattr(budget_constraints, "excluded_providers", ()) or ())
+        filtered = tuple(p for p in provider_ids if p not in excluded)
+        preferred = getattr(budget_constraints, "preferred_cheaper", ()) or ()
+        if preferred:
+            preferred_ids = tuple(p for p, _m in preferred if p in filtered)
+            if preferred_ids:
+                return preferred_ids
+        return filtered
+
+    def _decide_auto(
+        self, role_id: str, category: str, budget_constraints=None
+    ) -> RoutingDecision:
         if not self.registry.available_provider_ids():
             return self._decision(role_id, (), REASON_AUTO_PROVIDER)
 
         capable = self.registry.providers_supporting(category)
+        capable = self._apply_budget_constraints(capable, budget_constraints)
         if capable:
             selected = self._rank_providers(capable)
             return self._decision(
@@ -137,6 +161,7 @@ class ModelRouter:
         fallback = self.registry.auto_capability_fallback
         if fallback == FALLBACK_GENERAL:
             general = self.registry.providers_supporting("general")
+            general = self._apply_budget_constraints(general, budget_constraints)
             if general:
                 selected = self._rank_providers(general)
                 return self._decision(
@@ -148,10 +173,17 @@ class ModelRouter:
 
         if fallback == FALLBACK_PRIORITY:
             selected = None
-            for provider_id in self.registry.auto_provider_order:
-                if self.registry.is_available(provider_id):
-                    selected = provider_id
-                    break
+            order = self._apply_budget_constraints(
+                tuple(
+                    p
+                    for p in self.registry.auto_provider_order
+                    if self.registry.is_available(p)
+                ),
+                budget_constraints,
+            )
+            for provider_id in order:
+                selected = provider_id
+                break
             if selected is None:
                 return self._decision(role_id, (), REASON_AUTO_PRIORITY_FALLBACK)
             return self._decision(

@@ -42,3 +42,9 @@ def load_budget_limits() -> BudgetLimits:
             os.getenv("FINOPS_UNKNOWN_COST_POLICY")
         ),
     )
+
+
+def load_budget_guard_enabled() -> bool:
+    from finops.budget_policy import parse_budget_guard_required
+
+    return parse_budget_guard_required(os.getenv("FINOPS_BUDGET_GUARD_ENABLED"))
