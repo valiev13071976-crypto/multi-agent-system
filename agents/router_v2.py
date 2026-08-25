@@ -149,6 +149,7 @@ class RouterV2:
         self.last_route_context = {
             "category": routing_category,
             "source": category_source,
+            "policy": self.provider_registry.auto_routing_policy,
         }
 
         decision = self.model_router.decide(

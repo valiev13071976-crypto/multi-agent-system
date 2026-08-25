@@ -3,9 +3,18 @@ from types import MappingProxyType
 from typing import Mapping
 
 from agents.model_profile import (
+    COST_RANK,
     FALLBACK_ERROR,
     FALLBACK_GENERAL,
     FALLBACK_PRIORITY,
+    LATENCY_RANK,
+    POLICY_BALANCED,
+    POLICY_COST,
+    POLICY_LATENCY,
+    POLICY_PRIORITY,
+    POLICY_QUALITY,
+    QUALITY_RANK,
+    balanced_score,
     routing_category_for_role,
 )
 from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
@@ -90,7 +99,7 @@ class ModelRouter:
 
         capable = self.registry.providers_supporting(category)
         if capable:
-            selected = capable[0]
+            selected = self._rank_providers(capable)
             return self._decision(
                 role_id,
                 (selected,),
@@ -101,7 +110,7 @@ class ModelRouter:
         if fallback == FALLBACK_GENERAL:
             general = self.registry.providers_supporting("general")
             if general:
-                selected = general[0]
+                selected = self._rank_providers(general)
                 return self._decision(
                     role_id,
                     (selected,),
@@ -127,3 +136,54 @@ class ModelRouter:
             raise NoCapableProviderError(category)
 
         raise NoCapableProviderError(category)
+
+    def _rank_providers(self, candidates: tuple[str, ...]) -> str:
+        policy = self.registry.auto_routing_policy
+        order_index = {
+            provider_id: index
+            for index, provider_id in enumerate(self.registry.auto_provider_order)
+        }
+
+        def tie_break(provider_id: str) -> int:
+            return order_index.get(provider_id, len(order_index))
+
+        if policy == POLICY_PRIORITY:
+            return min(candidates, key=tie_break)
+
+        if policy == POLICY_QUALITY:
+            return min(
+                candidates,
+                key=lambda provider_id: (
+                    -QUALITY_RANK[self.registry.profile(provider_id).quality_class],
+                    tie_break(provider_id),
+                ),
+            )
+
+        if policy == POLICY_COST:
+            return min(
+                candidates,
+                key=lambda provider_id: (
+                    -COST_RANK[self.registry.profile(provider_id).cost_class],
+                    tie_break(provider_id),
+                ),
+            )
+
+        if policy == POLICY_LATENCY:
+            return min(
+                candidates,
+                key=lambda provider_id: (
+                    -LATENCY_RANK[self.registry.profile(provider_id).latency_class],
+                    tie_break(provider_id),
+                ),
+            )
+
+        if policy == POLICY_BALANCED:
+            return min(
+                candidates,
+                key=lambda provider_id: (
+                    -balanced_score(self.registry.profile(provider_id)),
+                    tie_break(provider_id),
+                ),
+            )
+
+        return min(candidates, key=tie_break)

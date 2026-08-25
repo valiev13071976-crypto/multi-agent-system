@@ -2,10 +2,12 @@ import os
 
 from agents.model_profile import (
     AUTO_CAPABILITY_FALLBACK_ENV,
+    AUTO_ROUTING_POLICY_ENV,
     PROVIDER_PROFILE_ENV,
     ModelProfile,
     build_model_profile,
     parse_auto_capability_fallback,
+    parse_auto_routing_policy,
 )
 
 
@@ -31,3 +33,7 @@ def load_model_profiles(records: dict) -> dict[str, ModelProfile]:
 
 def load_auto_capability_fallback() -> str:
     return parse_auto_capability_fallback(os.getenv(AUTO_CAPABILITY_FALLBACK_ENV))
+
+
+def load_auto_routing_policy() -> str:
+    return parse_auto_routing_policy(os.getenv(AUTO_ROUTING_POLICY_ENV))

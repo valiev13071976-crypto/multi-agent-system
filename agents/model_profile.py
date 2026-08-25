@@ -45,6 +45,36 @@ PROVIDER_PROFILE_ENV = {
 }
 
 AUTO_CAPABILITY_FALLBACK_ENV = "AUTO_CAPABILITY_FALLBACK"
+AUTO_ROUTING_POLICY_ENV = "AUTO_ROUTING_POLICY"
+
+POLICY_PRIORITY = "priority"
+POLICY_QUALITY = "quality"
+POLICY_COST = "cost"
+POLICY_LATENCY = "latency"
+POLICY_BALANCED = "balanced"
+AUTO_ROUTING_POLICIES = (
+    POLICY_PRIORITY,
+    POLICY_QUALITY,
+    POLICY_COST,
+    POLICY_LATENCY,
+    POLICY_BALANCED,
+)
+DEFAULT_AUTO_ROUTING_POLICY = POLICY_PRIORITY
+
+QUALITY_RANK = {
+    "premium": 2,
+    "standard": 1,
+}
+COST_RANK = {
+    "cheap": 2,
+    "standard": 1,
+    "premium": 0,
+}
+LATENCY_RANK = {
+    "fast": 2,
+    "standard": 1,
+    "slow": 0,
+}
 
 
 class InvalidModelProfileError(ValueError):
@@ -58,6 +88,15 @@ class InvalidCapabilityFallbackError(ValueError):
         super().__init__(
             f"Invalid {AUTO_CAPABILITY_FALLBACK_ENV}={raw!r}. "
             f"Allowed: {', '.join(AUTO_CAPABILITY_FALLBACKS)}."
+        )
+
+
+class InvalidAutoRoutingPolicyError(ValueError):
+    def __init__(self, raw: str):
+        self.raw = raw
+        super().__init__(
+            f"Invalid {AUTO_ROUTING_POLICY_ENV}={raw!r}. "
+            f"Allowed: {', '.join(AUTO_ROUTING_POLICIES)}."
         )
 
 
@@ -140,6 +179,23 @@ def parse_auto_capability_fallback(raw: str | None) -> str:
     if value not in AUTO_CAPABILITY_FALLBACKS:
         raise InvalidCapabilityFallbackError(raw=str(raw))
     return value
+
+
+def parse_auto_routing_policy(raw: str | None) -> str:
+    if raw is None or not str(raw).strip():
+        return DEFAULT_AUTO_ROUTING_POLICY
+    value = str(raw).strip()
+    if value not in AUTO_ROUTING_POLICIES:
+        raise InvalidAutoRoutingPolicyError(raw=str(raw))
+    return value
+
+
+def balanced_score(profile: ModelProfile) -> int:
+    return (
+        QUALITY_RANK[profile.quality_class]
+        + COST_RANK[profile.cost_class]
+        + LATENCY_RANK[profile.latency_class]
+    )
 
 
 def build_model_profile(

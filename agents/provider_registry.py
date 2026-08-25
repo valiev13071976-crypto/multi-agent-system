@@ -81,9 +81,11 @@ class ProviderRegistry:
         auto_provider_order: tuple[str, ...] | None = None,
         profiles: dict | None = None,
         auto_capability_fallback: str | None = None,
+        auto_routing_policy: str | None = None,
     ):
         from agents.model_profile import (
             DEFAULT_AUTO_CAPABILITY_FALLBACK,
+            DEFAULT_AUTO_ROUTING_POLICY,
             build_model_profile,
         )
 
@@ -107,11 +109,17 @@ class ProviderRegistry:
             if auto_capability_fallback is None
             else auto_capability_fallback
         )
+        self.auto_routing_policy = (
+            DEFAULT_AUTO_ROUTING_POLICY
+            if auto_routing_policy is None
+            else auto_routing_policy
+        )
 
     @classmethod
     def from_env(cls):
         from config.model_profiles import (
             load_auto_capability_fallback,
+            load_auto_routing_policy,
             load_model_profiles,
         )
 
@@ -131,6 +139,7 @@ class ProviderRegistry:
             ),
             profiles=load_model_profiles(records),
             auto_capability_fallback=load_auto_capability_fallback(),
+            auto_routing_policy=load_auto_routing_policy(),
         )
 
     def is_available(self, provider_id: str) -> bool:
