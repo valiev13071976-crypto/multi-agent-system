@@ -127,6 +127,8 @@ class ExecutionPermit:
     idempotency_key: str | None
     single_use: bool = True
     status: str = PERMIT_ISSUED
+    consumed_at: datetime | None = None
+    version: int = 1
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):

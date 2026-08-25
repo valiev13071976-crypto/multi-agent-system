@@ -17,6 +17,16 @@ class WorkflowStateStore:
     def get_checkpoint(self, workflow_id: str) -> Checkpoint | None:
         raise NotImplementedError
 
+    def list_by_status(self, status: str) -> tuple[WorkflowState, ...]:
+        raise NotImplementedError
+
+    def list_all(self) -> tuple[WorkflowState, ...]:
+        raise NotImplementedError
+
+
+# P7E naming alias — same interface; no competing workflow state system.
+WorkflowRuntimeStore = WorkflowStateStore
+
 
 class InMemoryWorkflowStateStore(WorkflowStateStore):
     def __init__(self):
@@ -37,3 +47,11 @@ class InMemoryWorkflowStateStore(WorkflowStateStore):
 
     def get_checkpoint(self, workflow_id: str) -> Checkpoint | None:
         return self._checkpoints.get(workflow_id)
+
+    def list_by_status(self, status: str) -> tuple[WorkflowState, ...]:
+        return tuple(
+            item for item in self._states.values() if item.status == status
+        )
+
+    def list_all(self) -> tuple[WorkflowState, ...]:
+        return tuple(self._states.values())

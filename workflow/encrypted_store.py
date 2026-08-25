@@ -68,3 +68,13 @@ class EncryptedWorkflowStateStore(WorkflowStateStore):
 
     def get_checkpoint(self, workflow_id: str) -> Checkpoint | None:
         return self._inner.get_checkpoint(workflow_id)
+
+    def list_by_status(self, status: str):
+        if hasattr(self._inner, "list_by_status"):
+            return self._inner.list_by_status(status)
+        return ()
+
+    def list_all(self):
+        if hasattr(self._inner, "list_all"):
+            return self._inner.list_all()
+        return ()

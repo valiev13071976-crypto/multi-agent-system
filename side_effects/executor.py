@@ -189,6 +189,9 @@ class SideEffectExecutor:
             self._validate_adapter(action, adapter, fingerprint)
             self._require_activation(action, adapter, purpose=PURPOSE_MUTATE, now=stamp)
             self._require_persistence_ready(purpose=PURPOSE_MUTATE)
+            self._require_protected_state_ready(
+                authorization_type=authorization_type, purpose=PURPOSE_MUTATE
+            )
             if self.activation is not None:
                 self.audit.record(
                     EVENT_REAL_EXECUTION_AUTHORIZED,
@@ -200,17 +203,43 @@ class SideEffectExecutor:
                 )
             try:
                 self._reserve_or_start(action, execution_id)
-                self._persist_started_execution(
+                self._persist_started_and_consume_permit(
                     action=action,
                     execution_id=execution_id,
                     authorization_type=authorization_type,
                     authorization_id=authorization_id,
                     started_at=started_at,
+                    permit=permit if authorization_type == AUTHORIZATION_EXECUTION_PERMIT else None,
+                    hitl=hitl,
+                    stamp=stamp,
                 )
+                if authorization_type == AUTHORIZATION_EXECUTION_PERMIT:
+                    permit_consumed = True
+                    self.trace.append("permit_consumed")
+                    self.audit.record(
+                        EVENT_PERMIT_CONSUMED,
+                        execution_id=execution_id,
+                        workflow_id=action.workflow_id,
+                        action_id=action.action_id,
+                        authorization_type=authorization_type,
+                        authorization_id=authorization_id,
+                    )
             except SideEffectPersistenceUnavailableError:
                 raise
             except Exception as exc:
                 if isinstance(exc, (SideEffectAlreadyCompletedError, SideEffectIdempotencyError)):
+                    raise
+                if isinstance(
+                    exc,
+                    (
+                        ExecutionPermitExpiredError,
+                        ExecutionPermitConsumedError,
+                        ExecutionPermitRevokedError,
+                        ExecutionPermitMismatchError,
+                        SideEffectAuthorizationError,
+                        ActionIntegrityError,
+                    ),
+                ):
                     raise
                 raise SideEffectPersistenceUnavailableError() from exc
             self.audit.record(
@@ -220,18 +249,6 @@ class SideEffectExecutor:
                 action_id=action.action_id,
                 metadata={"idempotency_key_hash": hash_idempotency_key(action.idempotency_key)},
             )
-            if authorization_type == AUTHORIZATION_EXECUTION_PERMIT:
-                self._consume_permit(permit, action, hitl, stamp)
-                permit_consumed = True
-                self.trace.append("permit_consumed")
-                self.audit.record(
-                    EVENT_PERMIT_CONSUMED,
-                    execution_id=execution_id,
-                    workflow_id=action.workflow_id,
-                    action_id=action.action_id,
-                    authorization_type=authorization_type,
-                    authorization_id=authorization_id,
-                )
             request = SideEffectExecutionRequest(
                 execution_id=execution_id,
                 workflow_id=action.workflow_id,
@@ -851,6 +868,57 @@ class SideEffectExecutor:
         if bundle is None or not getattr(bundle, "ready", False):
             raise SideEffectPersistenceUnavailableError()
 
+    def _require_protected_state_ready(
+        self, *, authorization_type: str | None, purpose: str
+    ) -> None:
+        if purpose not in {PURPOSE_MUTATE, PURPOSE_ROLLBACK}:
+            return
+        if authorization_type != AUTHORIZATION_EXECUTION_PERMIT:
+            return
+        if not self.require_durable_persistence:
+            return
+        bundle = self.persistence
+        if bundle is None or not getattr(bundle, "protected_state_ready", False):
+            raise SideEffectPersistenceUnavailableError(
+                "protected_state_persistence_unavailable"
+            )
+
+    def _persist_started_and_consume_permit(
+        self,
+        *,
+        action,
+        execution_id: str,
+        authorization_type: str,
+        authorization_id: str,
+        started_at,
+        permit=None,
+        hitl=None,
+        stamp=None,
+    ) -> None:
+        """Persist started execution, then durable-consume permit before any mutation."""
+
+        def _body():
+            self._persist_started_execution(
+                action=action,
+                execution_id=execution_id,
+                authorization_type=authorization_type,
+                authorization_id=authorization_id,
+                started_at=started_at,
+                permit=permit,
+                use_uow=False,
+            )
+            if permit is not None:
+                self._consume_permit(permit, action, hitl, stamp)
+
+        uow = None
+        if self.persistence is not None:
+            uow = self.persistence.unit_of_work()
+        if uow is not None:
+            with uow:
+                _body()
+        else:
+            _body()
+
     def _persist_started_execution(
         self,
         *,
@@ -859,8 +927,17 @@ class SideEffectExecutor:
         authorization_type: str,
         authorization_id: str,
         started_at,
+        permit=None,
+        use_uow: bool = True,
     ) -> None:
         key = action.idempotency_key or ""
+        permit_id = None
+        approval_id = None
+        if permit is not None:
+            permit_id = permit.permit_id
+            approval_id = permit.approval_id
+        elif authorization_type == AUTHORIZATION_EXECUTION_PERMIT and authorization_id:
+            permit_id = authorization_id
         record = SideEffectExecutionRecord(
             execution_id=execution_id,
             action_id=action.action_id,
@@ -879,11 +956,13 @@ class SideEffectExecutor:
             resource_ref=str(action.resource or "") or None,
             reversible=True,
             version=1,
+            permit_id=permit_id,
+            approval_id=approval_id,
             metadata={"phase": "started"},
         )
         try:
             uow = None
-            if self.persistence is not None:
+            if use_uow and self.persistence is not None:
                 uow = self.persistence.unit_of_work()
             if uow is not None:
                 with uow:
@@ -901,10 +980,13 @@ class SideEffectExecutor:
                 else:
                     self.store.save(record)
                 if hasattr(self.idempotency, "bind_execution"):
-                    try:
+                    if use_uow:
+                        try:
+                            self.idempotency.bind_execution(key, execution_id)
+                        except Exception:
+                            pass
+                    else:
                         self.idempotency.bind_execution(key, execution_id)
-                    except Exception:
-                        pass
         except SideEffectPersistenceUnavailableError:
             raise
         except Exception as exc:
@@ -967,6 +1049,12 @@ class SideEffectExecutor:
             ),
             reversible=bool(result.reversible),
             version=next_version,
+            permit_id=(
+                existing.permit_id if existing is not None else None
+            ),
+            approval_id=(
+                existing.approval_id if existing is not None else None
+            ),
             metadata={
                 "authorization_type": authorization_type,
                 "attempt": attempt,

@@ -315,6 +315,8 @@ class SideEffectExecutionRecord:
     resource_ref: str | None = None
     reversible: bool = False
     version: int = 1
+    permit_id: str | None = None
+    approval_id: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):

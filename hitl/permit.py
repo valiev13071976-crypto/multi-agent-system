@@ -44,7 +44,11 @@ class PermitService:
             raise ExecutionPermitConsumedError()
         if permit.status == PERMIT_EXPIRED or permit.expires_at <= stamp:
             if permit.status == PERMIT_ISSUED:
-                expired = replace(permit, status=PERMIT_EXPIRED)
+                expired = replace(
+                    permit,
+                    status=PERMIT_EXPIRED,
+                    version=int(permit.version) + 1,
+                )
                 self.store.save(expired)
             raise ExecutionPermitExpiredError()
         if permit.status != PERMIT_ISSUED:
@@ -69,13 +73,23 @@ class PermitService:
         action=None,
         now: datetime | None = None,
     ) -> ExecutionPermit:
-        permit = self.validate(self.get(permit_id), action=action, now=now)
-        consumed = replace(permit, status=PERMIT_CONSUMED)
+        stamp = now or utc_now()
+        permit = self.validate(self.get(permit_id), action=action, now=stamp)
+        consumed = replace(
+            permit,
+            status=PERMIT_CONSUMED,
+            consumed_at=stamp,
+            version=int(permit.version) + 1,
+        )
         self.store.save(consumed)
         return consumed
 
     def revoke(self, permit_id: str) -> ExecutionPermit:
         permit = self.get(permit_id)
-        revoked = replace(permit, status=PERMIT_REVOKED)
+        revoked = replace(
+            permit,
+            status=PERMIT_REVOKED,
+            version=int(permit.version) + 1,
+        )
         self.store.save(revoked)
         return revoked

@@ -26,6 +26,8 @@ from side_effects.errors import (
 from side_effects.models import ReconciliationRecord, SideEffectExecutionRecord
 from side_effects.schema import (
     DDL,
+    DDL_V2,
+    EXECUTION_LINKAGE_COLUMNS,
     MAX_ENCRYPTED_PAYLOAD_BYTES,
     MAX_SAFE_METADATA_BYTES,
     SCHEMA_VERSION,
@@ -75,6 +77,14 @@ def _json_loads(raw: str | None) -> dict:
     if not isinstance(data, dict):
         return {}
     return data
+
+
+def _row_get(row: sqlite3.Row, key: str, default=None):
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return default
+    return default if value is None else value
 
 
 def _split_payload(
@@ -172,6 +182,8 @@ class SqliteConnection:
                     "SELECT version FROM side_effect_schema_meta WHERE id = 1"
                 ).fetchone()
                 if row is None:
+                    conn.executescript(DDL_V2)
+                    self._ensure_execution_linkage_columns(conn)
                     conn.execute(
                         "INSERT INTO side_effect_schema_meta(id, version) VALUES (1, ?)",
                         (SCHEMA_VERSION,),
@@ -179,18 +191,42 @@ class SqliteConnection:
                     conn.commit()
                     return SCHEMA_VERSION
                 version = int(row["version"])
-                if version != SCHEMA_VERSION:
+                if version > SCHEMA_VERSION:
                     raise SideEffectPersistenceUnavailableError(
                         "side_effect_schema_version_unsupported"
                     )
+                if version < 1:
+                    raise SideEffectPersistenceUnavailableError(
+                        "side_effect_schema_version_unsupported"
+                    )
+                # Additive migration: v1 → v2 (and idempotent ensure for v2).
+                conn.executescript(DDL_V2)
+                self._ensure_execution_linkage_columns(conn)
+                if version < SCHEMA_VERSION:
+                    conn.execute(
+                        "UPDATE side_effect_schema_meta SET version = ? WHERE id = 1",
+                        (SCHEMA_VERSION,),
+                    )
                 conn.commit()
-                return version
+                return SCHEMA_VERSION
             except SideEffectPersistenceUnavailableError:
                 raise
             except sqlite3.Error as exc:
                 raise SideEffectPersistenceUnavailableError(
                     "side_effect_persistence_unavailable"
                 ) from exc
+
+    def _ensure_execution_linkage_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(side_effect_executions)").fetchall()
+        }
+        for name, col_type in EXECUTION_LINKAGE_COLUMNS:
+            if name in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE side_effect_executions ADD COLUMN {name} {col_type}"
+            )
 
     def get_schema_version(self) -> int:
         conn = self.connect()
@@ -376,6 +412,8 @@ class PersistentSideEffectExecutionStore:
             "reconciliation_id": record.reconciliation_id,
             "recovery_attempt": int(record.recovery_attempt),
             "version": int(record.version),
+            "permit_id": record.permit_id,
+            "approval_id": record.approval_id,
             "sensitivity": SENSITIVITY_INTERNAL,
             "safe_metadata_json": safe_json,
             "encrypted_payload_json": encrypted_json,
@@ -413,6 +451,8 @@ class PersistentSideEffectExecutionStore:
                     "reconciliation_id",
                     "recovery_attempt",
                     "version",
+                    "permit_id",
+                    "approval_id",
                     "sensitivity",
                     "safe_metadata_json",
                     "encrypted_payload_json",
@@ -468,6 +508,8 @@ class PersistentSideEffectExecutionStore:
             resource_ref=row["resource_ref"],
             reversible=bool(row["reversible"]),
             version=int(row["version"]),
+            permit_id=_row_get(row, "permit_id"),
+            approval_id=_row_get(row, "approval_id"),
             metadata=metadata,
         )
 

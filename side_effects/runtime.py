@@ -44,10 +44,19 @@ class SideEffectRuntime:
                     "persistence_ready": self.persistence.ready,
                     "database_path_ref": self.persistence.database_path_ref,
                     "schema_version": self.persistence.schema_version,
+                    "protected_state_ready": self.persistence.protected_state_ready,
                 }
             )
             if self.persistence.last_scan is not None:
-                meta["recovery_scan"] = self.persistence.last_scan.as_dict()
+                scan = self.persistence.last_scan.as_dict()
+                meta["recovery_scan"] = scan
+                meta["pending_approval_count"] = scan.get("pending_approval_count", 0)
+                meta["expired_approval_count"] = scan.get("expired_approval_count", 0)
+                meta["active_permit_count"] = scan.get("active_permit_count", 0)
+                meta["expired_permit_count"] = scan.get("expired_permit_count", 0)
+                meta["waiting_approval_workflow_count"] = scan.get(
+                    "waiting_approval_workflow_count", 0
+                )
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,

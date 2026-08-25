@@ -1,6 +1,11 @@
-"""SQLite schema foundation for durable side-effect persistence (schema v1)."""
+"""SQLite schema foundation for durable side-effect + protected-state persistence.
 
-SCHEMA_VERSION = 1
+Schema v1: side-effect executions, idempotency, reconciliations (P7D).
+Schema v2: additive HITL approvals, execution permits, workflow runtime (P7E).
+"""
+
+SCHEMA_VERSION = 2
+SUPPORTED_SCHEMA_VERSIONS = frozenset({1, 2})
 DEFAULT_DB_PATH = "./data/side_effects.sqlite3"
 MAX_SAFE_METADATA_BYTES = 16_384
 MAX_ENCRYPTED_PAYLOAD_BYTES = 65_536
@@ -94,3 +99,111 @@ CREATE TABLE IF NOT EXISTS reconciliations (
 CREATE INDEX IF NOT EXISTS idx_recon_execution ON reconciliations(execution_id);
 CREATE INDEX IF NOT EXISTS idx_recon_status ON reconciliations(status);
 """
+
+# Additive P7E tables. Never DROP. Safe to re-run (IF NOT EXISTS).
+DDL_V2 = """
+CREATE TABLE IF NOT EXISTS workflow_runtime_state (
+    workflow_id TEXT PRIMARY KEY,
+    task_id TEXT NOT NULL,
+    state TEXT NOT NULL,
+    current_step TEXT,
+    waiting_reason TEXT,
+    approval_id TEXT,
+    action_id TEXT,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    failed_at TEXT,
+    error_code TEXT,
+    execution_key TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    sensitivity TEXT NOT NULL DEFAULT 'internal',
+    safe_metadata_json TEXT NOT NULL DEFAULT '{}',
+    encrypted_payload_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_wf_runtime_state
+    ON workflow_runtime_state(state);
+CREATE INDEX IF NOT EXISTS idx_wf_runtime_task
+    ON workflow_runtime_state(task_id);
+
+CREATE TABLE IF NOT EXISTS workflow_checkpoints (
+    workflow_id TEXT PRIMARY KEY,
+    workflow_version INTEGER NOT NULL,
+    status TEXT NOT NULL,
+    current_step TEXT,
+    completed_steps_json TEXT NOT NULL DEFAULT '[]',
+    timestamp TEXT NOT NULL,
+    sensitivity TEXT NOT NULL DEFAULT 'internal',
+    safe_metadata_json TEXT NOT NULL DEFAULT '{}',
+    encrypted_payload_json TEXT
+);
+
+CREATE TABLE IF NOT EXISTS hitl_approvals (
+    approval_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    approved_by TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    resolved_at TEXT,
+    reason_code TEXT,
+    approval_class TEXT NOT NULL DEFAULT 'standard',
+    requested_by TEXT NOT NULL DEFAULT '',
+    resolved_by TEXT,
+    requested_at TEXT,
+    expires_at TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
+    action_fingerprint TEXT NOT NULL DEFAULT '',
+    required_approvals INTEGER NOT NULL DEFAULT 1,
+    sensitivity TEXT NOT NULL DEFAULT 'internal',
+    safe_metadata_json TEXT NOT NULL DEFAULT '{}',
+    encrypted_payload_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_hitl_approval_status
+    ON hitl_approvals(status);
+CREATE INDEX IF NOT EXISTS idx_hitl_approval_workflow
+    ON hitl_approvals(workflow_id);
+CREATE INDEX IF NOT EXISTS idx_hitl_approval_action
+    ON hitl_approvals(action_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_hitl_approval_pending_action
+    ON hitl_approvals(action_id) WHERE status = 'pending';
+
+CREATE TABLE IF NOT EXISTS execution_permits (
+    permit_id TEXT PRIMARY KEY,
+    workflow_id TEXT NOT NULL,
+    task_id TEXT NOT NULL,
+    action_id TEXT NOT NULL,
+    approval_id TEXT NOT NULL,
+    decision_id TEXT NOT NULL,
+    action_fingerprint TEXT NOT NULL,
+    issued_at TEXT NOT NULL,
+    expires_at TEXT NOT NULL,
+    consumed_at TEXT,
+    status TEXT NOT NULL,
+    version INTEGER NOT NULL DEFAULT 1,
+    capabilities_json TEXT NOT NULL DEFAULT '[]',
+    tool_id TEXT NOT NULL,
+    operation TEXT NOT NULL,
+    idempotency_key TEXT,
+    single_use INTEGER NOT NULL DEFAULT 1,
+    sensitivity TEXT NOT NULL DEFAULT 'internal',
+    safe_metadata_json TEXT NOT NULL DEFAULT '{}',
+    encrypted_payload_json TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_permit_status ON execution_permits(status);
+CREATE INDEX IF NOT EXISTS idx_permit_approval ON execution_permits(approval_id);
+CREATE INDEX IF NOT EXISTS idx_permit_workflow ON execution_permits(workflow_id);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_permit_active_approval
+    ON execution_permits(approval_id) WHERE status = 'issued';
+"""
+
+EXECUTION_LINKAGE_COLUMNS = (
+    ("permit_id", "TEXT"),
+    ("approval_id", "TEXT"),
+)

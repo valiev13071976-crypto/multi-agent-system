@@ -41,6 +41,12 @@ class ApprovalStore:
     def list_by_workflow(self, workflow_id: str) -> tuple[ApprovalRecord, ...]:
         raise NotImplementedError
 
+    def list_by_status(self, status: str) -> tuple[ApprovalRecord, ...]:
+        raise NotImplementedError
+
+    def list_all(self) -> tuple[ApprovalRecord, ...]:
+        raise NotImplementedError
+
 
 class IdempotencyStore:
     def put(self, record: IdempotencyRecord) -> None:
@@ -102,6 +108,12 @@ class InMemoryApprovalStore(ApprovalStore):
         return tuple(
             item for item in self._items.values() if item.workflow_id == workflow_id
         )
+
+    def list_by_status(self, status: str) -> tuple[ApprovalRecord, ...]:
+        return tuple(item for item in self._items.values() if item.status == status)
+
+    def list_all(self) -> tuple[ApprovalRecord, ...]:
+        return tuple(self._items.values())
 
 
 class InMemoryIdempotencyStore(IdempotencyStore):

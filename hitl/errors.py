@@ -62,6 +62,12 @@ class ExecutionPermitRevokedError(HITLError):
         super().__init__("permit_revoked")
 
 
+class ExecutionPermitConflictError(HITLError):
+    def __init__(self, reason_code: str = "permit_conflict"):
+        self.reason_code = reason_code
+        super().__init__(reason_code)
+
+
 class ActionIntegrityError(HITLError):
     def __init__(self):
         super().__init__("action_changed_after_approval")

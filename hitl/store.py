@@ -18,6 +18,12 @@ class ExecutionPermitStore:
     def find_active_by_approval(self, approval_id: str) -> ExecutionPermit | None:
         raise NotImplementedError
 
+    def list_by_status(self, status: str) -> tuple[ExecutionPermit, ...]:
+        raise NotImplementedError
+
+    def list_all(self) -> tuple[ExecutionPermit, ...]:
+        raise NotImplementedError
+
 
 class HITLAuditStore:
     def append(self, event: HITLAuditEvent) -> None:
@@ -45,6 +51,12 @@ class InMemoryExecutionPermitStore(ExecutionPermitStore):
             if item.approval_id == approval_id and item.status == PERMIT_ISSUED:
                 return item
         return None
+
+    def list_by_status(self, status: str) -> tuple[ExecutionPermit, ...]:
+        return tuple(item for item in self._items.values() if item.status == status)
+
+    def list_all(self) -> tuple[ExecutionPermit, ...]:
+        return tuple(self._items.values())
 
 
 class InMemoryHITLAuditStore(HITLAuditStore):
