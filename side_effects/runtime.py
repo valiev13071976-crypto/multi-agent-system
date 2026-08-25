@@ -27,6 +27,9 @@ from side_effects.persistence import (
 )
 from side_effects.reconciliation import SideEffectReconciliationService
 from side_effects.registry import empty_adapter_registry
+from tools.adapters import descriptor_from_side_effect, github_issue_labels_descriptor
+from tools.gateway import ToolGateway
+from tools.registry import ToolRegistry
 from workflow.engine import WorkflowEngine
 from workflow.state_manager import StateManager
 
@@ -136,6 +139,8 @@ class SideEffectRuntime:
     autonomy_gate: AutonomyGate | None = None
     permit_service: PermitService | None = None
     protected_persistence_attached: bool = False
+    tool_registry: ToolRegistry | None = None
+    tool_gateway: ToolGateway | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -173,6 +178,8 @@ class SideEffectRuntime:
                 )
         else:
             meta["protected_persistence_attached"] = False
+        if self.tool_registry is not None:
+            meta["tool_gateway"] = dict(self.tool_registry.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -205,6 +212,59 @@ class SideEffectRuntime:
         return result
 
 
+def build_tool_gateway(
+    *,
+    side_effect_registry,
+    executor,
+    gate,
+    hitl,
+    github_enabled: bool = False,
+) -> tuple[ToolRegistry, ToolGateway]:
+    """Register built-in tools, optionally GitHub write tool, then freeze."""
+
+    tool_registry = ToolRegistry()
+    gateway = ToolGateway(
+        registry=tool_registry,
+        side_effect_executor=executor,
+        gate=gate,
+        hitl=hitl,
+        register_search=True,
+    )
+    github_adapter = None
+    if hasattr(side_effect_registry, "get"):
+        github_adapter = side_effect_registry.get("github.issue_labels")
+    if github_adapter is not None:
+        se_desc = getattr(github_adapter, "descriptor", None)
+        if se_desc is not None:
+            tool_registry.register(
+                descriptor_from_side_effect(
+                    se_desc,
+                    name="GitHub Issue Labels",
+                    description="Bounded reversible GitHub issue label mutations",
+                    version="1.0.0",
+                    enabled=True,
+                    idempotency_required=True,
+                    timeout_seconds=15.0,
+                ),
+                adapter=github_adapter,
+            )
+        else:
+            tool_registry.register(
+                github_issue_labels_descriptor(enabled=True),
+                adapter=github_adapter,
+            )
+    else:
+        tool_registry.register(
+            github_issue_labels_descriptor(enabled=False), adapter=None
+        )
+    tool_registry.freeze()
+    gateway.side_effect_executor = executor
+    gateway.gate = gate
+    gateway.hitl = hitl
+    _ = github_enabled
+    return tool_registry, gateway
+
+
 def _finalize_runtime(
     *,
     config,
@@ -218,6 +278,15 @@ def _finalize_runtime(
 ) -> SideEffectRuntime:
     engine = services["workflow_engine"]
     engine.side_effect_executor = executor
+    tool_registry, tool_gateway = build_tool_gateway(
+        side_effect_registry=registry,
+        executor=executor,
+        gate=services["gate"],
+        hitl=services["hitl_service"],
+        github_enabled=bool(config.enabled and registry.get("github.issue_labels") is not None)
+        if hasattr(registry, "get")
+        else False,
+    )
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -232,6 +301,8 @@ def _finalize_runtime(
         autonomy_gate=services["gate"],
         permit_service=services["permit_service"],
         protected_persistence_attached=services["protected_persistence_attached"],
+        tool_registry=tool_registry,
+        tool_gateway=tool_gateway,
     )
 
 

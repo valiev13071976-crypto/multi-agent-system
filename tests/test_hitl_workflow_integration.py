@@ -1,5 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import unittest
+from unittest import mock
 
 from autonomy.capabilities import (
     CAP_EXTERNAL_READ,
@@ -324,9 +325,10 @@ class HITLWorkflowQueueRegressionTests(unittest.IsolatedAsyncioTestCase):
             autonomy_level="executor_confirmed",
             now=T0,
         )
-        result = await engine.resume(
-            workflow_id, execution_permit=permit, action=action
-        )
+        with mock.patch("hitl.permit.utc_now", return_value=T0):
+            result = await engine.resume(
+                workflow_id, execution_permit=permit, action=action
+            )
         self.assertTrue(result["ready_for_execution"])
         self.assertEqual(result["permit_id"], permit.permit_id)
         from workflow.models import STATUS_RUNNING
