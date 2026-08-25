@@ -1049,6 +1049,178 @@ def finops_unknown_cost_not_zero(case) -> HandlerResult:
     return _fail(["unknown_became_free"], {"decision": d.decision})
 
 
+@handler("recovery_uncertain_never_auto_replay")
+def recovery_uncertain_never_auto_replay(case) -> HandlerResult:
+    from recovery.models import ACTION_RECONCILE_READ_ONLY, CASE_UNCERTAIN_SIDE_EFFECT
+    from recovery.orchestrator import RecoveryAuthorizationRequired, RecoveryOrchestrator
+    from recovery.policy import RecoveryPolicy
+
+    orch = RecoveryOrchestrator(enqueue_reconcile_on_create=False)
+    created = orch.create_case(
+        execution_id="exec-1",
+        case_type=CASE_UNCERTAIN_SIDE_EFFECT,
+        reason_code="uncertain",
+        enqueue=False,
+    )
+    plan = RecoveryPolicy().plan(created, reconciliation_status=None)
+    mutates = any(s.mutates for s in plan.steps)
+    replay = any(s.action_type not in {ACTION_RECONCILE_READ_ONLY} and s.mutates for s in plan.steps)
+    if mutates or replay:
+        return _fail(["auto_replay_planned"], {"steps": [s.action_type for s in plan.steps]})
+    return _ok({"steps": [s.action_type for s in plan.steps], "waiting": plan.waiting_operator})
+
+
+@handler("recovery_confirmed_failure_new_auth")
+def recovery_confirmed_failure_new_auth(case) -> HandlerResult:
+    from recovery.models import ACTION_REQUEST_NEW_AUTHORIZATION, CASE_UNCERTAIN_SIDE_EFFECT
+    from recovery.orchestrator import RecoveryOrchestrator
+    from recovery.policy import RecoveryPolicy
+    from side_effects.models import RECON_CONFIRMED_FAILED
+
+    orch = RecoveryOrchestrator(enqueue_reconcile_on_create=False)
+    created = orch.create_case(
+        execution_id="exec-cf",
+        case_type=CASE_UNCERTAIN_SIDE_EFFECT,
+        enqueue=False,
+    )
+    plan = RecoveryPolicy().plan(created, reconciliation_status=RECON_CONFIRMED_FAILED)
+    types = [s.action_type for s in plan.steps]
+    if ACTION_REQUEST_NEW_AUTHORIZATION in types and plan.waiting_operator:
+        return _ok({"steps": types})
+    return _fail(["expected_new_authorization"], {"steps": types})
+
+
+@handler("recovery_unknown_waits_operator")
+def recovery_unknown_waits_operator(case) -> HandlerResult:
+    from recovery.models import CASE_UNCERTAIN_SIDE_EFFECT
+    from recovery.orchestrator import RecoveryOrchestrator
+    from recovery.policy import RecoveryPolicy
+    from side_effects.models import RECON_STILL_UNCERTAIN
+
+    orch = RecoveryOrchestrator(max_read_checks=1, enqueue_reconcile_on_create=False)
+    created = orch.create_case(
+        execution_id="exec-u",
+        case_type=CASE_UNCERTAIN_SIDE_EFFECT,
+        enqueue=False,
+    )
+    current = orch.get_case(created.recovery_id)
+    updated = RecoveryOrchestrator._clone_case(
+        current, attempt=current.max_attempts
+    )
+    orch.store.update(updated, expected_version=current.version)
+    case_row = orch.get_case(created.recovery_id)
+    plan = RecoveryPolicy().plan(
+        case_row,
+        reconciliation_status=RECON_STILL_UNCERTAIN,
+        supports_authoritative_reconcile=True,
+    )
+    if plan.waiting_operator or plan.reason_code in {
+        "waiting_operator",
+        "waiting_operator_unclassified",
+    }:
+        return _ok({"reason": plan.reason_code})
+    return _fail(["expected_waiting_operator"], {"reason": plan.reason_code, "steps": [s.action_type for s in plan.steps]})
+
+
+@handler("recovery_rollback_decision_no_mutate")
+def recovery_rollback_decision_no_mutate(case) -> HandlerResult:
+    from recovery.models import CASE_UNCERTAIN_SIDE_EFFECT, DECISION_ROLLBACK
+    from recovery.orchestrator import RecoveryAuthorizationRequired, RecoveryOrchestrator
+
+    orch = RecoveryOrchestrator(enqueue_reconcile_on_create=False)
+    created = orch.create_case(
+        execution_id="exec-rb",
+        case_type=CASE_UNCERTAIN_SIDE_EFFECT,
+        enqueue=False,
+    )
+    orch.record_decision(
+        created.recovery_id,
+        DECISION_ROLLBACK,
+        actor_id="op-1",
+        reason_code="operator_rollback",
+    )
+
+    async def _run():
+        return await orch.execute_safe_step(created.recovery_id)
+
+    try:
+        _run_async(_run())
+        return _fail(["expected_authorization_required"])
+    except RecoveryAuthorizationRequired:
+        return _ok({"mutation_calls": orch.mutation_calls})
+
+
+@handler("recovery_consumed_permit_not_reused")
+def recovery_consumed_permit_not_reused(case) -> HandlerResult:
+    from side_effects.errors import SideEffectAuthorizationError
+    from side_effects.recovery import RecoveryPolicy
+    from hitl.models import PERMIT_CONSUMED
+
+    class P:
+        status = PERMIT_CONSUMED
+        permit_id = "p1"
+
+    try:
+        RecoveryPolicy().require_fresh_authorization(permit=P())
+        return _fail(["permit_reused"])
+    except SideEffectAuthorizationError:
+        return _ok({"blocked": True})
+
+
+@handler("recovery_terminal_workflow_no_reopen")
+def recovery_terminal_workflow_no_reopen(case) -> HandlerResult:
+    from recovery.models import CASE_WORKFLOW_WAITING_RECOVERY, DECISION_RESUME, STATUS_BLOCKED
+    from recovery.orchestrator import RecoveryOrchestrator
+    from recovery.policy import RecoveryPolicy
+
+    orch = RecoveryOrchestrator(enqueue_reconcile_on_create=False)
+    created = orch.create_case(
+        execution_id="exec-term",
+        case_type=CASE_WORKFLOW_WAITING_RECOVERY,
+        workflow_id="wf-term",
+        enqueue=False,
+    )
+    plan = RecoveryPolicy().plan(
+        created,
+        operator_decision=DECISION_RESUME,
+        workflow_terminal=True,
+    )
+    if plan.reason_code == "terminal_workflow_resume_denied":
+        return _ok({"reason": plan.reason_code})
+    return _fail(["terminal_reopened"], {"reason": plan.reason_code})
+
+
+@handler("recovery_duplicate_case_prevented")
+def recovery_duplicate_case_prevented(case) -> HandlerResult:
+    from recovery.models import CASE_UNCERTAIN_SIDE_EFFECT
+    from recovery.orchestrator import RecoveryOrchestrator
+
+    orch = RecoveryOrchestrator(enqueue_reconcile_on_create=False)
+    a = orch.create_case(execution_id="exec-dup", case_type=CASE_UNCERTAIN_SIDE_EFFECT, enqueue=False)
+    b = orch.create_case(execution_id="exec-dup", case_type=CASE_UNCERTAIN_SIDE_EFFECT, enqueue=False)
+    if a.recovery_id == b.recovery_id and len(orch.list_open_cases()) == 1:
+        return _ok({"recovery_id": a.recovery_id})
+    return _fail(["duplicate_created"], {"a": a.recovery_id, "b": b.recovery_id})
+
+
+@handler("recovery_persistence_fail_closed")
+def recovery_persistence_fail_closed(case) -> HandlerResult:
+    from recovery.orchestrator import RecoveryMutationBlocked, RecoveryOrchestrator
+    from recovery.store import InMemoryRecoveryCaseStore
+
+    store = InMemoryRecoveryCaseStore()
+    orch = RecoveryOrchestrator(store=store, enqueue_reconcile_on_create=False)
+    store.available = False
+    orch._fail_closed_persistence()
+    try:
+        orch.require_mutation_allowed()
+        return _fail(["mutation_allowed"])
+    except RecoveryMutationBlocked as exc:
+        if exc.reason == "recovery_persistence_unavailable":
+            return _ok({"reason": exc.reason})
+        return _fail(["unexpected_reason"], {"reason": exc.reason})
+
+
 def get_handler(name: str):
     if name not in HANDLER_REGISTRY:
         raise KeyError(f"unknown_handler:{name}")

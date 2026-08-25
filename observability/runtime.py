@@ -289,6 +289,12 @@ class ObservabilityRuntime:
         waiting_approval: int = 0,
         pending_reconciliations: int = 0,
         dead_letter_count: int = 0,
+        open_recovery_cases: int = 0,
+        pending_manual_review: int = 0,
+        stale_recovery_jobs: int = 0,
+        critical_recovery_blocking: bool = False,
+        recovery_persistence_ready: bool = True,
+        recovery_required: bool = False,
     ) -> OperationalHealthSnapshot:
         snap = self.metrics.snapshot()
         return build_operational_health(
@@ -302,6 +308,12 @@ class ObservabilityRuntime:
             dead_letter_count=dead_letter_count,
             tool_failures_recent=int(snap.get("tool_failure_total", 0)),
             provider_failures_recent=int(snap.get("provider_failure_total", 0)),
+            open_recovery_cases=open_recovery_cases,
+            pending_manual_review=pending_manual_review,
+            stale_recovery_jobs=stale_recovery_jobs,
+            critical_recovery_blocking=critical_recovery_blocking,
+            recovery_persistence_ready=recovery_persistence_ready,
+            recovery_required=recovery_required,
         )
 
     def list_events(self) -> tuple[OperationalEvent, ...]:

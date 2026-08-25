@@ -143,6 +143,7 @@ class SideEffectRuntime:
     tool_registry: ToolRegistry | None = None
     tool_gateway: ToolGateway | None = None
     observability: ObservabilityRuntime | None = None
+    recovery_orchestrator: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -183,6 +184,23 @@ class SideEffectRuntime:
         if self.tool_registry is not None:
             meta["tool_gateway"] = dict(self.tool_registry.health())
         if self.observability is not None:
+            open_recovery = 0
+            manual = 0
+            stale_jobs = 0
+            blocked_crit = False
+            recovery_ready = True
+            if self.recovery_orchestrator is not None:
+                open_cases = self.recovery_orchestrator.list_open_cases()
+                open_recovery = len(open_cases)
+                manual = sum(1 for c in open_cases if c.status == "waiting_operator")
+                if hasattr(self.recovery_orchestrator, "get_due_jobs"):
+                    stale_jobs = len(self.recovery_orchestrator.get_due_jobs())
+                blocked_crit = bool(
+                    getattr(self.recovery_orchestrator, "mutation_blocked_reason", None)
+                )
+                store = getattr(self.recovery_orchestrator, "store", None)
+                if store is not None:
+                    recovery_ready = bool(getattr(store, "available", True))
             snap = self.observability.health(
                 persistence_ready=bool(
                     self.persistence is not None and self.persistence.ready
@@ -193,11 +211,25 @@ class SideEffectRuntime:
                 protected_write_required=bool(
                     self.config.enabled and not self.config.dry_run
                 ),
+                open_recovery_cases=open_recovery,
+                pending_manual_review=manual,
+                stale_recovery_jobs=stale_jobs,
+                critical_recovery_blocking=blocked_crit,
+                recovery_persistence_ready=recovery_ready,
+                recovery_required=bool(self.config.enabled and not self.config.dry_run),
             )
             meta["observability"] = {
                 "overall_status": snap.overall_status,
                 "uncertain_side_effects": snap.uncertain_side_effects,
                 "tool_failures_recent": snap.tool_failures_recent,
+            }
+        if self.recovery_orchestrator is not None:
+            open_cases = len(self.recovery_orchestrator.list_open_cases())
+            blocked = getattr(self.recovery_orchestrator, "mutation_blocked_reason", None)
+            meta["recovery"] = {
+                "open_cases": open_cases,
+                "mutation_blocked_reason": blocked,
+                "enabled": bool(getattr(self.recovery_orchestrator, "enabled", True)),
             }
         return type(health)(
             adapter_id=health.adapter_id,
@@ -298,6 +330,7 @@ def _finalize_runtime(
     composition_error: str | None = None,
     services: dict,
     observability: ObservabilityRuntime | None = None,
+    env: dict | None = None,
 ) -> SideEffectRuntime:
     obs = observability or build_observability_runtime(env={})
     engine = services["workflow_engine"]
@@ -322,6 +355,36 @@ def _finalize_runtime(
         else False,
         observability=obs,
     )
+    recovery = None
+    try:
+        from recovery.runtime import build_recovery_orchestrator, run_startup_recovery_materialization
+
+        recovery = build_recovery_orchestrator(
+            env=env,
+            reconciliation_service=getattr(executor, "reconciliation_service", None),
+            workflow_engine=engine,
+            gate=gate,
+            hitl=hitl,
+            side_effect_executor=executor,
+            observability=obs,
+            audit=audit,
+        )
+    except Exception:
+        recovery = None
+    # Rebuild with env from compose — attach recovery when enabled.
+    if recovery is not None:
+        executor.recovery_orchestrator = recovery
+        if persistence is not None and persistence.last_scan is not None:
+            try:
+                run_startup_recovery_materialization(
+                    recovery,
+                    execution_store=persistence.execution_store,
+                    reconciliation_store=persistence.reconciliation_store,
+                    permit_store=persistence.permit_store,
+                    enqueue=True,
+                )
+            except Exception:
+                pass
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -339,6 +402,7 @@ def _finalize_runtime(
         tool_registry=tool_registry,
         tool_gateway=tool_gateway,
         observability=obs,
+        recovery_orchestrator=recovery,
     )
 
 
@@ -415,6 +479,7 @@ def compose_side_effect_runtime(
             composition_error=exc.error_code,
             services=services,
             observability=observability,
+            env=env,
         )
     if not config.enabled:
         activation = GitHubWriteActivationService(
@@ -434,6 +499,7 @@ def compose_side_effect_runtime(
             persistence=persistence,
             services=services,
             observability=observability,
+            env=env,
         )
     try:
         if not config.allowed_repositories:
@@ -469,6 +535,7 @@ def compose_side_effect_runtime(
             composition_error=exc.error_code,
             services=services,
             observability=observability,
+            env=env,
         )
     require_durable = bool(config.enabled and not config.dry_run)
     persistence_ready, unavailable_reason = _real_write_persistence_gate(
@@ -513,6 +580,7 @@ def compose_side_effect_runtime(
         persistence=persistence,
         services=services,
         observability=observability,
+        env=env,
     )
 
 

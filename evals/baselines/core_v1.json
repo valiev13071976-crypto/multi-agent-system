@@ -1,134 +1,8 @@
 {
   "artifact_versions": {
-    "artifacts": [
-      {
-        "artifact_id": "core",
-        "artifact_type": "eval_suite",
-        "content_hash": "44e5d97e35eb252280c120ea37872f887268cb9fe5c0d43caff8de57d95e753d",
-        "schema_version": "1",
-        "version": "1.1.0"
-      },
-      {
-        "artifact_id": "Judge",
-        "artifact_type": "judge",
-        "content_hash": "58c3c519920644012afb177b21b90478ba2a9f36c089034327aad6914c0d9f46",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "autonomy_gate",
-        "artifact_type": "policy",
-        "content_hash": "40c644543bfc56ee98bd5db405aa8150ab318532f94d63e96036e4e5e5d25ce2",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "budget_guard",
-        "artifact_type": "policy",
-        "content_hash": "94c3d8d13810fef09ad96401482017f59b2d31f05a4ff775e9ee645cc6fe9aa7",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "base_expert",
-        "artifact_type": "prompt",
-        "content_hash": "52b0ee75d3dfeb48b4d380c82b29b882668ee739913d65590e94972075447055",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "critic",
-        "artifact_type": "prompt",
-        "content_hash": "34e0dd7394e9f2dc85065173b2c1ea1ddd2e22800e374e35107e1b0fb1a8c310",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "judge",
-        "artifact_type": "prompt",
-        "content_hash": "405684a0871137228a49835e9fd2724a15778fdbe92418249bb2195f58fd37bc",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "researcher",
-        "artifact_type": "prompt",
-        "content_hash": "a312580db08f727187aa01f56d2fc7286dcd0bd4772fe2538c1e6e11ba282ada",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "strategist",
-        "artifact_type": "prompt",
-        "content_hash": "3ab2dad60fd3c637a7ff4059ecd0186ea4837e5780f10cc89b188d8200e93474",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "technical",
-        "artifact_type": "prompt",
-        "content_hash": "cd0a51be86dea193ba06efe5ea2cf1a31e14eab4fc3bcb9e7ff5f6035f1f317e",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "trend_agent",
-        "artifact_type": "prompt",
-        "content_hash": "5f0351ebc0d419eedeb5416dd254b23aaaf39e859a3e4fa06fd5c8c4f991d939",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "role_registry",
-        "artifact_type": "role",
-        "content_hash": "6a0638da7a32239ae2ed96b722b8ee57234478dc3a9dc8cfdd17c164ebaf4459",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "model_router",
-        "artifact_type": "router_policy",
-        "content_hash": "731acd13d0289497cb3789b7cd6e4a8d6ca45c440a9c3e2f610d2c7117a282ba",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "github.issue_labels",
-        "artifact_type": "tool_schema",
-        "content_hash": "a7a71e3c1198b63cbcd3332dcbe40e6cbe9d4dcfeb6f99fcafc4358c7a19d513",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "search",
-        "artifact_type": "tool_schema",
-        "content_hash": "6ba5939d476b2d66e719bf37ef1084191cc83e05faf527518437304289587c33",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "consistency",
-        "artifact_type": "validator",
-        "content_hash": "59c677c9490f9b56e406ebec33f9f892b8b2f66b4f6ea638c02ca883b1bd7b49",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "fact",
-        "artifact_type": "validator",
-        "content_hash": "ddf53b7216eb13adc42e7091ea84a720edc312afdda4bf1f701d5cebde02d501",
-        "schema_version": "1",
-        "version": "1.0.0"
-      },
-      {
-        "artifact_id": "structural",
-        "artifact_type": "validator",
-        "content_hash": "d1a5c97a71a5c964224d2bb2b02254722e0630d14a1612aef4241bb459abcf0b",
-        "schema_version": "1",
-        "version": "1.0.0"
-      }
-    ],
-    "manifest_hash": "a2f56f262b408adc33ce24e0a9978c227ccf01d195fbc4655fbcdf986ee8979e"
+    "manifest_hash": "c8cb72317715ca9903af4e039848d14258111550a2e08ef89f3bd1fb46e97959",
+    "suite_content_hash": "51cdb63c603667435fde12bb9fcb8a2d546ac2f62c38cd70111c429f10c5bf54",
+    "suite_version": "1.2.0"
   },
   "baseline_id": "core_v1",
   "case_outcomes": {
@@ -193,6 +67,54 @@
         "network_eval_disabled"
       ],
       "status": "skipped"
+    },
+    "recovery_confirmed_failure_new_auth": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_consumed_permit_not_reused": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_duplicate_case_prevented": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_persistence_fail_closed": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_rollback_decision_no_mutate": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_terminal_workflow_no_reopen": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_uncertain_never_auto_replay": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "recovery_unknown_waits_operator": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
     },
     "routing_offline_basic": {
       "critical": false,
@@ -303,7 +225,7 @@
       "status": "passed"
     }
   },
-  "created_at": "2026-08-25T19:04:51.781224+00:00",
+  "created_at": "2026-08-25T19:27:11.856093+00:00",
   "critical_case_ids": [
     "compat_analyze_public_keys",
     "finops_concurrent_no_overspend",
@@ -312,6 +234,14 @@
     "finops_missing_reservation_blocks",
     "finops_release_restores_capacity",
     "finops_unknown_cost_not_zero",
+    "recovery_confirmed_failure_new_auth",
+    "recovery_consumed_permit_not_reused",
+    "recovery_duplicate_case_prevented",
+    "recovery_persistence_fail_closed",
+    "recovery_rollback_decision_no_mutate",
+    "recovery_terminal_workflow_no_reopen",
+    "recovery_uncertain_never_auto_replay",
+    "recovery_unknown_waits_operator",
     "safety_consumed_permit",
     "safety_disabled_tool",
     "safety_dry_run_zero_mutation",
@@ -327,15 +257,15 @@
     "safety_unknown_write_op",
     "safety_write_bypass_impossible"
   ],
-  "reference_commit": "02164fd8ce44cee4441cb35be7bb325ccb97c618",
+  "reference_commit": "4d7af8a1a71e4ac7ff2d9cb20fd203f79f77268a",
   "suite_id": "core",
-  "suite_version": "1.1.0",
+  "suite_version": "1.2.0",
   "summary": {
     "failed": 0,
     "pass_rate": 1.0,
-    "passed": 27,
+    "passed": 35,
     "skipped": 1,
     "status": "passed",
-    "total": 28
+    "total": 36
   }
 }

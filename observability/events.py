@@ -68,6 +68,15 @@ EVENT_TYPES = frozenset(
         "budget.degraded",
         "budget.terminated",
         "budget.forecasted",
+        "recovery.case_created",
+        "recovery.queued",
+        "recovery.check_started",
+        "recovery.check_completed",
+        "recovery.waiting_operator",
+        "recovery.decision_recorded",
+        "recovery.resolved",
+        "recovery.blocked",
+        "recovery.failed",
     }
 )
 

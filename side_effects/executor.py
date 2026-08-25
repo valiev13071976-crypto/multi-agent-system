@@ -126,6 +126,7 @@ class SideEffectExecutor:
         self.trace: list[str] = []
         self.simulate_finalization_failure = False
         self.observability = None
+        self.recovery_orchestrator = None
 
     def _obs_emit(self, event_type: str, action, **kwargs):
         from observability.helpers import safe_emit
@@ -221,6 +222,7 @@ class SideEffectExecutor:
             self._validate_adapter(action, adapter, fingerprint)
             self._require_activation(action, adapter, purpose=PURPOSE_MUTATE, now=stamp)
             self._require_persistence_ready(purpose=PURPOSE_MUTATE)
+            self._require_recovery_persistence_ready(purpose=PURPOSE_MUTATE)
             self._require_protected_state_ready(
                 authorization_type=authorization_type, purpose=PURPOSE_MUTATE
             )
@@ -620,6 +622,7 @@ class SideEffectExecutor:
             return self._result_from_record(original)
         self._require_activation(action, adapter, purpose=PURPOSE_ROLLBACK, now=stamp)
         self._require_persistence_ready(purpose=PURPOSE_ROLLBACK)
+        self._require_recovery_persistence_ready(purpose=PURPOSE_ROLLBACK)
         try:
             self._reserve_or_start(action, execution_id + ":rollback")
         except SideEffectAlreadyCompletedError:
@@ -931,12 +934,58 @@ class SideEffectExecutor:
 
     def _flag_reconciliation(self, result) -> None:
         service = self.reconciliation_service
-        if service is None:
+        recon_id = None
+        if service is not None:
+            try:
+                record = service.create_for_execution(result.execution_id)
+                recon_id = getattr(record, "reconciliation_id", None)
+            except Exception:
+                recon_id = None
+        self._flag_recovery_case(result, reconciliation_id=recon_id)
+
+    def _flag_recovery_case(self, result, *, reconciliation_id: str | None = None) -> None:
+        orch = self.recovery_orchestrator
+        if orch is None or not getattr(orch, "enabled", True):
             return
         try:
-            service.create_for_execution(result.execution_id)
-        except Exception:
+            orch.ensure_case_for_uncertain(
+                execution_id=result.execution_id,
+                workflow_id=getattr(result, "workflow_id", "") or "",
+                task_id=getattr(result, "task_id", "") or "",
+                action_id=getattr(result, "action_id", "") or "",
+                tool_id=getattr(result, "tool_id", "") or "",
+                operation=getattr(result, "operation", "") or "",
+                tool_trust_level=str(
+                    dict(getattr(result, "metadata", {}) or {}).get("tool_trust_level") or ""
+                ),
+                reversible=bool(getattr(result, "reversible", False)),
+                reconciliation_id=reconciliation_id,
+            )
+        except Exception as exc:
+            from recovery.store import RecoveryPersistenceUnavailableError
+
+            if isinstance(exc, RecoveryPersistenceUnavailableError):
+                # Fail closed for future related protected mutation.
+                return
             return
+
+    def _require_recovery_persistence_ready(self, *, purpose: str) -> None:
+        if purpose not in {PURPOSE_MUTATE, PURPOSE_ROLLBACK}:
+            return
+        orch = self.recovery_orchestrator
+        if orch is None:
+            return
+        from recovery.orchestrator import RecoveryMutationBlocked
+        from recovery.store import RecoveryPersistenceUnavailableError
+        from side_effects.errors import SideEffectPersistenceUnavailableError
+
+        try:
+            orch.require_mutation_allowed()
+        except RecoveryMutationBlocked as exc:
+            raise SideEffectPersistenceUnavailableError(str(exc.reason)) from exc
+        store = getattr(orch, "store", None)
+        if store is not None and getattr(store, "available", True) is False:
+            raise SideEffectPersistenceUnavailableError("recovery_persistence_unavailable")
 
     def _require_persistence_ready(self, *, purpose: str) -> None:
         if purpose not in {PURPOSE_MUTATE, PURPOSE_ROLLBACK}:

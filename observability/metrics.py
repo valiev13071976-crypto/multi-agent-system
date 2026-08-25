@@ -13,12 +13,15 @@ ALLOWED_LABEL_KEYS = frozenset(
         "tool_id",
         "operation",
         "trust_level",
+        "tool_trust_level",
         "provider",
         "model_family",
         "status",
         "error_code_class",
         "scope_type",
         "decision",
+        "case_type",
+        "severity",
     }
 )
 
@@ -85,6 +88,13 @@ class MetricsCollector:
     budget_reserved_amount: int = 0
     budget_spent_amount: int = 0
     budget_released_amount: int = 0
+    recovery_cases_total: int = 0
+    recovery_open_cases: int = 0
+    recovery_resolved_total: int = 0
+    recovery_blocked_total: int = 0
+    recovery_manual_review_total: int = 0
+    recovery_read_checks_total: int = 0
+    recovery_read_check_failures_total: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})
@@ -189,6 +199,13 @@ class MetricsCollector:
                 "provider_calls_total": self.provider_calls_total,
                 "provider_failure_total": self.provider_failure_total,
                 "finops_budget_denied_total": self.finops_budget_denied_total,
+                "recovery_cases_total": self.recovery_cases_total,
+                "recovery_open_cases": self.recovery_open_cases,
+                "recovery_resolved_total": self.recovery_resolved_total,
+                "recovery_blocked_total": self.recovery_blocked_total,
+                "recovery_manual_review_total": self.recovery_manual_review_total,
+                "recovery_read_checks_total": self.recovery_read_checks_total,
+                "recovery_read_check_failures_total": self.recovery_read_check_failures_total,
                 "latency": latency,
                 "by_label": by_label,
             }
