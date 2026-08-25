@@ -39,13 +39,20 @@ class GeminiAgent:
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Gemini API error {response.status_code}: {response.text}"
+                f"Gemini API error {response.status_code}"
             )
 
         data = response.json()
-
-        return (
+        text = (
             data["candidates"][0]
             ["content"]["parts"][0]
             ["text"]
+        )
+
+        from agents.provider_result import usage_from_gemini_response
+        return usage_from_gemini_response(
+            data,
+            provider_id="gemini",
+            model_id=self.model,
+            text=text,
         )

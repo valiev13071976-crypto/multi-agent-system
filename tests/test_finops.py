@@ -36,6 +36,45 @@ class FinOpsTests(unittest.TestCase):
         service = FinOpsService(prices={})
         self.assertIsNone(service.estimate("openai", "gpt-test", 100, 20))
 
+    def test_exact_model_quote_is_used(self):
+        quote_a = PriceQuote(
+            provider_id="openai",
+            model_id="model-a",
+            input_price_per_million=Decimal("3"),
+            output_price_per_million=Decimal("6"),
+            currency="USD",
+            enabled=True,
+        )
+        service = FinOpsService(prices={("openai", "model-a"): quote_a})
+        self.assertIs(service.quote("openai", "model-a"), quote_a)
+        self.assertEqual(service.estimate("openai", "model-a", 1_000_000, 500_000), Decimal("6"))
+
+    def test_wrong_model_quote_is_not_used(self):
+        quote_a = PriceQuote(
+            provider_id="openai",
+            model_id="model-a",
+            input_price_per_million=Decimal("3"),
+            output_price_per_million=Decimal("6"),
+            currency="USD",
+            enabled=True,
+        )
+        service = FinOpsService(prices={("openai", "model-a"): quote_a})
+        self.assertIsNone(service.quote("openai", "model-b"))
+        self.assertIsNone(service.estimate("openai", "model-b", 1_000_000, 500_000))
+
+    def test_cross_provider_quote_is_not_used(self):
+        quote_anthropic = PriceQuote(
+            provider_id="anthropic",
+            model_id="model-a",
+            input_price_per_million=Decimal("3"),
+            output_price_per_million=Decimal("6"),
+            currency="USD",
+            enabled=True,
+        )
+        service = FinOpsService(prices={("anthropic", "model-a"): quote_anthropic})
+        self.assertIsNone(service.quote("openai", "model-a"))
+        self.assertIsNone(service.estimate("openai", "model-a", 1_000_000, 500_000))
+
     def test_d_per_task_limit_blocks_only_when_calculable(self):
         service = FinOpsService(
             prices={("openai", "gpt-test"): QUOTE},
@@ -56,7 +95,7 @@ class FinOpsTests(unittest.TestCase):
     def test_e_daily_and_monthly_totals_are_deterministic(self):
         service = FinOpsService(
             prices={("openai", "gpt-test"): QUOTE},
-            limits=BudgetLimits(
+       !    limits=BudgetLimits(
                 per_task=None,
                 per_day=Decimal("5"),
                 per_month=Decimal("10"),

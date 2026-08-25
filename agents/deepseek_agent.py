@@ -35,9 +35,16 @@ class DeepSeekAgent:
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"DeepSeek API error {response.status_code}: {response.text}"
+                f"DeepSeek API error {response.status_code}"
             )
 
         data = response.json()
+        text = data["choices"][0]["message"]["content"]
 
-        return data["choices"][0]["message"]["content"]
+        from agents.provider_result import usage_from_chat_completions_response
+        return usage_from_chat_completions_response(
+            data,
+            provider_id="deepseek",
+            model_id=self.model,
+            text=text,
+        )

@@ -32,16 +32,21 @@ class OpenAIAgent:
             data = response.json()
 
             if data.get("output_text"):
-                return data["output_text"]
+                text = data["output_text"]
+            else:
+                result = []
+                for item in data.get("output", []):
+                    for content in item.get("content", []):
+                        if content.get("type") == "output_text":
+                            result.append(content.get("text", ""))
+                        elif content.get("text"):
+                            result.append(content["text"])
+                text = "\n".join(result).strip()
 
-            result = []
-
-            for item in data.get("output", []):
-                for content in item.get("content", []):
-                    if content.get("type") == "output_text":
-                        result.append(content.get("text", ""))
-
-                    elif content.get("text"):
-                        result.append(content["text"])
-
-            return "\n".join(result).strip()
+            from agents.provider_result import usage_from_openai_response
+            return usage_from_openai_response(
+                data,
+                provider_id="openai",
+                model_id=self.model,
+                text=text,
+            )

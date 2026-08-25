@@ -17,6 +17,7 @@ from agents.router_v2 import (
     ProviderNotConfiguredError,
     RouterV2,
 )
+from agents.core.expert_manager import FinOpsBudgetDeniedError
 from agents.role_registry import (
     DEFAULT_ROLE,
     InvalidRoleError,
@@ -182,6 +183,16 @@ async def analyze(request: AnalyzeRequest):
                 "error": "no_capable_provider",
                 "message": "No configured provider supports the requested task category.",
                 "category": e.category,
+            },
+        )
+
+    except FinOpsBudgetDeniedError as e:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "finops_budget_denied",
+                "message": redact("Request blocked by FinOps budget policy."),
+                "reason": redact(str(e.reason)),
             },
         )
 

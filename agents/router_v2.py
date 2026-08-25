@@ -1,3 +1,5 @@
+import uuid
+
 from agents.openai_agent import OpenAIAgent
 from agents.anthropic_agent import AnthropicAgent
 from agents.gemini_agent import GeminiAgent
@@ -23,6 +25,8 @@ from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 from agents.model_profile import routing_category_for_role
 from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier
+from config.pricing import load_budget_limits, load_price_quotes
+from finops.service import FinOpsService
 
 
 ALLOWED_MODE_VALUES = (
@@ -77,6 +81,11 @@ class RouterV2:
         self.provider_registry = registry
         self.model_router = ModelRouter(registry)
 
+        self.finops = FinOpsService(
+            prices=load_price_quotes(),
+            limits=load_budget_limits(),
+        )
+
         expert_manager = ExpertManager(
             **{
                 provider_id: (
@@ -85,7 +94,8 @@ class RouterV2:
                     else None
                 )
                 for provider_id in PROVIDER_IDS
-            }
+            },
+            finops=self.finops,
         )
 
         self.pipeline = Pipeline(
@@ -100,6 +110,7 @@ class RouterV2:
         self.last_decision = None
         self.last_classification = None
         self.last_route_context = None
+        self.last_task_id = None
         self.task_classifier = TaskClassifier()
 
     def provider_status(self) -> dict:
@@ -129,6 +140,8 @@ class RouterV2:
 
         if resolved_mode not in ALLOWED_MODES:
             raise InvalidModeError(mode)
+
+        self.last_task_id = str(uuid.uuid4())
 
         requested_role = DEFAULT_ROLE if role is None else role
         self.last_classification = None
@@ -173,9 +186,14 @@ class RouterV2:
             return await self.pipeline.execute(
                 composed,
                 selected=[(provider_id, agent)],
+                task_id=self.last_task_id,
             )
 
         if not selected or any(agent is None for _, agent in selected):
             raise NoProvidersAvailableError()
 
-        return await self.pipeline.execute(composed, selected=selected)
+        return await self.pipeline.execute(
+            composed,
+            selected=selected,
+            task_id=self.last_task_id,
+        )

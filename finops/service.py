@@ -115,6 +115,7 @@ class FinOpsService:
         *,
         when: datetime | None = None,
         currency: str = "USD",
+        task_id: str | None = None,
     ) -> BudgetDecision:
         moment = when or datetime.now(timezone.utc)
         if moment.tzinfo is None:
@@ -135,13 +136,17 @@ class FinOpsService:
                 currency=currency,
             )
 
-        if self._limits.per_task is not None and estimated_cost > self._limits.per_task:
-            return BudgetDecision(
-                allowed=False,
-                reason="per_task_limit",
-                estimated_cost=estimated_cost,
-                currency=currency,
-            )
+        if self._limits.per_task is not None:
+            task_so_far = Decimal("0")
+            if task_id:
+                task_so_far = _known_costs(self._store.records_for_task(task_id))
+            if task_so_far + estimated_cost > self._limits.per_task:
+                return BudgetDecision(
+                    allowed=False,
+                    reason="per_task_limit",
+                    estimated_cost=estimated_cost,
+                    currency=currency,
+                )
 
         day_start, day_end = _day_bounds(moment)
         day_total = _known_costs(self._store.records_between(day_start, day_end))
@@ -175,6 +180,30 @@ class FinOpsService:
 
     def record(self, usage: UsageRecord) -> None:
         self._store.add(usage)
+
+    def record_usage(self, usage: UsageRecord) -> None:
+        self.record(usage)
+
+    def task_total(self, task_id: str) -> Decimal:
+        return _known_costs(self._store.records_for_task(task_id))
+
+    def is_over_limit(
+        self,
+        *,
+        when: datetime | None = None,
+        task_id: str | None = None,
+    ) -> bool:
+        moment = when or datetime.now(timezone.utc)
+        if moment.tzinfo is None:
+            moment = moment.replace(tzinfo=timezone.utc)
+        if self._limits.per_task is not None and task_id:
+            if self.task_total(task_id) > self._limits.per_task:
+                return True
+        if self._limits.per_day is not None and self.day_total(moment) > self._limits.per_day:
+            return True
+        if self._limits.per_month is not None and self.month_total(moment) > self._limits.per_month:
+            return True
+        return False
 
     def day_total(self, moment: datetime) -> Decimal:
         start, end = _day_bounds(moment)

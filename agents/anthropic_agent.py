@@ -42,11 +42,10 @@ class AnthropicAgent:
             )
 
         print("STATUS:", response.status_code)
-        print("BODY:", response.text)
 
         if response.status_code != 200:
             raise RuntimeError(
-                f"Anthropic API error {response.status_code}: {response.text}"
+                f"Anthropic API error {response.status_code}"
             )
 
         data = response.json()
@@ -57,4 +56,10 @@ class AnthropicAgent:
             if item.get("type") == "text":
                 result.append(item.get("text", ""))
 
-        return "\n".join(result).strip()
+        from agents.provider_result import usage_from_anthropic_response
+        return usage_from_anthropic_response(
+            data,
+            provider_id="anthropic",
+            model_id=self.model,
+            text="\n".join(result).strip(),
+        )
