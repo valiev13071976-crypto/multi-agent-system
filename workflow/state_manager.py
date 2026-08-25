@@ -234,13 +234,17 @@ class StateManager:
             self._store.save(state)
         return self.fail_workflow(workflow_id, code)
 
-    def checkpoint(self, workflow_id: str) -> Checkpoint:
+    def checkpoint(self, workflow_id: str, extra_payload=None) -> Checkpoint:
         state = self.get(workflow_id)
         payload = {
             "execution_key": state.execution_key,
             "task_id": state.task_id,
             "next_step": state.next_incomplete_step(),
         }
+        if extra_payload:
+            from workflow.checkpoint import approval_checkpoint_fields
+
+            payload.update(approval_checkpoint_fields(extra_payload))
         point = Checkpoint(
             workflow_id=state.workflow_id,
             workflow_version=state.version,

@@ -1,5 +1,21 @@
 from workflow.models import Checkpoint
 
+APPROVAL_CHECKPOINT_KEYS = (
+    "action_id",
+    "decision_id",
+    "required_approval",
+    "approval_id",
+)
+
+
+def approval_checkpoint_fields(extra) -> dict:
+    allowed = {}
+    source = dict(extra or {})
+    for key in APPROVAL_CHECKPOINT_KEYS:
+        if key in source:
+            allowed[key] = source[key]
+    return allowed
+
 
 def public_checkpoint_view(checkpoint: Checkpoint) -> dict:
     return {
