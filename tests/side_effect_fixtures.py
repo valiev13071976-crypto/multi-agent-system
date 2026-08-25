@@ -8,6 +8,7 @@ from hitl.authority import (
 )
 from hitl.service import HITLService
 from side_effects.github.adapter import GitHubIssueLabelAdapter
+from side_effects.github.activation import GitHubWriteActivationService
 from side_effects.github.config import GitHubWriteAdapterConfig
 from side_effects.github.models import GITHUB_TOOL_ID, OP_ENSURE_PRESENT
 from side_effects.github.transport import FakeGitHubTransport
@@ -191,6 +192,9 @@ def github_runtime(
         enabled=True,
         allowed_repositories=("octo/hello",),
         timeout_seconds=timeout_seconds,
+        dry_run=False,
+        kill_switch=False,
+        require_probe_success=False,
     )
     adapter = GitHubIssueLabelAdapter(config=cfg, transport=fake)
     registry = SideEffectAdapterRegistry()
@@ -208,6 +212,20 @@ def github_runtime(
         permit_ttl_seconds=300,
     )
     return engine, workflow_id, adapter, executor, fake
+
+
+def github_activation_runtime(*, config=None, timeout_seconds=15.0, transport=None):
+    engine, workflow_id, adapter, executor, fake = github_runtime(
+        config=config, timeout_seconds=timeout_seconds, transport=transport
+    )
+    service = GitHubWriteActivationService(
+        config=adapter._config,
+        transport=fake,
+        audit=executor.audit,
+        registered=True,
+    )
+    executor.activation = service
+    return engine, workflow_id, adapter, executor, fake, service
 
 
 def github_recon_runtime(**kwargs):

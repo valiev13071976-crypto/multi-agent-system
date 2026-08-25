@@ -11,6 +11,7 @@ def build_production_side_effect_registry(
     secrets: SecretStore,
     config: GitHubWriteAdapterConfig | None = None,
     env: dict | None = None,
+    transport=None,
 ):
     """Register github.issue_labels only when fully configured. Fail closed if enabled but invalid."""
 
@@ -23,6 +24,7 @@ def build_production_side_effect_registry(
     token = secrets.get(TOKEN_SECRET_NAME)
     if token is None or not str(token).strip():
         raise GitHubWriteConfigError("github_token_missing")
-    transport = GitHubHttpTransport(token, timeout_seconds=cfg.timeout_seconds)
+    if transport is None:
+        transport = GitHubHttpTransport(token, timeout_seconds=cfg.timeout_seconds)
     registry.register(GitHubIssueLabelAdapter(config=cfg, transport=transport))
     return registry

@@ -24,6 +24,8 @@ from agents.role_registry import (
 )
 from agents.context_manager import ContextManager
 from security.redaction import redact
+from security.secrets import EnvSecretStore
+from side_effects.runtime import compose_side_effect_runtime
 import uuid
 
 load_dotenv()
@@ -90,6 +92,10 @@ USE_V2 = True
 router = RouterV2() if USE_V2 else Router()
 
 context_manager = ContextManager()
+
+side_effect_runtime = compose_side_effect_runtime(
+    secrets=EnvSecretStore(), isolate_errors=True
+)
 
 
 

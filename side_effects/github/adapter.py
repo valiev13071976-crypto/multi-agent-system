@@ -11,6 +11,9 @@ import asyncio
 import hashlib
 
 from autonomy.capabilities import CAP_EXTERNAL_WRITE, CAP_GITHUB_ISSUE_LABEL_WRITE
+from autonomy.models import utc_now
+
+from side_effects.activation import DryRunResult
 from side_effects.errors import RollbackExecutionError, SideEffectExecutionError
 from side_effects.github.config import GitHubWriteAdapterConfig
 from side_effects.github.errors import GitHubAdapterError
@@ -150,6 +153,10 @@ class GitHubIssueLabelAdapter:
             raise
 
     async def _mutate(self, operation: str, target: GitHubIssueLabelTarget) -> None:
+        if bool(getattr(self._config, "kill_switch", False)):
+            raise SideEffectExecutionError("github_write_kill_switch_active")
+        if bool(getattr(self._config, "dry_run", False)):
+            raise SideEffectExecutionError("github_write_dry_run_active")
         self.mutated = True
         try:
             if operation == OP_ENSURE_PRESENT:
@@ -218,6 +225,64 @@ class GitHubIssueLabelAdapter:
             raise SideEffectExecutionError("unknown_operation")
         target = self._target(action, context)
         return await self._ensure(action.operation, target)
+
+    async def dry_run(self, action, context) -> DryRunResult:
+        stamp = getattr(context, "stamp", lambda: None)()
+        checked_at = stamp or utc_now()
+        if action.operation not in GITHUB_OPERATIONS:
+            return DryRunResult(
+                would_execute=False,
+                would_change=False,
+                current_state_known=False,
+                intended_operation=str(action.operation or ""),
+                resource_ref=str(action.resource or ""),
+                reason_code="unknown_operation",
+                checked_at=checked_at,
+            )
+        try:
+            target = self._target(action, context)
+        except SideEffectExecutionError as exc:
+            return DryRunResult(
+                would_execute=False,
+                would_change=False,
+                current_state_known=False,
+                intended_operation=str(action.operation or ""),
+                resource_ref=str(action.resource or ""),
+                reason_code=str(exc.error_code),
+                checked_at=checked_at,
+            )
+        intended_present = action.operation == OP_ENSURE_PRESENT
+        try:
+            names = await self._labels(target, after_mutation=False)
+        except Exception as exc:
+            code = getattr(exc, "error_code", "github_read_failed")
+            return DryRunResult(
+                would_execute=False,
+                would_change=False,
+                current_state_known=False,
+                intended_operation=action.operation,
+                resource_ref=target.as_resource(),
+                reason_code=str(code),
+                checked_at=checked_at,
+                metadata={"repository_ref": target.repository(), "issue_number": target.issue_number},
+            )
+        present = label_present(names, target.label)
+        would_change = present != intended_present
+        return DryRunResult(
+            would_execute=True,
+            would_change=would_change,
+            current_state_known=True,
+            intended_operation=action.operation,
+            resource_ref=target.as_resource(),
+            reason_code="dry_run_planned",
+            checked_at=checked_at,
+            metadata={
+                "state_before_present": present,
+                "repository_ref": target.repository(),
+                "issue_number": target.issue_number,
+                "label_hash": hashlib.sha256(target.label.encode("utf-8")).hexdigest()[:16],
+            },
+        )
 
     async def rollback(self, result, context) -> RollbackResult:
         self.rollback_calls += 1

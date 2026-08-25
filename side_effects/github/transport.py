@@ -21,6 +21,8 @@ class GitHubTransport(Protocol):
         self, owner: str, repo: str, issue_number: int, label: str
     ) -> None: ...
 
+    async def get_repository(self, owner: str, repo: str) -> dict: ...
+
 
 def map_github_status(status: int, *, remaining: str | None = None) -> str:
     if status in {401}:
@@ -58,6 +60,9 @@ class FakeGitHubTransport:
         self.contradict_after = False
         self.verify_gets = 0
         self.remove_not_found = False
+        self.get_repository_calls = 0
+        self.hang_probe = False
+        self._repo_status: dict[tuple[str, str], int] = {}
 
     def seed(self, owner: str, repo: str, issue_number: int, labels: list[str]) -> None:
         self._labels[(owner.lower(), repo.lower(), int(issue_number))] = list(labels)
@@ -104,6 +109,18 @@ class FakeGitHubTransport:
         self._labels[key] = [
             item for item in current if item.casefold() != label.casefold()
         ]
+
+    def seed_repository(self, owner: str, repo: str, status: int = 200) -> None:
+        self._repo_status[(owner.lower(), repo.lower())] = int(status)
+
+    async def get_repository(self, owner, repo) -> dict:
+        self.get_repository_calls += 1
+        if self.hang_probe:
+            await asyncio.sleep(3600)
+        status = self._repo_status.get((owner.lower(), repo.lower()), 200)
+        if status != 200:
+            raise GitHubAdapterError(map_github_status(status))
+        return {"full_name": f"{owner}/{repo}"}
 
 
 class GitHubHttpTransport:
@@ -189,3 +206,12 @@ class GitHubHttpTransport:
             if exc.error_code != "github_resource_not_found_or_inaccessible":
                 raise
         # Follow-up GET is owned by the adapter, not this method.
+
+    async def get_repository(self, owner, repo) -> dict:
+        path = f"/repos/{owner}/{repo}"
+        response = await self._request("GET", path)
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise GitHubAdapterError("github_validation_error")
+        name = payload.get("full_name") or f"{owner}/{repo}"
+        return {"full_name": str(name)}

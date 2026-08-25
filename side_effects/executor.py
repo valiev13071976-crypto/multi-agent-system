@@ -34,10 +34,12 @@ from workflow.models import (
     TERMINAL_STATUSES,
 )
 
+from side_effects.activation import DryRunResult, PURPOSE_DRY_RUN, PURPOSE_MUTATE, PURPOSE_ROLLBACK
 from side_effects.audit import SideEffectAuditLog
 from side_effects.errors import (
     RollbackExecutionError,
     RollbackNotSupportedError,
+    SideEffectActivationDeniedError,
     SideEffectAdapterMismatchError,
     SideEffectAdapterNotFoundError,
     SideEffectAlreadyCompletedError,
@@ -53,6 +55,8 @@ from side_effects.models import (
     EVENT_ADAPTER_FAILED,
     EVENT_ADAPTER_STARTED,
     EVENT_ADAPTER_SUCCEEDED,
+    EVENT_DRY_RUN_COMPLETED,
+    EVENT_DRY_RUN_REQUESTED,
     EVENT_EXECUTION_AUTHORIZED,
     EVENT_EXECUTION_COMPLETED,
     EVENT_EXECUTION_DENIED,
@@ -60,6 +64,7 @@ from side_effects.models import (
     EVENT_EXECUTION_UNCERTAIN,
     EVENT_IDEMPOTENCY_RESERVED,
     EVENT_PERMIT_CONSUMED,
+    EVENT_REAL_EXECUTION_AUTHORIZED,
     EVENT_ROLLBACK_FAILED,
     EVENT_ROLLBACK_REQUESTED,
     EVENT_ROLLBACK_SUCCEEDED,
@@ -102,6 +107,7 @@ class SideEffectExecutor:
         gate: AutonomyGate | None = None,
         permit_service: PermitService | None = None,
         reconciliation_service=None,
+        activation=None,
     ):
         self.registry = registry if registry is not None else empty_adapter_registry()
         self.store = store or InMemorySideEffectExecutionStore()
@@ -110,6 +116,7 @@ class SideEffectExecutor:
         self.gate = gate
         self.permit_service = permit_service or PermitService()
         self.reconciliation_service = reconciliation_service
+        self.activation = activation
         self.trace: list[str] = []
 
     async def execute(
@@ -173,6 +180,16 @@ class SideEffectExecutor:
             )
             adapter = self.registry.require(action.tool_id)
             self._validate_adapter(action, adapter, fingerprint)
+            self._require_activation(action, adapter, purpose=PURPOSE_MUTATE, now=stamp)
+            if self.activation is not None:
+                self.audit.record(
+                    EVENT_REAL_EXECUTION_AUTHORIZED,
+                    execution_id=execution_id,
+                    workflow_id=action.workflow_id,
+                    action_id=action.action_id,
+                    tool_id=action.tool_id,
+                    reason_code="activation_ready",
+                )
             self._reserve_or_start(action, execution_id)
             self.audit.record(
                 EVENT_IDEMPOTENCY_RESERVED,
@@ -375,6 +392,7 @@ class SideEffectExecutor:
                     SideEffectAdapterNotFoundError,
                     SideEffectAdapterMismatchError,
                     ActionIntegrityError,
+                    SideEffectActivationDeniedError,
                 ),
             ):
                 raise
@@ -433,6 +451,7 @@ class SideEffectExecutor:
         existing = self.idempotency.get(action.idempotency_key)
         if existing is not None and existing.state == IDEMPOTENCY_COMPLETED:
             return self._result_from_record(original)
+        self._require_activation(action, adapter, purpose=PURPOSE_ROLLBACK, now=stamp)
         try:
             self._reserve_or_start(action, execution_id + ":rollback")
         except SideEffectAlreadyCompletedError:
@@ -570,6 +589,87 @@ class SideEffectExecutor:
             raise SideEffectAuthorizationError("capability_missing")
         if action_fingerprint(action) != fingerprint:
             raise ActionIntegrityError()
+
+    def _require_activation(self, action, adapter, *, purpose: str, now) -> None:
+        provider = self.activation
+        if provider is None:
+            return
+        descriptor = getattr(adapter, "descriptor", None)
+        decision = provider.evaluate(action, descriptor, purpose=purpose, now=now)
+        if purpose in {PURPOSE_MUTATE, PURPOSE_ROLLBACK}:
+            if decision.blocked or not decision.allowed or decision.dry_run:
+                raise SideEffectActivationDeniedError(decision.reason_code)
+
+    async def dry_run(
+        self,
+        action,
+        *,
+        context: SideEffectExecutionContext | None = None,
+        gate: AutonomyGate | None = None,
+        now=None,
+        evaluate_kwargs=None,
+    ) -> DryRunResult:
+        ctx = context or SideEffectExecutionContext()
+        stamp = now or ctx.stamp()
+        ctx.now = stamp
+        self.audit.record(
+            EVENT_DRY_RUN_REQUESTED,
+            workflow_id=action.workflow_id,
+            action_id=action.action_id,
+            tool_id=action.tool_id,
+            operation=action.operation,
+        )
+        self._deny_disabled_actions(action)
+        self._require_executable_action_type(action)
+        adapter = self.registry.require(action.tool_id)
+        fingerprint = action_fingerprint(action)
+        self._validate_adapter(action, adapter, fingerprint)
+        if self.activation is not None:
+            decision = self.activation.evaluate(
+                action, adapter.descriptor, purpose=PURPOSE_DRY_RUN, now=stamp
+            )
+            if decision.blocked:
+                raise SideEffectActivationDeniedError(decision.reason_code)
+        would_require_approval = False
+        gate = gate or self.gate
+        if gate is not None:
+            kwargs = dict(evaluate_kwargs or {})
+            kwargs.pop("now", None)
+            preview_gate = AutonomyGate(
+                policy=gate.policy,
+                classifier=gate.classifier,
+                autonomy_level=kwargs.get("autonomy_level") or gate.autonomy_level,
+            )
+            current = preview_gate.evaluate(action, now=stamp, **kwargs)
+            would_require_approval = current.decision == DECISION_REQUIRE_APPROVAL
+        if not hasattr(adapter, "dry_run"):
+            raise SideEffectExecutionDeniedError("dry_run_unsupported")
+        planned = await adapter.dry_run(action, ctx)
+        result = DryRunResult(
+            would_execute=planned.would_execute,
+            would_change=planned.would_change,
+            current_state_known=planned.current_state_known,
+            intended_operation=planned.intended_operation,
+            resource_ref=planned.resource_ref,
+            reason_code=planned.reason_code,
+            checked_at=planned.checked_at,
+            would_require_approval=would_require_approval,
+            metadata=dict(planned.metadata),
+        )
+        self.audit.record(
+            EVENT_DRY_RUN_COMPLETED,
+            workflow_id=action.workflow_id,
+            action_id=action.action_id,
+            tool_id=action.tool_id,
+            operation=action.operation,
+            reason_code=result.reason_code,
+            metadata={
+                "would_change": result.would_change,
+                "would_execute": result.would_execute,
+                "current_state_known": result.current_state_known,
+            },
+        )
+        return result
 
     def _deny_disabled_actions(self, action):
         reason = DISABLED_ACTION_REASONS.get(action.action_type)

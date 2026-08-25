@@ -47,6 +47,10 @@ NON_RETRYABLE_CODES = frozenset(
         "github_timeout_uncertain",
         "external_write_timeout_uncertain",
         "external_verification_uncertain",
+        "github_write_kill_switch_active",
+        "github_write_dry_run_active",
+        "github_write_not_ready",
+        "github_write_secret_missing",
     }
 )
 

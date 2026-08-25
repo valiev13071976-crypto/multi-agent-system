@@ -9,6 +9,11 @@ class SideEffectExecutionDeniedError(SideEffectError):
         super().__init__(error_code)
 
 
+class SideEffectActivationDeniedError(SideEffectExecutionDeniedError):
+    def __init__(self, error_code: str = "side_effect_activation_denied"):
+        super().__init__(error_code)
+
+
 class SideEffectAdapterNotFoundError(SideEffectExecutionDeniedError):
     def __init__(self, error_code: str = "adapter_not_found"):
         super().__init__(error_code)
