@@ -15,6 +15,8 @@ from evals.versions import (
     ROUTING_POLICY_VERSION,
     STRUCTURAL_VALIDATOR_VERSION,
     judge_snapshot,
+    memory_policy_snapshot,
+    memory_retrieval_policy_snapshot,
     policy_snapshot,
     prompt_content_hash,
     routing_policy_snapshot,
@@ -151,6 +153,28 @@ def build_version_registry() -> VersionRegistry:
             artifact_id="budget_guard",
             version=BUDGET_POLICY_VERSION,
             content_hash=content_hash(snap),
+        )
+    )
+
+    # Memory / knowledge policies (P13)
+    from memory.models import MEMORY_POLICY_VERSION, MEMORY_RETRIEVAL_VERSION
+
+    mem_pol = memory_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="memory_policy",
+            version=MEMORY_POLICY_VERSION,
+            content_hash=content_hash(mem_pol),
+        )
+    )
+    mem_ret = memory_retrieval_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="memory_retrieval_policy",
+            version=MEMORY_RETRIEVAL_VERSION,
+            content_hash=content_hash(mem_ret),
         )
     )
 

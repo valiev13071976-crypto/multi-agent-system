@@ -20,7 +20,7 @@ from agents.validators.consistency import VALIDATOR_VERSION as CONSISTENCY_VALID
 from agents.validators.structural import VALIDATOR_VERSION as STRUCTURAL_VALIDATOR_VERSION
 
 # Eval suite
-CORE_SUITE_VERSION = "1.2.0"
+CORE_SUITE_VERSION = "1.3.0"
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -100,3 +100,24 @@ def validator_snapshot(validator_id: str, version: str) -> dict:
 
 def judge_snapshot() -> dict:
     return {"judge_id": "Judge", "judge_version": JUDGE_VERSION}
+
+
+def memory_policy_snapshot() -> dict:
+    from memory.models import MEMORY_POLICY_VERSION
+    from memory.retention import retention_policy_snapshot
+    from memory.write_policy import MemoryWritePolicy
+
+    snap = retention_policy_snapshot()
+    snap["memory_policy_version"] = MEMORY_POLICY_VERSION
+    snap["write_policy_version"] = MemoryWritePolicy.policy_version
+    snap["auto_store_default"] = "conservative"
+    return snap
+
+
+def memory_retrieval_policy_snapshot() -> dict:
+    from memory.models import MEMORY_RETRIEVAL_VERSION
+    from memory.retrieval import retrieval_policy_snapshot
+
+    snap = retrieval_policy_snapshot()
+    snap["memory_retrieval_version"] = MEMORY_RETRIEVAL_VERSION
+    return snap

@@ -144,6 +144,7 @@ class SideEffectRuntime:
     tool_gateway: ToolGateway | None = None
     observability: ObservabilityRuntime | None = None
     recovery_orchestrator: object | None = None
+    memory_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -217,6 +218,16 @@ class SideEffectRuntime:
                 critical_recovery_blocking=blocked_crit,
                 recovery_persistence_ready=recovery_ready,
                 recovery_required=bool(self.config.enabled and not self.config.dry_run),
+                memory_status=(
+                    (self.memory_runtime.health().get("memory_status") or "healthy")
+                    if self.memory_runtime is not None
+                    else "healthy"
+                ),
+                memory_enabled=bool(self.memory_runtime is not None),
+                memory_persistence_ready=bool(
+                    self.memory_runtime is None
+                    or self.memory_runtime.health().get("persistence_ready", True)
+                ),
             )
             meta["observability"] = {
                 "overall_status": snap.overall_status,
@@ -235,6 +246,8 @@ class SideEffectRuntime:
                 "persistence_ready": bool(getattr(store, "available", False)),
                 "connection_mode": getattr(store, "connection_mode", "unknown"),
             }
+        if self.memory_runtime is not None:
+            meta["memory"] = dict(self.memory_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -280,6 +293,11 @@ class SideEffectRuntime:
         if self.persistence is not None and self.persistence.connection is not None:
             try:
                 self.persistence.connection.close()
+            except Exception:
+                pass
+        if self.memory_runtime is not None and hasattr(self.memory_runtime, "close"):
+            try:
+                self.memory_runtime.close()
             except Exception:
                 pass
 
@@ -446,6 +464,32 @@ def _finalize_runtime(
                 )
             except Exception:
                 pass
+
+    memory_runtime = None
+    from memory.runtime import build_memory_runtime, memory_config
+
+    mem_cfg = memory_config(env)
+    shared_mem = None
+    if mem_cfg["backend"] in {"sqlite", "durable"} and not mem_cfg["db_path"]:
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_mem = persistence.connection
+    try:
+        memory_runtime = build_memory_runtime(
+            env=env,
+            encryption=getattr(persistence, "encryption", None),
+            observability=obs,
+            shared_connection=shared_mem,
+        )
+    except Exception:
+        memory_runtime = None
+    if memory_runtime is not None:
+        engine.memory_service = memory_runtime.service
+
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -464,6 +508,7 @@ def _finalize_runtime(
         tool_gateway=tool_gateway,
         observability=obs,
         recovery_orchestrator=recovery,
+        memory_runtime=memory_runtime,
     )
 
 

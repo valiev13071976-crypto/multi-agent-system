@@ -77,6 +77,14 @@ EVENT_TYPES = frozenset(
         "recovery.resolved",
         "recovery.blocked",
         "recovery.failed",
+        "memory.ingested",
+        "memory.deduplicated",
+        "memory.retrieved",
+        "memory.updated",
+        "memory.superseded",
+        "memory.forgotten",
+        "memory.expired",
+        "memory.denied",
     }
 )
 

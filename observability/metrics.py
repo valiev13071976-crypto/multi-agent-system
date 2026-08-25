@@ -22,6 +22,9 @@ ALLOWED_LABEL_KEYS = frozenset(
         "decision",
         "case_type",
         "severity",
+        "memory_type",
+        "sensitivity",
+        "scope_type",
     }
 )
 
@@ -95,6 +98,11 @@ class MetricsCollector:
     recovery_manual_review_total: int = 0
     recovery_read_checks_total: int = 0
     recovery_read_check_failures_total: int = 0
+    memory_ingest_total: int = 0
+    memory_retrieval_total: int = 0
+    memory_dedup_total: int = 0
+    memory_forget_total: int = 0
+    memory_denied_total: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})
@@ -206,6 +214,11 @@ class MetricsCollector:
                 "recovery_manual_review_total": self.recovery_manual_review_total,
                 "recovery_read_checks_total": self.recovery_read_checks_total,
                 "recovery_read_check_failures_total": self.recovery_read_check_failures_total,
+                "memory_ingest_total": self.memory_ingest_total,
+                "memory_retrieval_total": self.memory_retrieval_total,
+                "memory_dedup_total": self.memory_dedup_total,
+                "memory_forget_total": self.memory_forget_total,
+                "memory_denied_total": self.memory_denied_total,
                 "latency": latency,
                 "by_label": by_label,
             }

@@ -295,6 +295,9 @@ class ObservabilityRuntime:
         critical_recovery_blocking: bool = False,
         recovery_persistence_ready: bool = True,
         recovery_required: bool = False,
+        memory_status: str = "healthy",
+        memory_enabled: bool = False,
+        memory_persistence_ready: bool = True,
     ) -> OperationalHealthSnapshot:
         snap = self.metrics.snapshot()
         return build_operational_health(
@@ -314,6 +317,9 @@ class ObservabilityRuntime:
             critical_recovery_blocking=critical_recovery_blocking,
             recovery_persistence_ready=recovery_persistence_ready,
             recovery_required=recovery_required,
+            memory_status=memory_status,
+            memory_enabled=memory_enabled,
+            memory_persistence_ready=memory_persistence_ready,
         )
 
     def list_events(self) -> tuple[OperationalEvent, ...]:
