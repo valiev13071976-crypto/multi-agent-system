@@ -192,6 +192,8 @@ class ToolGateway:
         audit: ToolAuditLog | None = None,
         metrics: ToolMetrics | None = None,
         register_search: bool = True,
+        observability=None,
+        obs_context=None,
     ):
         self._provider = search_provider or NullSearchProvider()
         self._timeout_seconds = float(timeout_seconds)
@@ -207,13 +209,42 @@ class ToolGateway:
         self.gate = gate
         self.hitl = hitl
         self.audit = audit or ToolAuditLog()
-        self.metrics = metrics or ToolMetrics()
+        self.observability = observability
+        self.obs_context = obs_context
+        if observability is not None and metrics is None:
+            self.metrics = ToolMetrics.from_collector(observability.metrics)
+        else:
+            self.metrics = metrics or ToolMetrics()
         if register_search and SEARCH_TOOL_ID not in {
             d.tool_id for d in self.registry.list_tools(include_disabled=True)
         }:
             self.registry.register(
                 search_tool_descriptor(), adapter=SearchReadAdapter(self)
             )
+
+    def _tool_span(self, request: ToolRequest):
+        obs = self.observability
+        if obs is None:
+            return None
+        parent = self.obs_context
+        if parent is None and request.workflow_id:
+            parent = obs.context_for_workflow(request.workflow_id)
+        if parent is None:
+            parent = obs.create_context(
+                workflow_id=request.workflow_id,
+                task_id=request.task_id,
+                actor_ref=request.actor_id,
+            )
+        return obs.child_span(
+            parent,
+            workflow_id=request.workflow_id or parent.workflow_id,
+            task_id=request.task_id or parent.task_id,
+        )
+
+    def _obs_emit(self, event_type: str, ctx, **kwargs) -> None:
+        if self.observability is None:
+            return
+        self.observability.emit(event_type, context=ctx, component="tool_gateway", **kwargs)
 
     def reset_budget(self) -> None:
         self._total_results = 0
@@ -320,6 +351,10 @@ class ToolGateway:
         gate = gate or self.gate
         hitl = hitl if hitl is not None else self.hitl
         executor = executor if executor is not None else self.side_effect_executor
+        obs_ctx = self._tool_span(request)
+        mono0 = (
+            self.observability.monotonic_ms() if self.observability is not None else None
+        )
         self.audit.record(
             EVENT_TOOL_REQUESTED,
             request_id=request.request_id,
@@ -328,6 +363,19 @@ class ToolGateway:
             workflow_id=request.workflow_id,
             task_id=request.task_id,
             dry_run=bool(request.dry_run),
+        )
+        self._obs_emit(
+            "tool.requested",
+            obs_ctx,
+            tool_id=request.tool_id,
+            operation=request.operation,
+            status="requested",
+            metadata={
+                "request_id": request.request_id,
+                "dry_run": bool(request.dry_run),
+                "observability_event_id": None,
+            },
+            update_metrics=False,
         )
         try:
             self._reject_bypass(request)
@@ -342,6 +390,15 @@ class ToolGateway:
                 raise ToolPolicyDeniedError("tool_policy_denied")
             if descriptor.trust_level == TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE:
                 raise ToolPolicyDeniedError("tool_policy_denied")
+            self._obs_emit(
+                "tool.started",
+                obs_ctx,
+                tool_id=request.tool_id,
+                operation=request.operation,
+                trust_level=descriptor.trust_level,
+                status="started",
+                update_metrics=False,
+            )
             if descriptor.read_only:
                 result = await self._invoke_read(
                     request, descriptor, args, started=started, stamp=stamp
@@ -362,21 +419,31 @@ class ToolGateway:
                     evaluate_kwargs=evaluate_kwargs,
                     capabilities=capabilities,
                 )
+            duration = result.duration_ms
+            if mono0 is not None and self.observability is not None:
+                duration = int(self.observability.monotonic_ms() - mono0)
+            self._emit_tool_terminal(obs_ctx, descriptor, result, duration)
             self._record_metrics(descriptor, result)
             return result
         except ToolError as exc:
             duration = int((utc_now() - started).total_seconds() * 1000)
+            if mono0 is not None and self.observability is not None:
+                duration = int(self.observability.monotonic_ms() - mono0)
             status = TOOL_STATUS_DENIED
             outcome = "denied"
+            event_type = "tool.denied"
             if exc.error_code in {"tool_timeout"}:
                 status = TOOL_STATUS_FAILED
                 outcome = "timeout"
+                event_type = "tool.failed"
             elif exc.error_code in {"tool_side_effect_uncertain"}:
                 status = TOOL_STATUS_UNCERTAIN
                 outcome = "uncertain"
+                event_type = "tool.uncertain"
             elif exc.error_code in {"tool_execution_failed"}:
                 status = TOOL_STATUS_FAILED
                 outcome = "failure"
+                event_type = "tool.failed"
             result = ToolResult(
                 request_id=request.request_id,
                 tool_id=request.tool_id,
@@ -400,16 +467,30 @@ class ToolGateway:
                 trust = self.registry.get(request.tool_id).trust_level
             except ToolNotFoundError:
                 pass
-            self.metrics.record(
+            self._obs_emit(
+                event_type,
+                obs_ctx,
                 tool_id=request.tool_id,
                 operation=request.operation,
                 trust_level=trust,
-                outcome=outcome,
-                latency_ms=duration,
+                status=status,
+                error_code=exc.error_code,
+                duration_ms=duration,
+                exception_type=type(exc).__name__,
             )
+            if self.observability is None:
+                self.metrics.record(
+                    tool_id=request.tool_id,
+                    operation=request.operation,
+                    trust_level=trust,
+                    outcome=outcome,
+                    latency_ms=duration,
+                )
             return result
         except Exception as exc:
             duration = int((utc_now() - started).total_seconds() * 1000)
+            if mono0 is not None and self.observability is not None:
+                duration = int(self.observability.monotonic_ms() - mono0)
             self.audit.record(
                 EVENT_TOOL_FAILED,
                 request_id=request.request_id,
@@ -417,13 +498,24 @@ class ToolGateway:
                 operation=request.operation,
                 error_code="tool_execution_failed",
             )
-            self.metrics.record(
+            self._obs_emit(
+                "tool.failed",
+                obs_ctx,
                 tool_id=request.tool_id,
                 operation=request.operation,
-                trust_level=TOOL_TRUST_READ_ONLY_EXTERNAL,
-                outcome="failure",
-                latency_ms=duration,
+                status=TOOL_STATUS_FAILED,
+                error_code="tool_execution_failed",
+                duration_ms=duration,
+                exception_type=type(exc).__name__,
             )
+            if self.observability is None:
+                self.metrics.record(
+                    tool_id=request.tool_id,
+                    operation=request.operation,
+                    trust_level=TOOL_TRUST_READ_ONLY_EXTERNAL,
+                    outcome="failure",
+                    latency_ms=duration,
+                )
             return ToolResult(
                 request_id=request.request_id,
                 tool_id=request.tool_id,
@@ -844,13 +936,50 @@ class ToolGateway:
             risk_class=risk_class,
         )
 
+    def _emit_tool_terminal(self, obs_ctx, descriptor, result: ToolResult, duration) -> None:
+        if result.status == TOOL_STATUS_SUCCEEDED:
+            event_type = "tool.completed"
+            update_metrics = True
+        elif result.status == TOOL_STATUS_DENIED:
+            event_type = "tool.denied"
+            update_metrics = True
+        elif result.status == TOOL_STATUS_UNCERTAIN:
+            event_type = "tool.uncertain"
+            update_metrics = True
+        elif result.status == TOOL_STATUS_APPROVAL_REQUIRED:
+            event_type = "tool.denied"
+            update_metrics = False
+        else:
+            event_type = "tool.failed"
+            update_metrics = True
+        self._obs_emit(
+            event_type,
+            obs_ctx,
+            tool_id=descriptor.tool_id,
+            operation=result.operation,
+            trust_level=descriptor.trust_level,
+            status=result.status,
+            error_code=result.error_code,
+            duration_ms=duration,
+            metadata={
+                "execution_id": result.execution_id,
+                "approval_id": result.approval_id,
+                "side_effect": bool(result.side_effect),
+            },
+            update_metrics=update_metrics,
+        )
+
     def _record_metrics(self, descriptor, result: ToolResult) -> None:
+        if self.observability is not None:
+            return
         if result.status == TOOL_STATUS_SUCCEEDED:
             outcome = "success"
         elif result.status == TOOL_STATUS_DENIED:
             outcome = "denied"
         elif result.status == TOOL_STATUS_UNCERTAIN:
             outcome = "uncertain"
+        elif result.status == TOOL_STATUS_APPROVAL_REQUIRED:
+            outcome = "denied"
         elif result.error_code == "tool_timeout":
             outcome = "timeout"
         else:

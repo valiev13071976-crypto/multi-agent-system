@@ -13,8 +13,9 @@ class Judge:
     Deterministic aggregator of expert answers and validator results.
     """
 
-    def __init__(self):
+    def __init__(self, observability=None):
         self.name = "Judge"
+        self.observability = observability
 
     def _legacy_run(self, prompt: str) -> dict:
         confidence = 90
@@ -128,7 +129,7 @@ class Judge:
                 category=category,
             )
         )
-        return {
+        payload = {
             "role": self.name,
             "summary": "Финальный анализ успешно сформирован.",
             "best_solution": (
@@ -165,3 +166,20 @@ class Judge:
                 "peer_reason": redact(getattr(peer_review, "reason", "") or ""),
             },
         }
+        if self.observability is not None:
+            from observability.helpers import safe_emit
+
+            safe_emit(
+                self.observability,
+                "judge.completed",
+                context=self.observability.create_context(),
+                component="judge",
+                status="completed",
+                metadata={
+                    "validator_type": "judge",
+                    "pass": not structural_fail,
+                    "confidence": confidence,
+                    "reason_code_count": len(payload.get("risks") or ()),
+                },
+            )
+        return payload

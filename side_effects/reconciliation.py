@@ -131,7 +131,34 @@ class SideEffectReconciliationService:
             if max_attempts is None
             else max_attempts
         )
+        self.observability = None
         self.rollback_invocations = 0
+        self.observability = None
+
+    def _obs_emit(self, event_type: str, *, workflow_id="", task_id="", tool_id="", operation="", **kwargs):
+        from observability.helpers import safe_emit
+
+        if self.observability is None:
+            return
+        parent = (
+            self.observability.context_for_workflow(workflow_id) if workflow_id else None
+        )
+        span = (
+            self.observability.child_span(parent)
+            if parent is not None
+            else self.observability.create_context(
+                workflow_id=workflow_id, task_id=task_id
+            )
+        )
+        safe_emit(
+            self.observability,
+            event_type,
+            context=span,
+            component="reconciliation",
+            tool_id=tool_id,
+            operation=operation,
+            **kwargs,
+        )
 
     def get(self, reconciliation_id: str) -> ReconciliationRecord:
         record = self.store.get(reconciliation_id)
@@ -211,6 +238,18 @@ class SideEffectReconciliationService:
             operation=execution.operation,
             reason_code=reason_code,
             metadata={"reconciliation_id": record.reconciliation_id},
+        )
+        self._obs_emit(
+            "reconciliation.created",
+            workflow_id=execution.workflow_id,
+            task_id=execution.task_id,
+            tool_id=execution.tool_id,
+            operation=execution.operation,
+            status="created",
+            metadata={
+                "execution_id": execution.execution_id,
+                "reconciliation_id": record.reconciliation_id,
+            },
         )
         return record
 
@@ -330,6 +369,18 @@ class SideEffectReconciliationService:
             action_id=record.action_id,
             tool_id=record.tool_id,
             metadata={"lookup_status": lookup.status},
+        )
+        self._obs_emit(
+            "reconciliation.checked",
+            workflow_id=record.workflow_id,
+            task_id=record.task_id,
+            tool_id=record.tool_id,
+            operation=record.operation,
+            status="checked",
+            metadata={
+                "execution_id": record.execution_id,
+                "lookup_status": getattr(lookup, "status", None),
+            },
         )
         if (
             execution.external_reference
@@ -485,6 +536,18 @@ class SideEffectReconciliationService:
             reason_code=decision["reason_code"],
             metadata={"external_reference": ext},
         )
+        self._obs_emit(
+            "reconciliation.completed",
+            workflow_id=record.workflow_id,
+            task_id=record.task_id,
+            tool_id=record.tool_id,
+            operation=record.operation,
+            status="completed",
+            metadata={
+                "execution_id": record.execution_id,
+                "outcome": "confirmed_success",
+            },
+        )
         result = self._result(
             record,
             updated_exec,
@@ -604,6 +667,16 @@ class SideEffectReconciliationService:
             workflow_id=record.workflow_id,
             action_id=record.action_id,
             reason_code=reason_code,
+        )
+        self._obs_emit(
+            "reconciliation.manual_review",
+            workflow_id=record.workflow_id,
+            task_id=record.task_id,
+            tool_id=record.tool_id,
+            operation=record.operation,
+            status="manual_review",
+            error_code=reason_code,
+            metadata={"execution_id": record.execution_id},
         )
         return self._result(
             record,

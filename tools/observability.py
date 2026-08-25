@@ -1,4 +1,4 @@
-"""In-process ToolGateway observability hooks (no high-cardinality labels)."""
+"""P8 ToolMetrics compatibility — delegates to canonical MetricsCollector when bound."""
 
 from __future__ import annotations
 
@@ -9,13 +9,14 @@ from threading import Lock
 
 @dataclass
 class ToolMetrics:
+    """Legacy P8 API. Prefer ObservabilityRuntime.metrics in production."""
+
     tool_calls_total: int = 0
     tool_success_total: int = 0
     tool_failure_total: int = 0
     tool_denied_total: int = 0
     tool_timeout_total: int = 0
     tool_uncertain_total: int = 0
-    # Labels: (tool_id, operation, trust_level) — never raw resource.
     by_tool: dict[tuple[str, str, str], dict[str, int | float]] = field(
         default_factory=lambda: defaultdict(
             lambda: {
@@ -30,6 +31,16 @@ class ToolMetrics:
         )
     )
     _lock: Lock = field(default_factory=Lock, repr=False)
+    _collector: object | None = field(default=None, repr=False)
+
+    @classmethod
+    def from_collector(cls, collector) -> ToolMetrics:
+        row = cls()
+        row._collector = collector
+        return row
+
+    def bind_collector(self, collector) -> None:
+        self._collector = collector
 
     def record(
         self,
@@ -40,6 +51,15 @@ class ToolMetrics:
         outcome: str,
         latency_ms: int = 0,
     ) -> None:
+        if self._collector is not None:
+            self._collector.record_tool(
+                tool_id=tool_id,
+                operation=operation,
+                trust_level=trust_level,
+                outcome=outcome,
+                latency_ms=latency_ms,
+            )
+            return
         key = (str(tool_id), str(operation), str(trust_level))
         with self._lock:
             self.tool_calls_total += 1
@@ -63,6 +83,17 @@ class ToolMetrics:
                 bucket["failure"] = int(bucket["failure"]) + 1
 
     def snapshot(self) -> dict:
+        if self._collector is not None:
+            snap = self._collector.snapshot()
+            return {
+                "tool_calls_total": snap.get("tool_calls_total", 0),
+                "tool_success_total": snap.get("tool_success_total", 0),
+                "tool_failure_total": snap.get("tool_failure_total", 0),
+                "tool_denied_total": snap.get("tool_denied_total", 0),
+                "tool_timeout_total": snap.get("tool_timeout_total", 0),
+                "tool_uncertain_total": snap.get("tool_uncertain_total", 0),
+                "by_tool": {},
+            }
         with self._lock:
             by_tool = {
                 f"{k[0]}|{k[1]}|{k[2]}": dict(v) for k, v in self.by_tool.items()

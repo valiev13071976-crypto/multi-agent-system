@@ -125,6 +125,31 @@ class SideEffectExecutor:
         self.require_durable_persistence = bool(require_durable_persistence)
         self.trace: list[str] = []
         self.simulate_finalization_failure = False
+        self.observability = None
+
+    def _obs_emit(self, event_type: str, action, **kwargs):
+        from observability.helpers import safe_emit
+
+        if self.observability is None:
+            return
+        parent = self.observability.context_for_workflow(action.workflow_id)
+        span = (
+            self.observability.child_span(parent)
+            if parent is not None
+            else self.observability.create_context(
+                workflow_id=action.workflow_id, task_id=action.task_id
+            )
+        )
+        safe_emit(
+            self.observability,
+            event_type,
+            context=span,
+            component="side_effect",
+            tool_id=action.tool_id,
+            operation=action.operation,
+            trust_level=action.tool_trust_level,
+            **kwargs,
+        )
 
     async def execute(
         self,
@@ -164,6 +189,13 @@ class SideEffectExecutor:
             action_id=action.action_id,
             tool_id=action.tool_id,
             operation=action.operation,
+        )
+        self._obs_emit(
+            "side_effect.prepared",
+            action,
+            status="prepared",
+            metadata={"execution_id": execution_id},
+            update_metrics=False,
         )
         try:
             self._deny_disabled_actions(action)
@@ -275,6 +307,12 @@ class SideEffectExecutor:
                 tool_id=action.tool_id,
                 operation=action.operation,
             )
+            self._obs_emit(
+                "side_effect.started",
+                action,
+                status="started",
+                metadata={"execution_id": execution_id},
+            )
             ctx.idempotency_key = action.idempotency_key
             timeout = timeout_seconds if timeout_seconds is not None else ctx.timeout_seconds
             adapter_result = await self._invoke_adapter(adapter, action, ctx, timeout)
@@ -351,6 +389,17 @@ class SideEffectExecutor:
                     action_id=action.action_id,
                     reason_code=error_code,
                 )
+                self._obs_emit(
+                    "side_effect.uncertain",
+                    action,
+                    status="uncertain",
+                    error_code=error_code,
+                    metadata={
+                        "execution_id": execution_id,
+                        "outcome": "uncertain",
+                        "reconciliation_required": True,
+                    },
+                )
                 return uncertain_result
             self.audit.record(
                 EVENT_ADAPTER_SUCCEEDED,
@@ -366,6 +415,16 @@ class SideEffectExecutor:
                 workflow_id=action.workflow_id,
                 action_id=action.action_id,
                 reason_code="succeeded",
+            )
+            self._obs_emit(
+                "side_effect.completed",
+                action,
+                status="succeeded",
+                duration_ms=int((completed_at - started_at).total_seconds() * 1000),
+                metadata={
+                    "execution_id": execution_id,
+                    "outcome": "known_success",
+                },
             )
             return result
         except SideEffectAlreadyCompletedError:
@@ -403,6 +462,18 @@ class SideEffectExecutor:
                     action_id=action.action_id,
                     reason_code=error_code,
                 )
+                self._obs_emit(
+                    "side_effect.uncertain",
+                    action,
+                    status="uncertain",
+                    error_code=error_code,
+                    exception_type=type(exc).__name__,
+                    metadata={
+                        "execution_id": execution_id,
+                        "outcome": "uncertain",
+                        "reconciliation_required": True,
+                    },
+                )
                 self._fail_workflow(state_manager, action.workflow_id, error_code)
             elif adapter_started:
                 outcome = OUTCOME_KNOWN_FAILURE
@@ -417,6 +488,14 @@ class SideEffectExecutor:
                     workflow_id=action.workflow_id,
                     action_id=action.action_id,
                     reason_code=str(error_code),
+                )
+                self._obs_emit(
+                    "side_effect.failed",
+                    action,
+                    status="failed",
+                    error_code=str(error_code),
+                    exception_type=type(exc).__name__,
+                    metadata={"execution_id": execution_id, "outcome": "known_failure"},
                 )
                 self._fail_workflow(state_manager, action.workflow_id, str(error_code))
             else:

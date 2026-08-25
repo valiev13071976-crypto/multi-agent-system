@@ -92,6 +92,7 @@ class FinOpsService:
             unknown_cost_policy=DEFAULT_UNKNOWN_COST_POLICY,
         )
         self._store = store or InMemoryUsageStore()
+        self.observability = None
 
     def quote(self, provider_id: str, model_id: str) -> PriceQuote | None:
         return self._prices.get((provider_id, model_id))
@@ -110,6 +111,43 @@ class FinOpsService:
         )
 
     def check_budget(
+        self,
+        estimated_cost: Decimal | None,
+        *,
+        when: datetime | None = None,
+        currency: str = "USD",
+        task_id: str | None = None,
+    ) -> BudgetDecision:
+        decision = self._check_budget_impl(
+            estimated_cost, when=when, currency=currency, task_id=task_id
+        )
+        if self.observability is not None:
+            from observability.helpers import safe_emit
+
+            if not decision.allowed:
+                event = (
+                    "finops.unknown_cost"
+                    if decision.reason == "unknown_cost_denied"
+                    else "finops.budget_denied"
+                )
+                safe_emit(
+                    self.observability,
+                    event,
+                    context=self.observability.create_context(),
+                    component="finops",
+                    status="denied",
+                    error_code=decision.reason,
+                    metadata={
+                        "currency": currency,
+                        "cost": str(decision.estimated_cost)
+                        if decision.estimated_cost is not None
+                        else None,
+                        "budget_category": decision.reason,
+                    },
+                )
+        return decision
+
+    def _check_budget_impl(
         self,
         estimated_cost: Decimal | None,
         *,
@@ -180,6 +218,23 @@ class FinOpsService:
 
     def record(self, usage: UsageRecord) -> None:
         self._store.add(usage)
+        if self.observability is not None:
+            from observability.helpers import safe_emit
+
+            safe_emit(
+                self.observability,
+                "finops.recorded",
+                context=self.observability.create_context(),
+                component="finops",
+                provider=getattr(usage, "provider_id", "") or "",
+                model=getattr(usage, "model_id", "") or "",
+                status="recorded",
+                metadata={
+                    "tokens": getattr(usage, "total_tokens", None),
+                    "cost": str(getattr(usage, "cost", None)),
+                    "currency": getattr(usage, "currency", "USD"),
+                },
+            )
 
     def record_usage(self, usage: UsageRecord) -> None:
         self.record(usage)

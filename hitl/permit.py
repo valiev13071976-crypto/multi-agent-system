@@ -23,6 +23,32 @@ from hitl.store import ExecutionPermitStore, InMemoryExecutionPermitStore
 class PermitService:
     def __init__(self, store: ExecutionPermitStore | None = None):
         self.store = store or InMemoryExecutionPermitStore()
+        self.observability = None
+
+    def _obs_emit(self, event_type: str, permit, **kwargs):
+        from observability.helpers import safe_emit
+
+        if self.observability is None:
+            return
+        parent = self.observability.context_for_workflow(permit.workflow_id)
+        span = (
+            self.observability.child_span(parent)
+            if parent is not None
+            else self.observability.create_context(
+                workflow_id=permit.workflow_id, task_id=permit.task_id
+            )
+        )
+        safe_emit(
+            self.observability,
+            event_type,
+            context=span,
+            component="permit",
+            metadata={
+                "permit_id": permit.permit_id,
+                "action_id": permit.action_id,
+            },
+            **kwargs,
+        )
 
     def get(self, permit_id: str) -> ExecutionPermit:
         permit = self.store.get(permit_id)
@@ -50,8 +76,10 @@ class PermitService:
                     version=int(permit.version) + 1,
                 )
                 self.store.save(expired)
+            self._obs_emit("permit.expired", permit, status="expired", error_code="permit_expired")
             raise ExecutionPermitExpiredError()
         if permit.status != PERMIT_ISSUED:
+            self._obs_emit("permit.denied", permit, status="denied", error_code="permit_not_issued")
             raise ExecutionPermitMismatchError("permit_not_issued")
         if action is not None:
             if permit.action_id != action.action_id:

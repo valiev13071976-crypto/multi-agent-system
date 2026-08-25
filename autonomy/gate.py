@@ -62,6 +62,8 @@ class AutonomyGate:
         self.signer = signer
         self.autonomy_level = autonomy_level
         self.last_decision: AutonomyDecision | None = None
+        self.observability = None
+        self.obs_context = None
 
     def evaluate(
         self,
@@ -228,6 +230,30 @@ class AutonomyGate:
         if token is not None and token.signature and token.signature in blob:
             raise RuntimeError("signature_leaked")
         self.last_decision = decision
+        obs = getattr(self, "observability", None)
+        if obs is not None:
+            parent = getattr(self, "obs_context", None)
+            span = obs.child_span(parent) if parent is not None else obs.create_context(
+                workflow_id=action.workflow_id,
+                task_id=action.task_id,
+            )
+            obs.emit(
+                "autonomy.evaluated",
+                context=span,
+                component="autonomy_gate",
+                status=decision.decision,
+                risk=decision.risk_class,
+                trust_level=decision.tool_trust_level,
+                tool_id=action.tool_id,
+                operation=action.operation,
+                metadata={
+                    "decision": decision.decision,
+                    "risk_level": decision.risk_class,
+                    "reason_code": decision.reason_code,
+                    "required_capability_count": len(decision.capabilities_checked),
+                },
+                update_metrics=False,
+            )
         return decision
 
 

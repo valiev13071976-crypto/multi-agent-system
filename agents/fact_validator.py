@@ -30,9 +30,10 @@ class FactValidator:
     Factual validation. External search goes only through ToolGateway.
     """
 
-    def __init__(self, gateway=None):
+    def __init__(self, gateway=None, observability=None):
         self.name = "FactValidator"
         self.gateway = gateway
+        self.observability = observability
 
     def _sources_present(self, experts: dict) -> bool:
         for answer in (experts or {}).values():
@@ -74,6 +75,29 @@ class FactValidator:
         )
 
     async def validate(self, expert_answers: dict, *, category: str | None = None):
+        result = await self._validate_impl(expert_answers, category=category)
+        obs = self.observability
+        if obs is None and self.gateway is not None:
+            obs = getattr(self.gateway, "observability", None)
+        if obs is not None:
+            from observability.helpers import safe_emit
+
+            safe_emit(
+                obs,
+                "validation.completed",
+                context=obs.create_context(),
+                component="validation",
+                status=getattr(result, "status", ""),
+                metadata={
+                    "validator_type": "fact",
+                    "pass": getattr(result, "status", "") == STATUS_PASS,
+                    "confidence": getattr(result, "score", None),
+                    "reason_code_count": 1 if getattr(result, "reason", None) else 0,
+                },
+            )
+        return result
+
+    async def _validate_impl(self, expert_answers: dict, *, category: str | None = None):
         claims_present = self._claims_present(expert_answers)
         sources_present = self._sources_present(expert_answers)
         resolved = (category or "").strip()

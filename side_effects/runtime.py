@@ -30,6 +30,7 @@ from side_effects.registry import empty_adapter_registry
 from tools.adapters import descriptor_from_side_effect, github_issue_labels_descriptor
 from tools.gateway import ToolGateway
 from tools.registry import ToolRegistry
+from observability.runtime import ObservabilityRuntime, build_observability_runtime
 from workflow.engine import WorkflowEngine
 from workflow.state_manager import StateManager
 
@@ -141,6 +142,7 @@ class SideEffectRuntime:
     protected_persistence_attached: bool = False
     tool_registry: ToolRegistry | None = None
     tool_gateway: ToolGateway | None = None
+    observability: ObservabilityRuntime | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -180,6 +182,23 @@ class SideEffectRuntime:
             meta["protected_persistence_attached"] = False
         if self.tool_registry is not None:
             meta["tool_gateway"] = dict(self.tool_registry.health())
+        if self.observability is not None:
+            snap = self.observability.health(
+                persistence_ready=bool(
+                    self.persistence is not None and self.persistence.ready
+                ),
+                protected_state_ready=bool(
+                    self.persistence is not None and self.persistence.protected_state_ready
+                ),
+                protected_write_required=bool(
+                    self.config.enabled and not self.config.dry_run
+                ),
+            )
+            meta["observability"] = {
+                "overall_status": snap.overall_status,
+                "uncertain_side_effects": snap.uncertain_side_effects,
+                "tool_failures_recent": snap.tool_failures_recent,
+            }
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -219,6 +238,7 @@ def build_tool_gateway(
     gate,
     hitl,
     github_enabled: bool = False,
+    observability: ObservabilityRuntime | None = None,
 ) -> tuple[ToolRegistry, ToolGateway]:
     """Register built-in tools, optionally GitHub write tool, then freeze."""
 
@@ -229,6 +249,7 @@ def build_tool_gateway(
         gate=gate,
         hitl=hitl,
         register_search=True,
+        observability=observability,
     )
     github_adapter = None
     if hasattr(side_effect_registry, "get"):
@@ -261,6 +282,7 @@ def build_tool_gateway(
     gateway.side_effect_executor = executor
     gateway.gate = gate
     gateway.hitl = hitl
+    gateway.observability = observability
     _ = github_enabled
     return tool_registry, gateway
 
@@ -275,17 +297,30 @@ def _finalize_runtime(
     persistence: SideEffectPersistenceBundle,
     composition_error: str | None = None,
     services: dict,
+    observability: ObservabilityRuntime | None = None,
 ) -> SideEffectRuntime:
+    obs = observability or build_observability_runtime(env={})
     engine = services["workflow_engine"]
     engine.side_effect_executor = executor
+    engine.observability = obs
+    gate = services["gate"]
+    gate.observability = obs
+    hitl = services["hitl_service"]
+    hitl.observability = obs
+    permit = services["permit_service"]
+    permit.observability = obs
+    executor.observability = obs
+    if getattr(executor, "reconciliation_service", None) is not None:
+        executor.reconciliation_service.observability = obs
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
         executor=executor,
-        gate=services["gate"],
-        hitl=services["hitl_service"],
+        gate=gate,
+        hitl=hitl,
         github_enabled=bool(config.enabled and registry.get("github.issue_labels") is not None)
         if hasattr(registry, "get")
         else False,
+        observability=obs,
     )
     return SideEffectRuntime(
         config=config,
@@ -297,12 +332,13 @@ def _finalize_runtime(
         persistence=persistence,
         recovery_scan=persistence.last_scan,
         workflow_engine=engine,
-        hitl_service=services["hitl_service"],
-        autonomy_gate=services["gate"],
-        permit_service=services["permit_service"],
+        hitl_service=hitl,
+        autonomy_gate=gate,
+        permit_service=permit,
         protected_persistence_attached=services["protected_persistence_attached"],
         tool_registry=tool_registry,
         tool_gateway=tool_gateway,
+        observability=obs,
     )
 
 
@@ -326,6 +362,7 @@ def compose_side_effect_runtime(
 
     audit = audit or SideEffectAuditLog()
     secrets = secrets or EnvSecretStore()
+    observability = build_observability_runtime(env=env)
     if persistence is None:
         if encryption is None:
             try:
@@ -377,6 +414,7 @@ def compose_side_effect_runtime(
             persistence=persistence,
             composition_error=exc.error_code,
             services=services,
+            observability=observability,
         )
     if not config.enabled:
         activation = GitHubWriteActivationService(
@@ -395,6 +433,7 @@ def compose_side_effect_runtime(
             audit=audit,
             persistence=persistence,
             services=services,
+            observability=observability,
         )
     try:
         if not config.allowed_repositories:
@@ -429,6 +468,7 @@ def compose_side_effect_runtime(
             persistence=persistence,
             composition_error=exc.error_code,
             services=services,
+            observability=observability,
         )
     require_durable = bool(config.enabled and not config.dry_run)
     persistence_ready, unavailable_reason = _real_write_persistence_gate(
@@ -451,6 +491,7 @@ def compose_side_effect_runtime(
         audit=audit,
         store=persistence.reconciliation_store,
     )
+    recon.observability = observability
     executor = SideEffectExecutor(
         registry,
         audit=audit,
@@ -471,6 +512,7 @@ def compose_side_effect_runtime(
         audit=audit,
         persistence=persistence,
         services=services,
+        observability=observability,
     )
 
 

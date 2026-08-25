@@ -59,18 +59,39 @@ class ModelRouter:
 
     def __init__(self, registry: ProviderRegistry):
         self.registry = registry
+        self.observability = None
 
     def _decision(self, role_id: str, provider_ids: tuple[str, ...], reason: str) -> RoutingDecision:
         models = {
             provider_id: self.registry.model(provider_id)
             for provider_id in provider_ids
         }
-        return RoutingDecision(
+        decision = RoutingDecision(
             role_id=role_id,
             provider_ids=provider_ids,
             models=models,
             reason=reason,
         )
+        if self.observability is not None:
+            from observability.helpers import safe_emit
+
+            provider = provider_ids[0] if provider_ids else ""
+            model = models.get(provider, "") if provider else ""
+            safe_emit(
+                self.observability,
+                "provider.selected",
+                context=self.observability.create_context(),
+                component="provider",
+                provider=provider,
+                model=str(model or ""),
+                status="selected",
+                metadata={
+                    "route_reason": reason,
+                    "capability_match": reason,
+                    "provider_count": len(provider_ids),
+                },
+            )
+        return decision
 
     def decide(
         self,

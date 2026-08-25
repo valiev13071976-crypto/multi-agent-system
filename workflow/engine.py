@@ -67,6 +67,7 @@ class WorkflowEngine:
         hitl_service=None,
         side_effect_executor=None,
         reconciliation_service=None,
+        observability=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
@@ -74,15 +75,37 @@ class WorkflowEngine:
         self.hitl_service = hitl_service
         self.side_effect_executor = side_effect_executor
         self.reconciliation_service = reconciliation_service
+        self.observability = observability
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
         self.last_permit_id = None
 
+    def _obs_ctx(self, workflow_id: str = "", task_id: str = ""):
+        obs = self.observability
+        if obs is None:
+            return None
+        if workflow_id:
+            existing = obs.context_for_workflow(workflow_id)
+            if existing is not None:
+                return existing
+        return obs.create_context(workflow_id=workflow_id, task_id=task_id)
+
+    def _obs_emit(self, event_type: str, ctx, **kwargs) -> None:
+        if self.observability is None:
+            return
+        self.observability.emit(
+            event_type, context=ctx, component="workflow", **kwargs
+        )
+
     def create(self, task_id: str) -> str:
         state = self.state_manager.create(task_id=task_id)
         self.last_workflow_id = state.workflow_id
         self.last_task_id = task_id
+        ctx = self._obs_ctx(state.workflow_id, task_id)
+        if self.observability is not None and ctx is not None:
+            self.observability.bind_workflow_context(state.workflow_id, ctx)
+        self._obs_emit("workflow.created", ctx, status="created")
         return state.workflow_id
 
     def queue_execution_gate(self, workflow_id: str) -> str:
@@ -123,15 +146,28 @@ class WorkflowEngine:
         requested_by = kwargs.pop("requested_by", "system")
         now = kwargs.get("now")
         gate = self._gate()
+        if self.observability is not None and getattr(gate, "observability", None) is None:
+            gate.observability = self.observability
+            gate.obs_context = self._obs_ctx(action.workflow_id, action.task_id)
         decision = gate.evaluate(action, **kwargs)
         if decision.decision == DECISION_REQUIRE_APPROVAL:
-            record = self._hitl().request_approval(
+            hitl = self._hitl()
+            if self.observability is not None and getattr(hitl, "observability", None) is None:
+                hitl.observability = self.observability
+            record = hitl.request_approval(
                 action,
                 decision,
                 requested_by=requested_by,
                 now=now,
             )
             self.last_approval_id = record.approval_id
+            ctx = self._obs_ctx(action.workflow_id, action.task_id)
+            self._obs_emit(
+                "workflow.waiting_approval",
+                ctx,
+                status="waiting_approval",
+                metadata={"approval_id": record.approval_id},
+            )
         return decision
 
     def resolve_action_approval(
@@ -170,6 +206,11 @@ class WorkflowEngine:
         manager = self.state_manager
         manager.plan(workflow_id)
         manager.start(workflow_id)
+        ctx = self._obs_ctx(workflow_id, task_id)
+        mono0 = (
+            self.observability.monotonic_ms() if self.observability is not None else None
+        )
+        self._obs_emit("workflow.started", ctx, status="started")
         lifecycle = WorkflowLifecycle(
             manager,
             workflow_id,
@@ -191,12 +232,28 @@ class WorkflowEngine:
             )
             manager.complete_workflow(workflow_id)
             manager.checkpoint(workflow_id)
+            duration = None
+            if mono0 is not None and self.observability is not None:
+                duration = int(self.observability.monotonic_ms() - mono0)
+            self._obs_emit(
+                "workflow.completed",
+                ctx,
+                status="completed",
+                duration_ms=duration,
+            )
             return result
         except Exception as exc:
             state = manager.get(workflow_id)
             if state.status not in TERMINAL_STATUSES:
                 current = state.current_step or "route"
                 manager.fail_step(workflow_id, current, error_code_for(exc))
+            self._obs_emit(
+                "workflow.failed",
+                ctx,
+                status="failed",
+                error_code=error_code_for(exc),
+                exception_type=type(exc).__name__,
+            )
             raise
 
     async def resume(
@@ -219,6 +276,13 @@ class WorkflowEngine:
             if current.status == STATUS_WAITING_APPROVAL:
                 self.state_manager.approve(workflow_id)
             self.last_permit_id = execution_permit.permit_id
+            ctx = self._obs_ctx(workflow_id)
+            self._obs_emit(
+                "workflow.resumed",
+                ctx,
+                status="resumed",
+                metadata={"permit_id": execution_permit.permit_id},
+            )
             return {
                 "ran": False,
                 "reason": "ready_for_execution",
@@ -265,6 +329,11 @@ class WorkflowEngine:
         if self.state_manager.get(workflow_id).next_incomplete_step() is None:
             if self.state_manager.get(workflow_id).status not in TERMINAL_STATUSES:
                 self.state_manager.complete_workflow(workflow_id)
+                self._obs_emit(
+                    "workflow.completed",
+                    self._obs_ctx(workflow_id),
+                    status="completed",
+                )
         return {
             "ran": True,
             "reason": "resumed",

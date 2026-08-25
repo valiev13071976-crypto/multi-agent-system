@@ -78,6 +78,7 @@ class HITLService:
         self.authority = authority or InMemoryApprovalAuthority()
         self.permits = permits or PermitService()
         self.audit = audit or HITLAuditLog()
+        self.observability = None
         self.approval_ttl_seconds = (
             DEFAULT_APPROVAL_TTL_SECONDS
             if approval_ttl_seconds is None
@@ -96,6 +97,24 @@ class HITLService:
         )
         self.last_permit: ExecutionPermit | None = None
         self.last_reevaluation = None
+
+    def _obs_emit(self, event_type: str, *, workflow_id="", task_id="", component="hitl", **kwargs):
+        from observability.helpers import safe_emit
+
+        obs = self.observability
+        if obs is None:
+            return
+        parent = obs.context_for_workflow(workflow_id) if workflow_id else None
+        span = obs.child_span(parent) if parent is not None else obs.create_context(
+            workflow_id=workflow_id, task_id=task_id
+        )
+        safe_emit(
+            obs,
+            event_type,
+            context=span,
+            component=component,
+            **kwargs,
+        )
 
     def get(self, approval_id: str) -> ApprovalRecord:
         record = self.store.get(approval_id)
@@ -159,6 +178,16 @@ class HITLService:
             reason_code="require_approval",
             metadata={"approval_class": record.approval_class},
         )
+        self._obs_emit(
+            "hitl.requested",
+            workflow_id=action.workflow_id,
+            task_id=action.task_id,
+            status="requested",
+            metadata={
+                "approval_id": record.approval_id,
+                "action_id": action.action_id,
+            },
+        )
         return record
 
     def approve(
@@ -199,6 +228,16 @@ class HITLService:
             actor_id=resolved_by,
             reason_code="approved",
         )
+        self._obs_emit(
+            "hitl.approved",
+            workflow_id=updated.workflow_id,
+            task_id=updated.task_id,
+            status="approved",
+            metadata={
+                "approval_id": updated.approval_id,
+                "action_id": updated.action_id,
+            },
+        )
         return updated
 
     def reject(
@@ -228,6 +267,16 @@ class HITLService:
             approval_id=updated.approval_id,
             actor_id=resolved_by,
             reason_code="approval_rejected",
+        )
+        self._obs_emit(
+            "hitl.rejected",
+            workflow_id=updated.workflow_id,
+            task_id=updated.task_id,
+            status="rejected",
+            metadata={
+                "approval_id": updated.approval_id,
+                "action_id": updated.action_id,
+            },
         )
         return updated
 
@@ -261,6 +310,16 @@ class HITLService:
             actor_id=resolved_by,
             reason_code="approval_expired",
         )
+        self._obs_emit(
+            "hitl.expired",
+            workflow_id=updated.workflow_id,
+            task_id=updated.task_id,
+            status="expired",
+            metadata={
+                "approval_id": updated.approval_id,
+                "action_id": updated.action_id,
+            },
+        )
         return updated
 
     def cancel(
@@ -288,6 +347,16 @@ class HITLService:
             approval_id=updated.approval_id,
             actor_id=resolved_by,
             reason_code="approval_cancelled",
+        )
+        self._obs_emit(
+            "hitl.cancelled",
+            workflow_id=updated.workflow_id,
+            task_id=updated.task_id,
+            status="cancelled",
+            metadata={
+                "approval_id": updated.approval_id,
+                "action_id": updated.action_id,
+            },
         )
         return updated
 
@@ -398,6 +467,18 @@ class HITLService:
             reason_code="permit_issued",
             metadata={"permit_id": permit.permit_id},
         )
+        self._obs_emit(
+            "permit.issued",
+            workflow_id=action.workflow_id,
+            task_id=action.task_id,
+            component="permit",
+            status="issued",
+            metadata={
+                "permit_id": permit.permit_id,
+                "approval_id": record.approval_id,
+                "action_id": action.action_id,
+            },
+        )
         if (
             self.state_manager is not None
             and self.state_manager.get(action.workflow_id).status == STATUS_WAITING_APPROVAL
@@ -417,6 +498,18 @@ class HITLService:
             approval_id=consumed.approval_id,
             permit_id=consumed.permit_id,
             reason_code="permit_consumed",
+        )
+        self._obs_emit(
+            "permit.consumed",
+            workflow_id=consumed.workflow_id,
+            task_id=consumed.task_id,
+            component="permit",
+            status="consumed",
+            metadata={
+                "permit_id": consumed.permit_id,
+                "approval_id": consumed.approval_id,
+                "action_id": consumed.action_id,
+            },
         )
         return consumed
 

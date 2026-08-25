@@ -77,6 +77,32 @@ class TaskQueue:
         self.retry_policy = retry_policy or RetryPolicy()
         self.lease_seconds = float(lease_seconds)
         self._now = now_fn or utc_now
+        self.observability = None
+
+    def _obs_emit(self, event_type: str, task=None, **kwargs):
+        from observability.helpers import safe_emit
+
+        if self.observability is None:
+            return
+        workflow_id = getattr(task, "workflow_id", "") if task is not None else ""
+        task_id = getattr(task, "task_id", "") if task is not None else ""
+        parent = (
+            self.observability.context_for_workflow(workflow_id) if workflow_id else None
+        )
+        span = (
+            self.observability.child_span(parent)
+            if parent is not None
+            else self.observability.create_context(
+                workflow_id=workflow_id, task_id=task_id
+            )
+        )
+        safe_emit(
+            self.observability,
+            event_type,
+            context=span,
+            component="queue",
+            **kwargs,
+        )
 
     def now(self) -> datetime:
         return self._now()
@@ -125,6 +151,7 @@ class TaskQueue:
             metadata=sanitize_metadata(metadata),
         )
         self.store.enqueue(task)
+        self._obs_emit("queue.enqueued", task, status="enqueued")
         return task
 
     def list_ready(self, *, now: datetime | None = None) -> tuple[QueueTask, ...]:
@@ -185,6 +212,7 @@ class TaskQueue:
             started_at=stamp,
         )
         self.store.save(started)
+        self._obs_emit("queue.started", started, status="started")
         return started
 
     def ack(self, queue_task_id: str, lease_id: str, *, now: datetime | None = None) -> QueueTask:
@@ -199,6 +227,7 @@ class TaskQueue:
             lease_expires_at=None,
         )
         self.store.save(done)
+        self._obs_emit("queue.completed", done, status="completed")
         return done
 
     def skip_complete(
@@ -252,6 +281,12 @@ class TaskQueue:
                 metadata=sanitize_metadata({**dict(task.metadata), **extra}),
             )
             self.store.save(waiting)
+            self._obs_emit(
+                "queue.failed",
+                waiting,
+                status="retry_wait",
+                error_code=code,
+            )
             return waiting
         return self.dead_letter(
             queue_task_id,
@@ -290,6 +325,12 @@ class TaskQueue:
             metadata=sanitize_metadata({**dict(task.metadata), **extra}),
         )
         self.store.save(lettered)
+        self._obs_emit(
+            "queue.dead_lettered",
+            lettered,
+            status="dead_lettered",
+            error_code=str(error_code),
+        )
         return lettered
 
     def cancel(self, queue_task_id: str, *, now: datetime | None = None) -> QueueTask:
@@ -314,6 +355,7 @@ class TaskQueue:
             lease_expires_at=None,
         )
         self.store.save(cancelled)
+        self._obs_emit("queue.cancelled", cancelled, status="cancelled")
         return cancelled
 
     def abort_running(
