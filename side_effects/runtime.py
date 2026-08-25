@@ -226,10 +226,14 @@ class SideEffectRuntime:
         if self.recovery_orchestrator is not None:
             open_cases = len(self.recovery_orchestrator.list_open_cases())
             blocked = getattr(self.recovery_orchestrator, "mutation_blocked_reason", None)
+            store = getattr(self.recovery_orchestrator, "store", None)
             meta["recovery"] = {
                 "open_cases": open_cases,
                 "mutation_blocked_reason": blocked,
                 "enabled": bool(getattr(self.recovery_orchestrator, "enabled", True)),
+                "persistence_backend": getattr(store, "persistence_backend", "unknown"),
+                "persistence_ready": bool(getattr(store, "available", False)),
+                "connection_mode": getattr(store, "connection_mode", "unknown"),
             }
         return type(health)(
             adapter_id=health.adapter_id,
@@ -261,6 +265,23 @@ class SideEffectRuntime:
             return self.activation.readiness
         self.startup_probe_ran = True
         return result
+
+    def close(self) -> None:
+        """Release owned resources. Shared recovery store does not close P7 connection."""
+
+        orch = self.recovery_orchestrator
+        if orch is not None:
+            store = getattr(orch, "store", None)
+            if store is not None and hasattr(store, "close"):
+                try:
+                    store.close()
+                except Exception:
+                    pass
+        if self.persistence is not None and self.persistence.connection is not None:
+            try:
+                self.persistence.connection.close()
+            except Exception:
+                pass
 
 
 def build_tool_gateway(
@@ -356,11 +377,29 @@ def _finalize_runtime(
         observability=obs,
     )
     recovery = None
-    try:
-        from recovery.runtime import build_recovery_orchestrator, run_startup_recovery_materialization
+    from recovery.runtime import (
+        _fail_closed_orchestrator,
+        build_recovery_orchestrator,
+        recovery_config,
+        run_startup_recovery_materialization,
+    )
+    from recovery.store import RecoveryPersistenceUnavailableError
 
+    try:
         recovery = build_recovery_orchestrator(
             env=env,
+            persistence=persistence,
+            reconciliation_service=getattr(executor, "reconciliation_service", None),
+            workflow_engine=engine,
+            gate=gate,
+            hitl=hitl,
+            side_effect_executor=executor,
+            observability=obs,
+            audit=audit,
+        )
+    except RecoveryPersistenceUnavailableError:
+        recovery = _fail_closed_orchestrator(
+            recovery_config(env),
             reconciliation_service=getattr(executor, "reconciliation_service", None),
             workflow_engine=engine,
             gate=gate,
@@ -370,11 +409,33 @@ def _finalize_runtime(
             audit=audit,
         )
     except Exception:
-        recovery = None
-    # Rebuild with env from compose — attach recovery when enabled.
+        # Non-persistence composition errors: fail closed only for durable sqlite.
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.ready
+            and persistence.connection is not None
+        ):
+            recovery = _fail_closed_orchestrator(
+                recovery_config(env),
+                reconciliation_service=getattr(executor, "reconciliation_service", None),
+                workflow_engine=engine,
+                gate=gate,
+                hitl=hitl,
+                side_effect_executor=executor,
+                observability=obs,
+                audit=audit,
+            )
+        else:
+            recovery = None
+    # Attach recovery when enabled.
     if recovery is not None:
         executor.recovery_orchestrator = recovery
-        if persistence is not None and persistence.last_scan is not None:
+        if (
+            persistence is not None
+            and persistence.last_scan is not None
+            and getattr(recovery.store, "available", True)
+        ):
             try:
                 run_startup_recovery_materialization(
                     recovery,

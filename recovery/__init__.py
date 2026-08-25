@@ -20,6 +20,7 @@ from recovery.store import (
     RecoveryConflictError,
     RecoveryPersistenceUnavailableError,
     SqliteRecoveryCaseStore,
+    normalize_recovery_db_path,
 )
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "RecoveryPolicy",
     "RecoveryQueue",
     "SqliteRecoveryCaseStore",
+    "normalize_recovery_db_path",
 ]

@@ -160,6 +160,8 @@ class InMemoryRecoveryCaseStore(RecoveryCaseStore):
         self._decisions: list[RecoveryDecision] = []
         self._queue: dict[str, RecoveryQueueJob] = {}
         self.available = True
+        self.connection_mode = "memory"
+        self.persistence_backend = "memory"
 
     def create(self, case: RecoveryCase) -> RecoveryCase:
         if not self.available:
@@ -260,22 +262,65 @@ class InMemoryRecoveryCaseStore(RecoveryCaseStore):
             return tuple(sorted(self._queue.values(), key=lambda j: j.job_id))
 
 
+def normalize_recovery_db_path(path: str | Path) -> str:
+    """Absolute resolved path for same-path comparison (no user ProposedAction paths)."""
+    return str(Path(path).expanduser().resolve())
+
+
 class SqliteRecoveryCaseStore(RecoveryCaseStore):
-    def __init__(self, db_path: str | Path):
-        self.path = Path(db_path)
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    """SQLite recovery store.
+
+    Modes:
+    - shared_connection: reuse P7 SqliteConnection (owns_connection=False)
+    - db_path: dedicated sqlite file (owns_connection=True by default)
+    """
+
+    def __init__(
+        self,
+        db_path: str | Path | None = None,
+        *,
+        shared_connection=None,
+        owns_connection: bool | None = None,
+    ):
         self._lock = threading.RLock()
-        self._local = threading.local()
         self.available = True
+        self._shared = shared_connection
+        self._local = threading.local()
+        if shared_connection is not None:
+            self.path = Path(getattr(shared_connection, "path", "") or ".")
+            self.owns_connection = (
+                False if owns_connection is None else bool(owns_connection)
+            )
+            self.connection_mode = "shared"
+            self.persistence_backend = "sqlite"
+        elif db_path is not None and str(db_path).strip():
+            self.path = Path(str(db_path).strip())
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            self.owns_connection = (
+                True if owns_connection is None else bool(owns_connection)
+            )
+            self.connection_mode = "dedicated"
+            self.persistence_backend = "sqlite"
+        else:
+            raise ValueError("recovery_store_requires_path_or_shared_connection")
         self._init_schema()
 
     def _connect(self) -> sqlite3.Connection:
+        if self._shared is not None:
+            return self._shared.connect()
         conn = getattr(self._local, "conn", None)
         if conn is None:
             conn = sqlite3.connect(str(self.path), check_same_thread=False)
             conn.row_factory = sqlite3.Row
             self._local.conn = conn
         return conn
+
+    def _commit(self, conn: sqlite3.Connection) -> None:
+        if self._shared is not None:
+            # Cooperate with P7 UoW: no nested BEGIN/COMMIT when depth > 0.
+            self._shared.maybe_autocommit()
+            return
+        conn.commit()
 
     def _init_schema(self) -> None:
         with self._lock:
@@ -286,12 +331,21 @@ class SqliteRecoveryCaseStore(RecoveryCaseStore):
                     "INSERT OR REPLACE INTO recovery_schema_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(SCHEMA_VERSION)),
                 )
-                conn.commit()
+                self._commit(conn)
             except Exception as exc:
                 raise RecoveryPersistenceUnavailableError() from exc
 
     def close(self) -> None:
+        """Close only owned connections. Shared P7 connection is never closed here."""
         with self._lock:
+            if not self.owns_connection:
+                return
+            if self._shared is not None:
+                try:
+                    self._shared.close()
+                except Exception:
+                    pass
+                return
             conn = getattr(self._local, "conn", None)
             if conn is not None:
                 conn.close()
@@ -368,7 +422,7 @@ class SqliteRecoveryCaseStore(RecoveryCaseStore):
                         case.version,
                     ),
                 )
-                conn.commit()
+                self._commit(conn)
                 return case
             except sqlite3.IntegrityError as exc:
                 raise RecoveryConflictError("duplicate_active_recovery_case") from exc
@@ -422,7 +476,7 @@ class SqliteRecoveryCaseStore(RecoveryCaseStore):
                 )
                 if cur.rowcount != 1:
                     raise RecoveryConflictError("recovery_version_conflict")
-                conn.commit()
+                self._commit(conn)
             except RecoveryConflictError:
                 raise
             except sqlite3.Error as exc:
@@ -486,7 +540,7 @@ class SqliteRecoveryCaseStore(RecoveryCaseStore):
                         _json_dumps(dict(decision.metadata_safe)),
                     ),
                 )
-                conn.commit()
+                self._commit(conn)
                 return decision
             except sqlite3.Error as exc:
                 raise RecoveryPersistenceUnavailableError() from exc
@@ -566,7 +620,7 @@ class SqliteRecoveryCaseStore(RecoveryCaseStore):
                         job.version,
                     ),
                 )
-                conn.commit()
+                self._commit(conn)
                 return job
             except sqlite3.Error as exc:
                 raise RecoveryPersistenceUnavailableError() from exc
