@@ -1,7 +1,9 @@
-from workflow.errors import WaitingApprovalError
+from workflow.errors import WaitingApprovalError, WorkflowNotFoundError
 from workflow.models import (
     ANALYZE_STEPS,
+    STATUS_CANCELLED,
     STATUS_COMPLETED,
+    STATUS_FAILED,
     STATUS_WAITING_APPROVAL,
     STEP_VALIDATE,
     TERMINAL_STATUSES,
@@ -70,6 +72,22 @@ class WorkflowEngine:
         self.last_workflow_id = state.workflow_id
         self.last_task_id = task_id
         return state.workflow_id
+
+    def queue_execution_gate(self, workflow_id: str) -> str:
+        """Machine-safe worker gate. Does not mutate workflow state."""
+        try:
+            state = self.state_manager.get(workflow_id)
+        except WorkflowNotFoundError:
+            return "missing"
+        if state.status == STATUS_WAITING_APPROVAL:
+            return "waiting_approval"
+        if state.status == STATUS_CANCELLED:
+            return "cancelled"
+        if state.status == STATUS_COMPLETED:
+            return "completed"
+        if state.status == STATUS_FAILED:
+            return "failed"
+        return "execute"
 
     async def execute(
         self,
