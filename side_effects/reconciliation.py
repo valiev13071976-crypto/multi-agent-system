@@ -196,7 +196,11 @@ class SideEffectReconciliationService:
             metadata={"recovery_attempt": execution.recovery_attempt},
         )
         self.store.create(record)
-        updated = replace(execution, reconciliation_id=record.reconciliation_id)
+        updated = replace(
+            execution,
+            reconciliation_id=record.reconciliation_id,
+            version=int(execution.version) + 1,
+        )
         self.execution_store.save(updated)
         self.audit.record(
             EVENT_RECONCILIATION_CREATED,
@@ -457,6 +461,7 @@ class SideEffectReconciliationService:
             external_reference=ext,
             rollback_reference=rollback_ref,
             reconciliation_id=record.reconciliation_id,
+            version=int(execution.version) + 1,
         )
         self.execution_store.save(updated_exec)
         record = self._save(
@@ -499,6 +504,7 @@ class SideEffectReconciliationService:
             completed_at=stamp,
             reconciliation_id=record.reconciliation_id,
             error_code=execution.error_code or "confirmed_failed",
+            version=int(execution.version) + 1,
         )
         self.execution_store.save(updated_exec)
         record = self._save(

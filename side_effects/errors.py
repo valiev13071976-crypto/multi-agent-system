@@ -77,3 +77,13 @@ class ReconciliationConflictError(ReconciliationError):
 class ReconciliationNotFoundError(ReconciliationError):
     def __init__(self, error_code: str = "reconciliation_not_found"):
         super().__init__(error_code)
+
+
+class SideEffectPersistenceUnavailableError(SideEffectExecutionDeniedError):
+    def __init__(self, error_code: str = "side_effect_persistence_unavailable"):
+        super().__init__(error_code)
+
+
+class SideEffectPersistenceConflictError(SideEffectError):
+    def __init__(self, error_code: str = "side_effect_persistence_conflict"):
+        super().__init__(error_code)

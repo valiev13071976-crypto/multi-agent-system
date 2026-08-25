@@ -44,12 +44,14 @@ class GitHubWriteActivationService:
         audit=None,
         registered: bool = False,
         composition_error: str | None = None,
+        persistence_ready: bool = True,
     ):
         self._config = config
         self._transport = transport
         self._audit = audit
         self._registered = bool(registered)
         self._composition_error = composition_error
+        self._persistence_ready = bool(persistence_ready)
         self._readiness: GitHubReadinessResult | None = None
         self._state = self._derive_state()
         self._emit_state()
@@ -60,6 +62,11 @@ class GitHubWriteActivationService:
         if not self._config.enabled:
             return ACTIVATION_DISABLED
         if self._config.kill_switch:
+            return ACTIVATION_BLOCKED
+        if (
+            not self._config.dry_run
+            and not self._persistence_ready
+        ):
             return ACTIVATION_BLOCKED
         if self._config.dry_run:
             return ACTIVATION_DRY_RUN
@@ -98,6 +105,8 @@ class GitHubWriteActivationService:
             return "github_write_adapter_disabled"
         if self._config.kill_switch:
             return "github_write_kill_switch_active"
+        if not self._config.dry_run and not self._persistence_ready:
+            return "side_effect_persistence_unavailable"
         if self._config.dry_run:
             return "github_write_dry_run_active"
         if self._readiness is None:
@@ -124,6 +133,9 @@ class GitHubWriteActivationService:
             readiness_status=None if readiness is None else readiness.status,
             last_probe_at=None if readiness is None else readiness.checked_at,
             reason_code=self._state_reason(),
+            metadata={
+                "persistence_ready": self._persistence_ready,
+            },
         )
 
     async def refresh(self, *, now=None) -> GitHubReadinessResult:
@@ -211,6 +223,18 @@ class GitHubWriteActivationService:
                 dry_run=False,
                 blocked=True,
                 reason_code="github_write_kill_switch_active",
+                checked_at=stamp,
+            )
+        if (
+            purpose in {PURPOSE_MUTATE, PURPOSE_ROLLBACK}
+            and not self._config.dry_run
+            and not self._persistence_ready
+        ):
+            return OperationalActivationDecision(
+                allowed=False,
+                dry_run=False,
+                blocked=True,
+                reason_code="side_effect_persistence_unavailable",
                 checked_at=stamp,
             )
         repo_decision = self._repository_decision(action, stamp, purpose)

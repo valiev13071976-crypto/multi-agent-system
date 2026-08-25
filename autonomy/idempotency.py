@@ -65,6 +65,7 @@ class IdempotencyRegistry:
             state=IDEMPOTENCY_RESERVED,
             created_at=now,
             updated_at=now,
+            version=1,
             metadata=sanitize_metadata(metadata),
         )
         self.store.put(record)
@@ -83,6 +84,19 @@ class IdempotencyRegistry:
         """Lock the key after an unknown external outcome. Not a retry grant."""
         return self._set_state(key, IDEMPOTENCY_UNCERTAIN)
 
+    def bind_execution(self, key: str, execution_id: str) -> IdempotencyRecord:
+        existing = self.store.get(key)
+        if existing is None:
+            raise KeyError(key)
+        updated = replace(
+            existing,
+            execution_id=execution_id,
+            updated_at=utc_now(),
+            version=int(existing.version) + 1,
+        )
+        self.store.put(updated)
+        return updated
+
     def _set_state(self, key: str, state: str) -> IdempotencyRecord:
         existing = self.store.get(key)
         if existing is None:
@@ -91,7 +105,12 @@ class IdempotencyRegistry:
             return existing
         if (existing.state, state) not in ALLOWED_IDEMPOTENCY_TRANSITIONS:
             raise IdempotencyTransitionError(key, "invalid_idempotency_transition")
-        updated = replace(existing, state=state, updated_at=utc_now())
+        updated = replace(
+            existing,
+            state=state,
+            updated_at=utc_now(),
+            version=int(existing.version) + 1,
+        )
         self.store.put(updated)
         return updated
 

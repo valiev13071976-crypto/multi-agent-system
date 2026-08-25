@@ -20,12 +20,14 @@ STATUS_FAILED = "failed"
 STATUS_CANCELLED = "cancelled"
 STATUS_UNKNOWN = "unknown"
 STATUS_DENIED = "denied"
+STATUS_STARTED = "started"
 EXECUTION_STATUSES = (
     STATUS_SUCCEEDED,
     STATUS_FAILED,
     STATUS_CANCELLED,
     STATUS_UNKNOWN,
     STATUS_DENIED,
+    STATUS_STARTED,
 )
 
 OUTCOME_KNOWN_SUCCESS = "known_success"
@@ -310,6 +312,9 @@ class SideEffectExecutionRecord:
     parent_execution_id: str | None = None
     reconciliation_id: str | None = None
     recovery_attempt: int = 0
+    resource_ref: str | None = None
+    reversible: bool = False
+    version: int = 1
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):

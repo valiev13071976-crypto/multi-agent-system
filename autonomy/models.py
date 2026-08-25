@@ -223,6 +223,8 @@ class IdempotencyRecord:
     state: str
     created_at: datetime
     updated_at: datetime
+    execution_id: str | None = None
+    version: int = 1
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):

@@ -47,6 +47,7 @@ from side_effects.errors import (
     SideEffectExecutionDeniedError,
     SideEffectExecutionError,
     SideEffectIdempotencyError,
+    SideEffectPersistenceUnavailableError,
 )
 from side_effects.models import (
     AUTHORIZATION_AUTONOMY_DECISION,
@@ -80,6 +81,7 @@ from side_effects.models import (
     STATUS_FAILED,
     STATUS_SUCCEEDED,
     STATUS_UNKNOWN,
+    STATUS_STARTED,
     SideEffectExecutionContext,
     SideEffectExecutionRecord,
     SideEffectExecutionRequest,
@@ -108,6 +110,8 @@ class SideEffectExecutor:
         permit_service: PermitService | None = None,
         reconciliation_service=None,
         activation=None,
+        persistence=None,
+        require_durable_persistence: bool = False,
     ):
         self.registry = registry if registry is not None else empty_adapter_registry()
         self.store = store or InMemorySideEffectExecutionStore()
@@ -117,7 +121,10 @@ class SideEffectExecutor:
         self.permit_service = permit_service or PermitService()
         self.reconciliation_service = reconciliation_service
         self.activation = activation
+        self.persistence = persistence
+        self.require_durable_persistence = bool(require_durable_persistence)
         self.trace: list[str] = []
+        self.simulate_finalization_failure = False
 
     async def execute(
         self,
@@ -181,6 +188,7 @@ class SideEffectExecutor:
             adapter = self.registry.require(action.tool_id)
             self._validate_adapter(action, adapter, fingerprint)
             self._require_activation(action, adapter, purpose=PURPOSE_MUTATE, now=stamp)
+            self._require_persistence_ready(purpose=PURPOSE_MUTATE)
             if self.activation is not None:
                 self.audit.record(
                     EVENT_REAL_EXECUTION_AUTHORIZED,
@@ -190,7 +198,21 @@ class SideEffectExecutor:
                     tool_id=action.tool_id,
                     reason_code="activation_ready",
                 )
-            self._reserve_or_start(action, execution_id)
+            try:
+                self._reserve_or_start(action, execution_id)
+                self._persist_started_execution(
+                    action=action,
+                    execution_id=execution_id,
+                    authorization_type=authorization_type,
+                    authorization_id=authorization_id,
+                    started_at=started_at,
+                )
+            except SideEffectPersistenceUnavailableError:
+                raise
+            except Exception as exc:
+                if isinstance(exc, (SideEffectAlreadyCompletedError, SideEffectIdempotencyError)):
+                    raise
+                raise SideEffectPersistenceUnavailableError() from exc
             self.audit.record(
                 EVENT_IDEMPOTENCY_RESERVED,
                 execution_id=execution_id,
@@ -239,7 +261,7 @@ class SideEffectExecutor:
             ctx.idempotency_key = action.idempotency_key
             timeout = timeout_seconds if timeout_seconds is not None else ctx.timeout_seconds
             adapter_result = await self._invoke_adapter(adapter, action, ctx, timeout)
-            if ctx.simulate_finalization_failure:
+            if ctx.simulate_finalization_failure or self.simulate_finalization_failure:
                 raise SideEffectExecutionError("finalization_failed")
             completed_at = ctx.stamp()
             result = SideEffectExecutionResult(
@@ -263,8 +285,56 @@ class SideEffectExecutor:
                     **dict(adapter_result.metadata),
                 },
             )
-            self._save_record(result, authorization_type, authorization_id, action, attempt=1)
-            self.idempotency.mark_completed(action.idempotency_key)
+            try:
+                self._finalize_success(
+                    result, authorization_type, authorization_id, action, attempt=1
+                )
+            except Exception as exc:
+                # External success already confirmed; local durability failure → uncertain.
+                error_code = "execution_outcome_uncertain"
+                try:
+                    self.idempotency.mark_uncertain(action.idempotency_key)
+                except Exception:
+                    pass
+                uncertain_result = SideEffectExecutionResult(
+                    execution_id=execution_id,
+                    workflow_id=action.workflow_id,
+                    task_id=action.task_id,
+                    action_id=action.action_id,
+                    tool_id=action.tool_id,
+                    operation=action.operation,
+                    status=STATUS_UNKNOWN,
+                    started_at=started_at,
+                    completed_at=ctx.stamp(),
+                    outcome=OUTCOME_UNCERTAIN,
+                    error_code=error_code,
+                    external_reference=adapter_result.external_reference,
+                    reversible=bool(adapter_result.reversible),
+                    rollback_reference=adapter_result.rollback_reference,
+                    metadata={
+                        "finalization_error": getattr(exc, "error_code", type(exc).__name__),
+                        "adapter_started": True,
+                    },
+                )
+                try:
+                    self._save_record(
+                        uncertain_result,
+                        authorization_type,
+                        authorization_id,
+                        action,
+                        attempt=1,
+                    )
+                except Exception:
+                    pass
+                self._flag_reconciliation(uncertain_result)
+                self.audit.record(
+                    EVENT_EXECUTION_UNCERTAIN,
+                    execution_id=execution_id,
+                    workflow_id=action.workflow_id,
+                    action_id=action.action_id,
+                    reason_code=error_code,
+                )
+                return uncertain_result
             self.audit.record(
                 EVENT_ADAPTER_SUCCEEDED,
                 execution_id=execution_id,
@@ -393,6 +463,7 @@ class SideEffectExecutor:
                     SideEffectAdapterMismatchError,
                     ActionIntegrityError,
                     SideEffectActivationDeniedError,
+                    SideEffectPersistenceUnavailableError,
                 ),
             ):
                 raise
@@ -452,6 +523,7 @@ class SideEffectExecutor:
         if existing is not None and existing.state == IDEMPOTENCY_COMPLETED:
             return self._result_from_record(original)
         self._require_activation(action, adapter, purpose=PURPOSE_ROLLBACK, now=stamp)
+        self._require_persistence_ready(purpose=PURPOSE_ROLLBACK)
         try:
             self._reserve_or_start(action, execution_id + ":rollback")
         except SideEffectAlreadyCompletedError:
@@ -470,7 +542,11 @@ class SideEffectExecutor:
         except RollbackNotSupportedError:
             raise
         except Exception as exc:
-            updated = replace(original, rollback_status=ROLLBACK_FAILED)
+            updated = replace(
+                original,
+                rollback_status=ROLLBACK_FAILED,
+                version=int(original.version) + 1,
+            )
             self.store.save(updated)
             try:
                 self.idempotency.mark_failed(action.idempotency_key)
@@ -484,7 +560,11 @@ class SideEffectExecutor:
                 reason_code=getattr(exc, "error_code", "rollback_failed"),
             )
             raise RollbackExecutionError() from exc
-        updated = replace(original, rollback_status=ROLLBACK_SUCCEEDED)
+        updated = replace(
+            original,
+            rollback_status=ROLLBACK_SUCCEEDED,
+            version=int(original.version) + 1,
+        )
         self.store.save(updated)
         self.idempotency.mark_completed(action.idempotency_key)
         self.audit.record(
@@ -762,8 +842,96 @@ class SideEffectExecutor:
         except Exception:
             return
 
+    def _require_persistence_ready(self, *, purpose: str) -> None:
+        if purpose not in {PURPOSE_MUTATE, PURPOSE_ROLLBACK}:
+            return
+        if not self.require_durable_persistence:
+            return
+        bundle = self.persistence
+        if bundle is None or not getattr(bundle, "ready", False):
+            raise SideEffectPersistenceUnavailableError()
+
+    def _persist_started_execution(
+        self,
+        *,
+        action,
+        execution_id: str,
+        authorization_type: str,
+        authorization_id: str,
+        started_at,
+    ) -> None:
+        key = action.idempotency_key or ""
+        record = SideEffectExecutionRecord(
+            execution_id=execution_id,
+            action_id=action.action_id,
+            workflow_id=action.workflow_id,
+            task_id=action.task_id,
+            tool_id=action.tool_id,
+            operation=action.operation,
+            status=STATUS_STARTED,
+            authorization_type=authorization_type or AUTHORIZATION_AUTONOMY_DECISION,
+            authorization_id=authorization_id or "",
+            idempotency_key_hash=hash_idempotency_key(key) if key else "",
+            attempt=1,
+            started_at=started_at,
+            completed_at=None,
+            outcome=OUTCOME_KNOWN_FAILURE,
+            resource_ref=str(action.resource or "") or None,
+            reversible=True,
+            version=1,
+            metadata={"phase": "started"},
+        )
+        try:
+            uow = None
+            if self.persistence is not None:
+                uow = self.persistence.unit_of_work()
+            if uow is not None:
+                with uow:
+                    existing = self.store.get(execution_id)
+                    if existing is None:
+                        self.store.create(record)
+                    else:
+                        self.store.save(record)
+                    if hasattr(self.idempotency, "bind_execution"):
+                        self.idempotency.bind_execution(key, execution_id)
+            else:
+                existing = self.store.get(execution_id)
+                if existing is None:
+                    self.store.create(record)
+                else:
+                    self.store.save(record)
+                if hasattr(self.idempotency, "bind_execution"):
+                    try:
+                        self.idempotency.bind_execution(key, execution_id)
+                    except Exception:
+                        pass
+        except SideEffectPersistenceUnavailableError:
+            raise
+        except Exception as exc:
+            raise SideEffectPersistenceUnavailableError() from exc
+
+    def _finalize_success(
+        self, result, authorization_type, authorization_id, action, attempt: int
+    ) -> None:
+        uow = None
+        if self.persistence is not None:
+            uow = self.persistence.unit_of_work()
+        if uow is not None:
+            with uow:
+                self._save_record(
+                    result, authorization_type, authorization_id, action, attempt
+                )
+                self.idempotency.mark_completed(action.idempotency_key)
+        else:
+            self._save_record(
+                result, authorization_type, authorization_id, action, attempt
+            )
+            self.idempotency.mark_completed(action.idempotency_key)
+
     def _save_record(self, result, authorization_type, authorization_id, action, attempt: int):
         key = action.idempotency_key or ""
+        existing = self.store.get(result.execution_id)
+        next_version = 1 if existing is None else int(existing.version) + 1
         record = SideEffectExecutionRecord(
             execution_id=result.execution_id,
             action_id=result.action_id,
@@ -780,15 +948,31 @@ class SideEffectExecutor:
             completed_at=result.completed_at,
             error_code=result.error_code,
             external_reference=result.external_reference,
-            rollback_status=ROLLBACK_NONE,
+            rollback_status=(
+                existing.rollback_status if existing is not None else ROLLBACK_NONE
+            ),
             rollback_reference=result.rollback_reference,
             outcome=result.outcome,
+            parent_execution_id=(
+                existing.parent_execution_id if existing is not None else None
+            ),
+            reconciliation_id=(
+                existing.reconciliation_id if existing is not None else None
+            ),
+            recovery_attempt=(
+                existing.recovery_attempt if existing is not None else 0
+            ),
+            resource_ref=str(getattr(action, "resource", "") or "") or (
+                existing.resource_ref if existing is not None else None
+            ),
+            reversible=bool(result.reversible),
+            version=next_version,
             metadata={
                 "authorization_type": authorization_type,
                 "attempt": attempt,
+                **dict(result.metadata or {}),
             },
         )
-        existing = self.store.get(result.execution_id)
         if existing is None:
             self.store.create(record)
         else:
