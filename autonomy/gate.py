@@ -14,6 +14,7 @@ from autonomy.models import (
     DECISION_REQUIRE_APPROVAL,
     DECISION_REVIEW_AFTER,
     DEFAULT_AUTONOMY_LEVEL,
+    IDEMPOTENCY_UNCERTAIN,
     PROTECTED_IDEMPOTENCY_TYPES,
     ProposedAction,
     AutonomyDecision,
@@ -145,13 +146,17 @@ class AutonomyGate:
                 idempotency_ready = False
             else:
                 existing = self.idempotency.get(action.idempotency_key)
-                if existing is not None and existing.action_id != action.action_id:
-                    idempotency_conflict = True
-                    idempotency_reason = (
-                        "duplicate_completed"
-                        if existing.state == "completed"
-                        else "duplicate_active"
-                    )
+                if existing is not None:
+                    if existing.state == IDEMPOTENCY_UNCERTAIN:
+                        idempotency_conflict = True
+                        idempotency_reason = "duplicate_uncertain"
+                    elif existing.action_id != action.action_id:
+                        idempotency_conflict = True
+                        idempotency_reason = (
+                            "duplicate_completed"
+                            if existing.state == "completed"
+                            else "duplicate_active"
+                        )
 
         ctx = {
             "autonomy_level": level,

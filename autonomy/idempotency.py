@@ -7,6 +7,7 @@ from autonomy.models import (
     IDEMPOTENCY_FAILED,
     IDEMPOTENCY_RESERVED,
     IDEMPOTENCY_STARTED,
+    IDEMPOTENCY_UNCERTAIN,
     IdempotencyRecord,
     sanitize_metadata,
     utc_now,
@@ -33,6 +34,8 @@ class IdempotencyRegistry:
                 raise IdempotencyConflictError(key, "duplicate_active")
             if existing.state == IDEMPOTENCY_FAILED:
                 raise IdempotencyConflictError(key, "duplicate_failed")
+            if existing.state == IDEMPOTENCY_UNCERTAIN:
+                raise IdempotencyConflictError(key, "duplicate_uncertain")
             raise IdempotencyConflictError(key, "duplicate_execution")
         record = IdempotencyRecord(
             key=key,
@@ -53,6 +56,10 @@ class IdempotencyRegistry:
 
     def mark_failed(self, key: str) -> IdempotencyRecord:
         return self._set_state(key, IDEMPOTENCY_FAILED)
+
+    def mark_uncertain(self, key: str) -> IdempotencyRecord:
+        """Lock the key after an unknown external outcome. Not a retry grant."""
+        return self._set_state(key, IDEMPOTENCY_UNCERTAIN)
 
     def _set_state(self, key: str, state: str) -> IdempotencyRecord:
         existing = self.store.get(key)

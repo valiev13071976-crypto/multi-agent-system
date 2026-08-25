@@ -65,11 +65,13 @@ class WorkflowEngine:
         step_names=ANALYZE_STEPS,
         autonomy_gate: AutonomyGate | None = None,
         hitl_service=None,
+        side_effect_executor=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
         self.autonomy_gate = autonomy_gate
         self.hitl_service = hitl_service
+        self.side_effect_executor = side_effect_executor
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
@@ -267,3 +269,36 @@ class WorkflowEngine:
             "executed": executed,
             "status": self.state_manager.get(workflow_id).status,
         }
+
+    async def execute_side_effect(self, action, **kwargs):
+        """Delegate side-effect invocation. Policy stays in AutonomyGate/HITL."""
+        from side_effects.executor import SideEffectExecutor
+
+        executor = self.side_effect_executor or SideEffectExecutor()
+        gate = kwargs.pop("gate", None) or self._gate()
+        hitl = kwargs.pop("hitl", None)
+        if kwargs.get("permit") is not None and hitl is None:
+            hitl = self._hitl()
+        return await executor.execute(
+            action,
+            gate=gate,
+            hitl=hitl,
+            state_manager=kwargs.pop("state_manager", self.state_manager),
+            **kwargs,
+        )
+
+    async def rollback_side_effect(self, execution_id: str, action, **kwargs):
+        from side_effects.executor import SideEffectExecutor
+
+        executor = self.side_effect_executor or SideEffectExecutor()
+        gate = kwargs.pop("gate", None) or self._gate()
+        hitl = kwargs.pop("hitl", None)
+        if kwargs.get("permit") is not None and hitl is None:
+            hitl = self._hitl()
+        return await executor.rollback(
+            execution_id,
+            action=action,
+            gate=gate,
+            hitl=hitl,
+            **kwargs,
+        )

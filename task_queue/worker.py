@@ -80,6 +80,14 @@ class TaskWorker:
         if not queue_side_effect_permitted(decision):
             raise AutonomyDeniedError("autonomy_not_allow")
 
+    async def execute_side_effect(self, action, **kwargs):
+        """Future queue tasks must invoke SideEffectExecutor, never an adapter."""
+        if self.engine is None:
+            from side_effects.errors import SideEffectExecutionDeniedError
+
+            raise SideEffectExecutionDeniedError("workflow_engine_required")
+        return await self.engine.execute_side_effect(action, **kwargs)
+
     def require_execution_permit(self, permit, action=None, *, now=None) -> None:
         if permit is None:
             raise AutonomyDeniedError("execution_permit_required")

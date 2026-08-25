@@ -33,6 +33,15 @@ NON_RETRYABLE_CODES = frozenset(
         "ProviderNotConfiguredError",
         "WorkflowTransitionError",
         "QueueCancelledError",
+        "execution_outcome_uncertain",
+        "financial_execution_not_enabled",
+        "pricing_write_not_enabled",
+        "customer_communication_execution_not_enabled",
+        "permission_change_execution_not_enabled",
+        "delete_execution_not_enabled",
+        "code_execution_not_enabled",
+        "side_effect_execution_denied",
+        "side_effect_idempotency_conflict",
     }
 )
 
