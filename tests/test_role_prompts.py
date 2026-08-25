@@ -4,13 +4,13 @@ from fastapi.testclient import TestClient
 import unittest
 
 from agents.role_registry import (
-    ALLOWED_ROLE_VALUES,
     DEFAULT_ROLE,
     MAX_CONTEXT_CHARS,
     STRATEGIST_PROMPT,
     USER_TASK_MARKER,
     compose_prompt,
 )
+from agents.router_v2 import ALLOWED_API_ROLE_VALUES
 from tests.test_mode_routing import env_for, mock_provider_runs
 from tests.test_smoke import CONTRACT_KEYS, load_app
 
@@ -196,7 +196,7 @@ class RolePromptTests(unittest.TestCase):
         client = TestClient(main_mod.app)
         schema = client.get("/openapi.json").json()
         role_schema = schema["components"]["schemas"]["AnalyzeRequest"]["properties"]["role"]
-        self.assertEqual(role_schema.get("enum"), list(ALLOWED_ROLE_VALUES))
+        self.assertEqual(role_schema.get("enum"), list(ALLOWED_API_ROLE_VALUES))
         self.assertEqual(role_schema.get("default"), DEFAULT_ROLE)
 
 

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from agents.router import Router
 from agents.router_v2 import (
+    ALLOWED_API_ROLE_VALUES,
     ALLOWED_MODE_VALUES,
     InvalidModeError,
     NoProvidersAvailableError,
@@ -16,7 +17,6 @@ from agents.router_v2 import (
     RouterV2,
 )
 from agents.role_registry import (
-    ALLOWED_ROLE_VALUES,
     DEFAULT_ROLE,
     InvalidRoleError,
 )
@@ -59,7 +59,7 @@ class AnalyzeRequest(BaseModel):
     role: str = Field(
         default=DEFAULT_ROLE,
         json_schema_extra={
-            "enum": list(ALLOWED_ROLE_VALUES),
+            "enum": list(ALLOWED_API_ROLE_VALUES),
         },
         description="Какую expert role instruction использовать.",
     )

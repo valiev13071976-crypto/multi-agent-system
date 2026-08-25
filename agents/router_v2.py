@@ -14,12 +14,14 @@ from agents.core.response_formatter import ResponseFormatter
 from agents.core.decision_memory import DecisionMemory
 from agents.core.supervisor import Supervisor
 from agents.role_registry import (
+    ALLOWED_ROLE_VALUES,
     DEFAULT_ROLE,
     compose_prompt,
     get_role_prompt,
 )
 from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 from agents.model_router import ModelRouter
+from agents.task_classifier import TaskClassifier
 
 
 ALLOWED_MODE_VALUES = (
@@ -32,6 +34,10 @@ ALLOWED_MODE_VALUES = (
 )
 
 ALLOWED_MODES = frozenset(ALLOWED_MODE_VALUES)
+
+ROLE_AUTO = "auto"
+
+ALLOWED_API_ROLE_VALUES = ALLOWED_ROLE_VALUES + (ROLE_AUTO,)
 
 PROVIDER_CLASSES = {
     "openai": OpenAIAgent,
@@ -90,6 +96,8 @@ class RouterV2:
             decision_memory=DecisionMemory(),
         )
         self.last_decision = None
+        self.last_classification = None
+        self.task_classifier = TaskClassifier()
 
     def provider_status(self) -> dict:
         return self.provider_registry.status()
@@ -119,7 +127,15 @@ class RouterV2:
         if resolved_mode not in ALLOWED_MODES:
             raise InvalidModeError(mode)
 
-        resolved_role = DEFAULT_ROLE if role is None else role
+        requested_role = DEFAULT_ROLE if role is None else role
+        self.last_classification = None
+
+        if requested_role == ROLE_AUTO:
+            self.last_classification = self.task_classifier.classify(prompt)
+            resolved_role = self.last_classification.role_id
+        else:
+            resolved_role = requested_role
+
         get_role_prompt(resolved_role)
 
         decision = self.model_router.decide(
