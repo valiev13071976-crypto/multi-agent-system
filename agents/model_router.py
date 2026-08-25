@@ -2,12 +2,21 @@ from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
 
+from agents.model_profile import (
+    FALLBACK_ERROR,
+    FALLBACK_GENERAL,
+    FALLBACK_PRIORITY,
+    routing_category_for_role,
+)
 from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 
 
 REASON_EXPLICIT_PROVIDER = "explicit_provider"
 REASON_ALL_AVAILABLE_PROVIDERS = "all_available_providers"
 REASON_AUTO_PROVIDER = "auto_provider"
+REASON_AUTO_CAPABILITY_MATCH = "auto_capability_match"
+REASON_AUTO_GENERAL_FALLBACK = "auto_general_fallback"
+REASON_AUTO_PRIORITY_FALLBACK = "auto_priority_fallback"
 
 EXPLICIT_MODES = frozenset(PROVIDER_IDS)
 MODE_AUTO = "auto"
@@ -25,54 +34,96 @@ class RoutingDecision:
         object.__setattr__(self, "models", MappingProxyType(dict(self.models)))
 
 
+class NoCapableProviderError(Exception):
+    def __init__(self, category: str):
+        self.category = category
+        super().__init__(
+            f"No configured provider supports task category {category!r}."
+        )
+
+
 class ModelRouter:
     """
-    Formalizes the existing mode → provider selection.
-    Does not inspect the user prompt.
+    Formalizes mode → provider selection.
+    Does not inspect the user prompt or classify tasks.
     """
 
     def __init__(self, registry: ProviderRegistry):
         self.registry = registry
 
-    def decide(self, mode: str, role_id: str) -> RoutingDecision:
+    def _decision(self, role_id: str, provider_ids: tuple[str, ...], reason: str) -> RoutingDecision:
+        models = {
+            provider_id: self.registry.model(provider_id)
+            for provider_id in provider_ids
+        }
+        return RoutingDecision(
+            role_id=role_id,
+            provider_ids=provider_ids,
+            models=models,
+            reason=reason,
+        )
+
+    def decide(
+        self,
+        mode: str,
+        role_id: str,
+        category: str | None = None,
+    ) -> RoutingDecision:
         if mode == "both":
             provider_ids = self.registry.available_provider_ids()
-            models = {
-                provider_id: self.registry.model(provider_id)
-                for provider_id in provider_ids
-            }
-            return RoutingDecision(
-                role_id=role_id,
-                provider_ids=provider_ids,
-                models=models,
-                reason=REASON_ALL_AVAILABLE_PROVIDERS,
+            return self._decision(
+                role_id,
+                provider_ids,
+                REASON_ALL_AVAILABLE_PROVIDERS,
             )
 
         if mode == MODE_AUTO:
+            requested_category = category or routing_category_for_role(role_id)
+            return self._decide_auto(role_id, requested_category)
+
+        provider_ids = (mode,)
+        return self._decision(role_id, provider_ids, REASON_EXPLICIT_PROVIDER)
+
+    def _decide_auto(self, role_id: str, category: str) -> RoutingDecision:
+        if not self.registry.available_provider_ids():
+            return self._decision(role_id, (), REASON_AUTO_PROVIDER)
+
+        capable = self.registry.providers_supporting(category)
+        if capable:
+            selected = capable[0]
+            return self._decision(
+                role_id,
+                (selected,),
+                REASON_AUTO_CAPABILITY_MATCH,
+            )
+
+        fallback = self.registry.auto_capability_fallback
+        if fallback == FALLBACK_GENERAL:
+            general = self.registry.providers_supporting("general")
+            if general:
+                selected = general[0]
+                return self._decision(
+                    role_id,
+                    (selected,),
+                    REASON_AUTO_GENERAL_FALLBACK,
+                )
+            raise NoCapableProviderError(category)
+
+        if fallback == FALLBACK_PRIORITY:
             selected = None
             for provider_id in self.registry.auto_provider_order:
                 if self.registry.is_available(provider_id):
                     selected = provider_id
                     break
             if selected is None:
-                return RoutingDecision(
-                    role_id=role_id,
-                    provider_ids=(),
-                    models={},
-                    reason=REASON_AUTO_PROVIDER,
-                )
-            return RoutingDecision(
-                role_id=role_id,
-                provider_ids=(selected,),
-                models={selected: self.registry.model(selected)},
-                reason=REASON_AUTO_PROVIDER,
+                return self._decision(role_id, (), REASON_AUTO_PRIORITY_FALLBACK)
+            return self._decision(
+                role_id,
+                (selected,),
+                REASON_AUTO_PRIORITY_FALLBACK,
             )
 
-        provider_ids = (mode,)
-        models = {mode: self.registry.model(mode)}
-        return RoutingDecision(
-            role_id=role_id,
-            provider_ids=provider_ids,
-            models=models,
-            reason=REASON_EXPLICIT_PROVIDER,
-        )
+        if fallback == FALLBACK_ERROR:
+            raise NoCapableProviderError(category)
+
+        raise NoCapableProviderError(category)

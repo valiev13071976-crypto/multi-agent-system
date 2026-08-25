@@ -8,6 +8,7 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agents.router import Router
+from agents.model_router import NoCapableProviderError
 from agents.router_v2 import (
     ALLOWED_API_ROLE_VALUES,
     ALLOWED_MODE_VALUES,
@@ -170,6 +171,16 @@ async def analyze(request: AnalyzeRequest):
             detail={
                 "error": "no_providers_available",
                 "message": "No LLM providers are configured.",
+            },
+        )
+
+    except NoCapableProviderError as e:
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "no_capable_provider",
+                "message": "No configured provider supports the requested task category.",
+                "category": e.category,
             },
         )
 

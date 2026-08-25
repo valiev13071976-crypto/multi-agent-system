@@ -1,7 +1,12 @@
 from fastapi.testclient import TestClient
 import unittest
 
-from agents.model_router import REASON_AUTO_PROVIDER, REASON_EXPLICIT_PROVIDER, ModelRouter
+from agents.model_router import (
+    REASON_AUTO_GENERAL_FALLBACK,
+    REASON_AUTO_PROVIDER,
+    REASON_EXPLICIT_PROVIDER,
+    ModelRouter,
+)
 from agents.provider_registry import (
     PROVIDER_IDS,
     InvalidAutoProviderOrderError,
@@ -63,7 +68,7 @@ class AutoModelRouterTests(unittest.TestCase):
         decision = ModelRouter(registry).decide(mode="auto", role_id="technical")
         self.assertEqual(decision.role_id, "technical")
         self.assertEqual(decision.provider_ids, ("anthropic",))
-        self.assertEqual(decision.reason, REASON_AUTO_PROVIDER)
+        self.assertEqual(decision.reason, REASON_AUTO_GENERAL_FALLBACK)
         self.assertEqual(list(decision.models.keys()), ["anthropic"])
 
     def test_auto_skips_unavailable_and_picks_next(self):
@@ -71,7 +76,7 @@ class AutoModelRouterTests(unittest.TestCase):
         registry.auto_provider_order = ("anthropic", "openai")
         decision = ModelRouter(registry).decide(mode="auto", role_id="strategist")
         self.assertEqual(decision.provider_ids, ("openai",))
-        self.assertEqual(decision.reason, REASON_AUTO_PROVIDER)
+        self.assertEqual(decision.reason, REASON_AUTO_GENERAL_FALLBACK)
 
     def test_auto_with_no_available_returns_empty_providers(self):
         registry = registry_with()
@@ -105,7 +110,7 @@ class ModeAutoHttpTests(unittest.TestCase):
         self.assertEqual(mocks["anthropic"].await_count, 1)
         self.assertEqual(mocks["openai"].await_count, 0)
         self.assertEqual(main_mod.router.last_decision.provider_ids, ("anthropic",))
-        self.assertEqual(main_mod.router.last_decision.reason, REASON_AUTO_PROVIDER)
+        self.assertEqual(main_mod.router.last_decision.reason, REASON_AUTO_GENERAL_FALLBACK)
         self._assert_contract(response.json())
 
     def test_b_auto_skips_unavailable_anthropic(self):
@@ -223,7 +228,7 @@ class ModeAutoHttpTests(unittest.TestCase):
         decision = main_mod.router.last_decision
         self.assertEqual(decision.role_id, "technical")
         self.assertEqual(decision.provider_ids, ("anthropic",))
-        self.assertEqual(decision.reason, REASON_AUTO_PROVIDER)
+        self.assertEqual(decision.reason, REASON_AUTO_GENERAL_FALLBACK)
         self._assert_contract(response.json())
 
     def test_h_explicit_anthropic_ignores_provider_auto(self):

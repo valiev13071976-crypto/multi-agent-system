@@ -20,6 +20,7 @@ from agents.role_registry import (
     get_role_prompt,
 )
 from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
+from agents.model_profile import routing_category_for_role
 from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier
 
@@ -98,6 +99,7 @@ class RouterV2:
         )
         self.last_decision = None
         self.last_classification = None
+        self.last_route_context = None
         self.task_classifier = TaskClassifier()
 
     def provider_status(self) -> dict:
@@ -130,18 +132,29 @@ class RouterV2:
 
         requested_role = DEFAULT_ROLE if role is None else role
         self.last_classification = None
+        self.last_route_context = None
 
         if requested_role == ROLE_AUTO:
             self.last_classification = self.task_classifier.classify(prompt)
             resolved_role = self.last_classification.role_id
+            routing_category = self.last_classification.category
+            category_source = "classifier"
         else:
             resolved_role = requested_role
+            routing_category = routing_category_for_role(resolved_role)
+            category_source = "role_mapping"
 
         get_role_prompt(resolved_role)
+
+        self.last_route_context = {
+            "category": routing_category,
+            "source": category_source,
+        }
 
         decision = self.model_router.decide(
             mode=resolved_mode,
             role_id=resolved_role,
+            category=routing_category,
         )
         self.last_decision = decision
 

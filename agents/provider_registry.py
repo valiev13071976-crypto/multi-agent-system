@@ -79,7 +79,14 @@ class ProviderRegistry:
         self,
         records: dict[str, ProviderRecord],
         auto_provider_order: tuple[str, ...] | None = None,
+        profiles: dict | None = None,
+        auto_capability_fallback: str | None = None,
     ):
+        from agents.model_profile import (
+            DEFAULT_AUTO_CAPABILITY_FALLBACK,
+            build_model_profile,
+        )
+
         self._records = {
             provider_id: records[provider_id]
             for provider_id in PROVIDER_IDS
@@ -88,9 +95,26 @@ class ProviderRegistry:
         self.auto_provider_order = (
             PROVIDER_IDS if auto_provider_order is None else tuple(auto_provider_order)
         )
+        if profiles is None:
+            self._profiles = {
+                provider_id: build_model_profile(provider_id, record.model)
+                for provider_id, record in self._records.items()
+            }
+        else:
+            self._profiles = dict(profiles)
+        self.auto_capability_fallback = (
+            DEFAULT_AUTO_CAPABILITY_FALLBACK
+            if auto_capability_fallback is None
+            else auto_capability_fallback
+        )
 
     @classmethod
     def from_env(cls):
+        from config.model_profiles import (
+            load_auto_capability_fallback,
+            load_model_profiles,
+        )
+
         records = {}
         for provider_id, key_env, model_env in PROVIDER_ENV:
             api_key = os.getenv(key_env) or ""
@@ -105,6 +129,8 @@ class ProviderRegistry:
             auto_provider_order=parse_auto_provider_order(
                 os.getenv(AUTO_PROVIDER_ORDER_ENV)
             ),
+            profiles=load_model_profiles(records),
+            auto_capability_fallback=load_auto_capability_fallback(),
         )
 
     def is_available(self, provider_id: str) -> bool:
@@ -129,3 +155,29 @@ class ProviderRegistry:
             provider_id: self.is_available(provider_id)
             for provider_id in PROVIDER_IDS
         }
+
+    def profile(self, provider_id: str):
+        return self._profiles.get(provider_id)
+
+    def is_active_profile(self, provider_id: str) -> bool:
+        if not self.is_available(provider_id):
+            return False
+        profile = self.profile(provider_id)
+        if profile is None or not profile.enabled:
+            return False
+        return profile.model_id == self.model(provider_id)
+
+    def active_provider_ids(self) -> tuple[str, ...]:
+        return tuple(
+            provider_id
+            for provider_id in self.auto_provider_order
+            if self.is_active_profile(provider_id)
+        )
+
+    def providers_supporting(self, category: str) -> tuple[str, ...]:
+        matching = []
+        for provider_id in self.active_provider_ids():
+            profile = self.profile(provider_id)
+            if profile and category in profile.task_categories:
+                matching.append(provider_id)
+        return tuple(matching)
