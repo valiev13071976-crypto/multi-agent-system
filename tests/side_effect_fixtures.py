@@ -7,6 +7,7 @@ from hitl.authority import (
     ROLE_PRIVILEGED_APPROVER,
 )
 from hitl.service import HITLService
+from side_effects.reconciliation import SideEffectReconciliationService
 from side_effects.executor import SideEffectExecutor
 from side_effects.models import (
     TEST_TOOL_ID,
@@ -73,6 +74,36 @@ def runtime(trust=TOOL_TRUST_INTERNAL_SAFE, reversible=True):
     executor = SideEffectExecutor(registry, gate=engine._gate())
     engine.side_effect_executor = executor
     return engine, workflow_id, adapter, executor
+
+
+def recon_runtime(trust=TOOL_TRUST_INTERNAL_SAFE, reversible=True, **service_kwargs):
+    engine, workflow_id, adapter, executor = runtime(trust=trust, reversible=reversible)
+    service = SideEffectReconciliationService(
+        execution_store=executor.store,
+        idempotency=engine._gate().idempotency,
+        registry=executor.registry,
+        audit=executor.audit,
+        state_manager=engine.state_manager,
+        **service_kwargs,
+    )
+    executor.reconciliation_service = service
+    engine.reconciliation_service = service
+    return engine, workflow_id, adapter, executor, service
+
+
+async def make_uncertain(executor, action, engine, value="mutated"):
+    kwargs = eval_kwargs()
+    decision = engine._gate().evaluate(action, **kwargs)
+    context = ctx(value)
+    context.simulate_finalization_failure = True
+    return await executor.execute(
+        action,
+        decision=decision,
+        context=context,
+        gate=engine._gate(),
+        state_manager=engine.state_manager,
+        evaluate_kwargs=kwargs,
+    )
 
 
 def hitl_runtime(trust=TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE, **runtime_kwargs):

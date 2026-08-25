@@ -101,6 +101,7 @@ class SideEffectExecutor:
         idempotency: IdempotencyRegistry | None = None,
         gate: AutonomyGate | None = None,
         permit_service: PermitService | None = None,
+        reconciliation_service=None,
     ):
         self.registry = registry if registry is not None else empty_adapter_registry()
         self.store = store or InMemorySideEffectExecutionStore()
@@ -108,6 +109,7 @@ class SideEffectExecutor:
         self.idempotency = idempotency
         self.gate = gate
         self.permit_service = permit_service or PermitService()
+        self.reconciliation_service = reconciliation_service
         self.trace: list[str] = []
 
     async def execute(
@@ -339,6 +341,7 @@ class SideEffectExecutor:
                 attempt=1,
             )
             if uncertain:
+                self._flag_reconciliation(result)
                 return result
             if adapter_started:
                 raise SideEffectExecutionError(str(error_code)) from exc
@@ -628,6 +631,15 @@ class SideEffectExecutor:
             return await asyncio.wait_for(pending, timeout=float(timeout))
         except asyncio.TimeoutError:
             raise
+
+    def _flag_reconciliation(self, result) -> None:
+        service = self.reconciliation_service
+        if service is None:
+            return
+        try:
+            service.create_for_execution(result.execution_id)
+        except Exception:
+            return
 
     def _save_record(self, result, authorization_type, authorization_id, action, attempt: int):
         key = action.idempotency_key or ""

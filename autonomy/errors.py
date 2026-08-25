@@ -24,3 +24,8 @@ class IdempotencyConflictError(AutonomyError):
         self.key = key
         self.reason_code = reason_code
         super().__init__(reason_code)
+
+
+class IdempotencyTransitionError(IdempotencyConflictError):
+    def __init__(self, key: str, reason_code: str = "invalid_idempotency_transition"):
+        super().__init__(key, reason_code)

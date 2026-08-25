@@ -57,3 +57,6 @@ class InMemorySideEffectExecutionStore:
         return tuple(
             row for row in self._records.values() if row.workflow_id == workflow_id
         )
+
+    def list_all(self) -> tuple[SideEffectExecutionRecord, ...]:
+        return tuple(self._records.values())

@@ -42,6 +42,8 @@ NON_RETRYABLE_CODES = frozenset(
         "code_execution_not_enabled",
         "side_effect_execution_denied",
         "side_effect_idempotency_conflict",
+        "reconciliation_still_uncertain",
+        "reconciliation_manual_review",
     }
 )
 

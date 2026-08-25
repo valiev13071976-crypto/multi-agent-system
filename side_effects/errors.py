@@ -52,3 +52,23 @@ class RollbackExecutionError(SideEffectExecutionError):
 class SideEffectAdapterAlreadyRegisteredError(SideEffectError):
     def __init__(self, error_code: str = "adapter_already_registered"):
         super().__init__(error_code)
+
+
+class ReconciliationError(SideEffectError):
+    def __init__(self, error_code: str = "reconciliation_error"):
+        super().__init__(error_code)
+
+
+class ReconciliationNotEligibleError(ReconciliationError):
+    def __init__(self, error_code: str = "reconciliation_not_eligible"):
+        super().__init__(error_code)
+
+
+class ReconciliationConflictError(ReconciliationError):
+    def __init__(self, error_code: str = "reconciliation_conflict"):
+        super().__init__(error_code)
+
+
+class ReconciliationNotFoundError(ReconciliationError):
+    def __init__(self, error_code: str = "reconciliation_not_found"):
+        super().__init__(error_code)

@@ -1,6 +1,6 @@
 from dataclasses import replace
 
-from autonomy.errors import IdempotencyConflictError
+from autonomy.errors import IdempotencyConflictError, IdempotencyTransitionError
 from autonomy.models import (
     IDEMPOTENCY_ACTIVE,
     IDEMPOTENCY_COMPLETED,
@@ -13,6 +13,28 @@ from autonomy.models import (
     utc_now,
 )
 from autonomy.store import IdempotencyStore, InMemoryIdempotencyStore
+
+
+ALLOWED_IDEMPOTENCY_TRANSITIONS = frozenset(
+    {
+        (IDEMPOTENCY_RESERVED, IDEMPOTENCY_STARTED),
+        (IDEMPOTENCY_RESERVED, IDEMPOTENCY_COMPLETED),
+        (IDEMPOTENCY_RESERVED, IDEMPOTENCY_FAILED),
+        (IDEMPOTENCY_STARTED, IDEMPOTENCY_COMPLETED),
+        (IDEMPOTENCY_STARTED, IDEMPOTENCY_FAILED),
+        (IDEMPOTENCY_STARTED, IDEMPOTENCY_UNCERTAIN),
+        (IDEMPOTENCY_UNCERTAIN, IDEMPOTENCY_COMPLETED),
+        (IDEMPOTENCY_UNCERTAIN, IDEMPOTENCY_FAILED),
+    }
+)
+
+RECONCILE_IDEMPOTENCY_TRANSITIONS = frozenset(
+    {
+        (IDEMPOTENCY_STARTED, IDEMPOTENCY_UNCERTAIN),
+        (IDEMPOTENCY_UNCERTAIN, IDEMPOTENCY_COMPLETED),
+        (IDEMPOTENCY_UNCERTAIN, IDEMPOTENCY_FAILED),
+    }
+)
 
 
 class IdempotencyRegistry:
@@ -65,6 +87,18 @@ class IdempotencyRegistry:
         existing = self.store.get(key)
         if existing is None:
             raise KeyError(key)
+        if existing.state == state:
+            return existing
+        if (existing.state, state) not in ALLOWED_IDEMPOTENCY_TRANSITIONS:
+            raise IdempotencyTransitionError(key, "invalid_idempotency_transition")
         updated = replace(existing, state=state, updated_at=utc_now())
         self.store.put(updated)
         return updated
+
+    def reconcile_transition(self, key: str, target: str) -> IdempotencyRecord:
+        existing = self.store.get(key)
+        if existing is None:
+            raise KeyError(key)
+        if (existing.state, target) not in RECONCILE_IDEMPOTENCY_TRANSITIONS:
+            raise IdempotencyTransitionError(key, "invalid_idempotency_transition")
+        return self._set_state(key, target)

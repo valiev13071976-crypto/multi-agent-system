@@ -11,7 +11,12 @@ from side_effects.models import (
     TEST_OPERATION_SET_VALUE,
     TEST_RESOURCE_PREFIX,
     TEST_TOOL_ID,
+    ADAPTER_RECON_FAILED,
+    ADAPTER_RECON_NOT_FOUND,
+    ADAPTER_RECON_SUCCEEDED,
+    ADAPTER_RECON_UNKNOWN,
     AdapterExecutionResult,
+    AdapterReconciliationResult,
     RollbackResult,
     SideEffectToolDescriptor,
     value_fingerprint,
@@ -50,19 +55,27 @@ class InMemoryReversibleWriteAdapter:
             network_access=False,
             operations=(TEST_OPERATION_SET_VALUE,),
             resource_prefix=resource_prefix,
+            supports_reconciliation=True,
+            reconciliation_authoritative=True,
+            not_found_is_authoritative_failure=False,
         )
         self._values: dict[str, object] = {}
         self._priors: dict[str, object] = {}
         self._rollbacks_done: set[str] = set()
+        self._effects: dict[str, dict] = {}
         self.calls = 0
         self.rollback_calls = 0
+        self.reconcile_calls = 0
         self.received_idempotency_keys: list[str] = []
         self.fail_after_write = False
         self.fail_before_write = False
         self.fail_rollback = False
         self.hang_before_write = False
         self.hang_after_write = False
+        self.hang_reconcile = False
         self.mutated = False
+        self.reconcile_override: str | None = None
+        self.conflict_external_reference: str | None = None
 
     @property
     def descriptor(self) -> SideEffectToolDescriptor:
@@ -126,6 +139,12 @@ class InMemoryReversibleWriteAdapter:
             f"{resource}:{action.action_id}".encode("utf-8")
         ).hexdigest()[:16]
         rollback_reference = "rb-" + str(uuid.uuid4())
+        if key:
+            self._effects[str(key)] = {
+                "external_reference": reference,
+                "rollback_reference": rollback_reference,
+                "resource": resource,
+            }
         if getattr(context, "hang_after_write", False) or self.hang_after_write:
             await asyncio.sleep(3600)
         if self.fail_after_write:
@@ -169,3 +188,70 @@ class InMemoryReversibleWriteAdapter:
                 self._values[resource] = prior
         self._rollbacks_done.add(reference)
         return RollbackResult(success=True, rollback_reference=reference)
+
+    def set_reconciliation_flags(
+        self,
+        *,
+        supports_reconciliation: bool | None = None,
+        reconciliation_authoritative: bool | None = None,
+        not_found_is_authoritative_failure: bool | None = None,
+    ) -> None:
+        current = self._descriptor
+        self._descriptor = SideEffectToolDescriptor(
+            tool_id=current.tool_id,
+            trust_level=current.trust_level,
+            capabilities_required=current.capabilities_required,
+            reversible=current.reversible,
+            supports_idempotency=current.supports_idempotency,
+            network_access=current.network_access,
+            operations=current.operations,
+            resource_prefix=current.resource_prefix,
+            supports_reconciliation=(
+                current.supports_reconciliation
+                if supports_reconciliation is None
+                else supports_reconciliation
+            ),
+            reconciliation_authoritative=(
+                current.reconciliation_authoritative
+                if reconciliation_authoritative is None
+                else reconciliation_authoritative
+            ),
+            not_found_is_authoritative_failure=(
+                current.not_found_is_authoritative_failure
+                if not_found_is_authoritative_failure is None
+                else not_found_is_authoritative_failure
+            ),
+        )
+
+    async def reconcile(self, execution_record, action, context) -> AdapterReconciliationResult:
+        self.reconcile_calls += 1
+        if self.hang_reconcile:
+            await asyncio.sleep(3600)
+        if self.reconcile_override == ADAPTER_RECON_UNKNOWN:
+            return AdapterReconciliationResult(status=ADAPTER_RECON_UNKNOWN)
+        if self.reconcile_override == ADAPTER_RECON_FAILED:
+            return AdapterReconciliationResult(status=ADAPTER_RECON_FAILED)
+        if self.reconcile_override == ADAPTER_RECON_NOT_FOUND:
+            return AdapterReconciliationResult(status=ADAPTER_RECON_NOT_FOUND)
+        key = getattr(action, "idempotency_key", None) or getattr(
+            context, "idempotency_key", None
+        )
+        effect = self._effects.get(str(key)) if key else None
+        if effect is None:
+            return AdapterReconciliationResult(status=ADAPTER_RECON_NOT_FOUND)
+        reference = self.conflict_external_reference or effect["external_reference"]
+        if self.reconcile_override == ADAPTER_RECON_SUCCEEDED:
+            return AdapterReconciliationResult(
+                status=ADAPTER_RECON_SUCCEEDED,
+                external_reference=reference,
+                reversible=self.reversible,
+                rollback_reference=effect.get("rollback_reference"),
+                evidence_reference="evidence-" + str(key or "")[:12],
+            )
+        return AdapterReconciliationResult(
+            status=ADAPTER_RECON_SUCCEEDED,
+            external_reference=reference,
+            reversible=self.reversible,
+            rollback_reference=effect.get("rollback_reference"),
+            evidence_reference="evidence-" + str(key or "")[:12],
+        )

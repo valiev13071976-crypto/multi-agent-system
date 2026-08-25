@@ -66,12 +66,14 @@ class WorkflowEngine:
         autonomy_gate: AutonomyGate | None = None,
         hitl_service=None,
         side_effect_executor=None,
+        reconciliation_service=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
         self.autonomy_gate = autonomy_gate
         self.hitl_service = hitl_service
         self.side_effect_executor = side_effect_executor
+        self.reconciliation_service = reconciliation_service
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
@@ -302,3 +304,11 @@ class WorkflowEngine:
             hitl=hitl,
             **kwargs,
         )
+
+    async def reconcile_side_effect(self, reconciliation_id: str, **kwargs):
+        service = self.reconciliation_service
+        if service is None:
+            from side_effects.errors import ReconciliationNotEligibleError
+
+            raise ReconciliationNotEligibleError("reconciliation_service_not_configured")
+        return await service.reconcile(reconciliation_id, **kwargs)
