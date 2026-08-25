@@ -1,5 +1,6 @@
 import unittest
 
+from autonomy.models import IDEMPOTENCY_COMPLETED, IdempotencyRecord
 from side_effects.errors import SideEffectAlreadyCompletedError, SideEffectIdempotencyError
 from side_effects.models import STATUS_SUCCEEDED
 from tests.side_effect_fixtures import allow_execute, ctx, eval_kwargs, runtime, se_action
@@ -87,6 +88,29 @@ class SideEffectIdempotencyTests(unittest.IsolatedAsyncioTestCase):
                 evaluate_kwargs=kwargs,
             )
         self.assertEqual(adapter.calls, 1)
+
+    async def test_report_reads_idempotency_state_not_status(self):
+        """P7C-3 reporting hotfix: success report must use IdempotencyRecord.state."""
+
+        engine, workflow_id, _, executor = runtime()
+        action = se_action(workflow_id, idempotency_key="report-state-key")
+        result = await allow_execute(executor, action, engine, "ok")
+        self.assertEqual(result.status, STATUS_SUCCEEDED)
+
+        record = engine._gate().idempotency.get(action.idempotency_key)
+        self.assertIsInstance(record, IdempotencyRecord)
+        self.assertTrue(hasattr(record, "state"))
+        self.assertFalse(hasattr(record, "status"))
+        with self.assertRaises(AttributeError):
+            _ = record.status  # noqa: B018 — regression for wrong report field
+
+        report = {
+            "execution_status": result.status,
+            "idempotency_state": record.state,
+        }
+        self.assertEqual(report["idempotency_state"], IDEMPOTENCY_COMPLETED)
+        self.assertNotIn("status", IdempotencyRecord.__dataclass_fields__)
+        self.assertIn("state", IdempotencyRecord.__dataclass_fields__)
 
 
 if __name__ == "__main__":
