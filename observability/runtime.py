@@ -304,6 +304,9 @@ class ObservabilityRuntime:
         knowledge_status: str = "healthy",
         knowledge_enabled: bool = False,
         knowledge_persistence_ready: bool = True,
+        procurement_status: str = "healthy",
+        procurement_enabled: bool = False,
+        procurement_persistence_ready: bool = True,
     ) -> OperationalHealthSnapshot:
         snap = self.metrics.snapshot()
         return build_operational_health(
@@ -332,6 +335,9 @@ class ObservabilityRuntime:
             knowledge_status=knowledge_status,
             knowledge_enabled=knowledge_enabled,
             knowledge_persistence_ready=knowledge_persistence_ready,
+            procurement_status=procurement_status,
+            procurement_enabled=procurement_enabled,
+            procurement_persistence_ready=procurement_persistence_ready,
         )
 
     def list_events(self) -> tuple[OperationalEvent, ...]:

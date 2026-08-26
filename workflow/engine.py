@@ -71,6 +71,7 @@ class WorkflowEngine:
         memory_service=None,
         document_service=None,
         knowledge_service=None,
+        procurement_service=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
@@ -82,6 +83,7 @@ class WorkflowEngine:
         self.memory_service = memory_service
         self.document_service = document_service
         self.knowledge_service = knowledge_service
+        self.procurement_service = procurement_service
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
@@ -106,6 +108,16 @@ class WorkflowEngine:
             return None
         return self.knowledge_service.retrieve_knowledge_context(
             query, requesting_scope=requesting_scope
+        )
+
+    def run_procurement(self, request_id: str, *, requesting_scope, **kwargs):
+        """Optional DI: run procurement workflow via ProcurementService."""
+        if self.procurement_service is None:
+            raise RuntimeError("procurement_service_unavailable")
+        from procurement.workflow import ProcurementWorkflow
+
+        return ProcurementWorkflow(self.procurement_service).run(
+            request_id, requesting_scope=requesting_scope, **kwargs
         )
 
     def _obs_ctx(self, workflow_id: str = "", task_id: str = ""):

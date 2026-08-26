@@ -20,7 +20,7 @@ from agents.validators.consistency import VALIDATOR_VERSION as CONSISTENCY_VALID
 from agents.validators.structural import VALIDATOR_VERSION as STRUCTURAL_VALIDATOR_VERSION
 
 # Eval suite
-CORE_SUITE_VERSION = "1.5.0"
+CORE_SUITE_VERSION = "1.6.0"
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -175,3 +175,24 @@ def knowledge_source_registry_snapshot() -> dict:
     snap = source_registry_snapshot()
     snap["knowledge_source_registry_version"] = KNOWLEDGE_SOURCE_REGISTRY_VERSION
     return snap
+
+
+def procurement_policy_snapshot() -> dict:
+    from procurement.models import (
+        PROCUREMENT_POLICY_VERSION,
+        PROCUREMENT_SCORING_VERSION,
+        PROCUREMENT_WORKFLOW_VERSION,
+    )
+    from procurement.policy import procurement_policy_snapshot as snap_fn
+
+    snap = snap_fn()
+    snap["procurement_policy_version"] = PROCUREMENT_POLICY_VERSION
+    snap["procurement_scoring_version"] = PROCUREMENT_SCORING_VERSION
+    snap["procurement_workflow_version"] = PROCUREMENT_WORKFLOW_VERSION
+    return snap
+
+
+def procurement_scoring_snapshot() -> dict:
+    from procurement.policy import ProcurementScoringPolicy
+
+    return ProcurementScoringPolicy().as_dict()

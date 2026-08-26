@@ -23,6 +23,8 @@ from evals.versions import (
     knowledge_policy_snapshot,
     knowledge_retrieval_policy_snapshot,
     knowledge_source_registry_snapshot,
+    procurement_policy_snapshot,
+    procurement_scoring_snapshot,
     policy_snapshot,
     prompt_content_hash,
     routing_policy_snapshot,
@@ -251,6 +253,59 @@ def build_version_registry() -> VersionRegistry:
             artifact_id="knowledge_source_registry",
             version=KNOWLEDGE_SOURCE_REGISTRY_VERSION,
             content_hash=content_hash(know_reg),
+        )
+    )
+
+    # Procurement MVP (P16)
+    from procurement.models import (
+        PROCUREMENT_POLICY_VERSION,
+        PROCUREMENT_SCORING_VERSION,
+        PROCUREMENT_WORKFLOW_VERSION,
+    )
+
+    proc_pol = procurement_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="procurement_policy",
+            version=PROCUREMENT_POLICY_VERSION,
+            content_hash=content_hash(proc_pol),
+        )
+    )
+    proc_score = procurement_scoring_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="procurement_scoring",
+            version=PROCUREMENT_SCORING_VERSION,
+            content_hash=content_hash(proc_score),
+        )
+    )
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="procurement_workflow",
+            version=PROCUREMENT_WORKFLOW_VERSION,
+            content_hash=content_hash(
+                {
+                    "procurement_workflow_version": PROCUREMENT_WORKFLOW_VERSION,
+                    "stages": [
+                        "normalize_requirements",
+                        "retrieve_internal_knowledge",
+                        "discover_suppliers",
+                        "collect_offers",
+                        "normalize_offers",
+                        "validate_offers",
+                        "compare",
+                        "analyze_risks",
+                        "build_recommendation",
+                        "judge",
+                        "approval",
+                        "prepare_action",
+                        "complete",
+                    ],
+                }
+            ),
         )
     )
 

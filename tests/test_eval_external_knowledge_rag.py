@@ -27,7 +27,7 @@ KNOWLEDGE_HANDLERS = (
 
 class EvalExternalKnowledgeRagTests(unittest.TestCase):
     def test_core_suite_version(self):
-        self.assertEqual(CORE_SUITE_VERSION, "1.5.0")
+        self.assertEqual(CORE_SUITE_VERSION, "1.6.0")
 
     def test_knowledge_core_handlers_pass(self):
         for name in KNOWLEDGE_HANDLERS:

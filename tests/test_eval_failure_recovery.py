@@ -23,7 +23,7 @@ class EvalFailureRecoveryTests(unittest.TestCase):
     def test_suite_version_bumped(self):
         from evals.versions import CORE_SUITE_VERSION
 
-        self.assertEqual(CORE_SUITE_VERSION, "1.5.0")
+        self.assertEqual(CORE_SUITE_VERSION, "1.6.0")
 
 
 if __name__ == "__main__":

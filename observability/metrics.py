@@ -29,6 +29,7 @@ ALLOWED_LABEL_KEYS = frozenset(
         "parser_id",
         "source_type",
         "trust_level",
+        "category",
     }
 )
 
@@ -121,6 +122,13 @@ class MetricsCollector:
     knowledge_refresh_failure_total: int = 0
     knowledge_stale_result_total: int = 0
     knowledge_denied_total: int = 0
+    procurement_requests_total: int = 0
+    procurement_suppliers_considered_total: int = 0
+    procurement_offers_total: int = 0
+    procurement_offer_rejected_total: int = 0
+    procurement_recommendations_total: int = 0
+    procurement_approval_required_total: int = 0
+    procurement_failures_total: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})
@@ -251,6 +259,13 @@ class MetricsCollector:
                 "knowledge_refresh_failure_total": self.knowledge_refresh_failure_total,
                 "knowledge_stale_result_total": self.knowledge_stale_result_total,
                 "knowledge_denied_total": self.knowledge_denied_total,
+                "procurement_requests_total": self.procurement_requests_total,
+                "procurement_suppliers_considered_total": self.procurement_suppliers_considered_total,
+                "procurement_offers_total": self.procurement_offers_total,
+                "procurement_offer_rejected_total": self.procurement_offer_rejected_total,
+                "procurement_recommendations_total": self.procurement_recommendations_total,
+                "procurement_approval_required_total": self.procurement_approval_required_total,
+                "procurement_failures_total": self.procurement_failures_total,
                 "latency": latency,
                 "by_label": by_label,
             }

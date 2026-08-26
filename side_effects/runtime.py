@@ -147,6 +147,7 @@ class SideEffectRuntime:
     memory_runtime: object | None = None
     document_runtime: object | None = None
     knowledge_runtime: object | None = None
+    procurement_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -250,6 +251,16 @@ class SideEffectRuntime:
                     self.knowledge_runtime is None
                     or self.knowledge_runtime.health().get("persistence_ready", True)
                 ),
+                procurement_status=(
+                    (self.procurement_runtime.health().get("procurement_status") or "healthy")
+                    if self.procurement_runtime is not None
+                    else "healthy"
+                ),
+                procurement_enabled=bool(self.procurement_runtime is not None),
+                procurement_persistence_ready=bool(
+                    self.procurement_runtime is None
+                    or self.procurement_runtime.health().get("persistence_ready", True)
+                ),
             )
             meta["observability"] = {
                 "overall_status": snap.overall_status,
@@ -274,6 +285,8 @@ class SideEffectRuntime:
             meta["documents"] = dict(self.document_runtime.health())
         if self.knowledge_runtime is not None:
             meta["knowledge"] = dict(self.knowledge_runtime.health())
+        if self.procurement_runtime is not None:
+            meta["procurement"] = dict(self.procurement_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -334,6 +347,11 @@ class SideEffectRuntime:
         if self.knowledge_runtime is not None and hasattr(self.knowledge_runtime, "close"):
             try:
                 self.knowledge_runtime.close()
+            except Exception:
+                pass
+        if self.procurement_runtime is not None and hasattr(self.procurement_runtime, "close"):
+            try:
+                self.procurement_runtime.close()
             except Exception:
                 pass
 
@@ -569,6 +587,38 @@ def _finalize_runtime(
     if knowledge_runtime is not None:
         engine.knowledge_service = knowledge_runtime.service
 
+    procurement_runtime = None
+    from procurement.runtime import build_procurement_runtime, procurement_config
+
+    proc_cfg = procurement_config(env)
+    shared_proc = None
+    if proc_cfg["backend"] in {"sqlite", "durable"} and not proc_cfg["db_path"]:
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_proc = persistence.connection
+    try:
+        procurement_runtime = build_procurement_runtime(
+            env=env,
+            knowledge_service=knowledge_runtime.service if knowledge_runtime else None,
+            document_service=document_runtime.service if document_runtime else None,
+            memory_service=memory_runtime.service if memory_runtime else None,
+            workflow_engine=engine,
+            tool_gateway=tool_gateway,
+            autonomy_gate=gate,
+            hitl_service=hitl,
+            observability=obs,
+            shared_connection=shared_proc,
+            encryption=getattr(persistence, "encryption", None),
+        )
+    except Exception:
+        procurement_runtime = None
+    if procurement_runtime is not None:
+        engine.procurement_service = procurement_runtime.service
+
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -590,6 +640,7 @@ def _finalize_runtime(
         memory_runtime=memory_runtime,
         document_runtime=document_runtime,
         knowledge_runtime=knowledge_runtime,
+        procurement_runtime=procurement_runtime,
     )
 
 

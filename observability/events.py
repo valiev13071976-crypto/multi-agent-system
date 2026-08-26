@@ -104,6 +104,20 @@ EVENT_TYPES = frozenset(
         "knowledge.stale",
         "knowledge.denied",
         "knowledge.conflict_detected",
+        "procurement.request_created",
+        "procurement.requirements_normalized",
+        "procurement.research_started",
+        "procurement.suppliers_found",
+        "procurement.offers_normalized",
+        "procurement.offer_rejected",
+        "procurement.comparison_completed",
+        "procurement.risk_detected",
+        "procurement.recommendation_created",
+        "procurement.approval_requested",
+        "procurement.approved",
+        "procurement.rejected",
+        "procurement.completed",
+        "procurement.failed",
     }
 )
 
