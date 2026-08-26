@@ -24,6 +24,7 @@ from agents.routing_audit import (
     EMPTY_FACTOR_SNAPSHOT,
     REJECT_BUDGET_DENIED,
     REJECT_CAPABILITY_MISMATCH,
+    REJECT_HEALTH_COOLDOWN,
     REJECT_UNAVAILABLE,
     REJECT_UNKNOWN_COST_DENIED,
     REJECT_UNSUPPORTED_CATEGORY,
@@ -166,24 +167,54 @@ class ModelRouter:
     Does not inspect the user prompt or classify tasks.
 
     ``mode=both`` intentionally does not apply TaskRequirements capability
-    filtering or routing-time budget filtering (preserves multi-provider
-    fan-out; execution-time BudgetGuard remains authoritative). Capability
-    and budget eligibility apply to ``auto``; explicit mode validates both
-    without silent re-route.
+    filtering, routing-time budget filtering, or dynamic health filtering
+    (preserves multi-provider fan-out; execution-time BudgetGuard remains
+    authoritative). Capability, budget, and health eligibility apply to
+    ``auto``; explicit mode validates capability/budget without silent
+    re-route and does not exclude an explicit provider for cooldown.
 
     P0.4 audit fields on RoutingDecision are observability-only and must not
-    change which provider is selected.
+    change which provider is selected. P1.1 health excludes cooldown
+    providers from ``auto`` only.
     """
 
-    def __init__(self, registry: ProviderRegistry):
+    def __init__(self, registry: ProviderRegistry, health_tracker=None):
         self.registry = registry
         self.observability = None
+        self.health_tracker = health_tracker
 
     def _model_id(self, provider_id: str) -> str:
         try:
             return str(self.registry.model(provider_id) or "")
         except Exception:
             return ""
+
+    def _health_snapshot(self, provider_id: str):
+        tracker = self.health_tracker
+        if tracker is None or not getattr(getattr(tracker, "policy", None), "enabled", True):
+            return None
+        try:
+            return tracker.snapshot(provider_id, self._model_id(provider_id))
+        except Exception:
+            return None
+
+    def _filter_by_health(self, provider_ids: tuple[str, ...]) -> tuple[str, ...]:
+        tracker = self.health_tracker
+        if tracker is None or not getattr(getattr(tracker, "policy", None), "enabled", True):
+            return tuple(provider_ids)
+        kept = []
+        for provider_id in provider_ids:
+            try:
+                if tracker.is_auto_eligible(provider_id, self._model_id(provider_id)):
+                    kept.append(provider_id)
+            except Exception:
+                # Fail open on tracker errors — unknown/broken health ≠ unhealthy.
+                kept.append(provider_id)
+        return tuple(kept)
+
+    def _health_blocked_set(self, provider_ids: tuple[str, ...]) -> set[str]:
+        eligible = set(self._filter_by_health(provider_ids))
+        return {p for p in provider_ids if p not in eligible}
 
     def _budget_reject_reason(self, provider_id: str, budget_constraints) -> str:
         costs = dict(getattr(budget_constraints, "candidate_costs", None) or {})
@@ -217,6 +248,14 @@ class ModelRouter:
             if selected_provider in costs:
                 estimated = costs[selected_provider]
         max_affordable = getattr(budget_constraints, "max_affordable_cost", None)
+        health_state = health_reason = None
+        # Health gate applies to auto only; keep factor health fields empty for
+        # explicit/both so decision equality stays stable across executions.
+        if mode == MODE_AUTO and selected_provider:
+            snap = self._health_snapshot(selected_provider)
+            if snap is not None:
+                health_state = snap.state
+                health_reason = snap.reason_code
         return build_factor_snapshot(
             mode=mode,
             category=category,
@@ -229,6 +268,8 @@ class ModelRouter:
             latency_class=latency,
             estimated_cost=estimated,
             max_affordable_cost=max_affordable,
+            health_state=health_state,
+            health_reason=health_reason,
             extra={"role_id": role_id},
         )
 
@@ -633,9 +674,10 @@ class ModelRouter:
             if self._budget_active(budget_constraints) and set(eligible) != set(capable):
                 reason = REASON_AUTO_BUDGET_MATCH
             selected_ids = (selected,)
-            # Availability + unsupported category for providers outside pool.
+            # Availability + health + unsupported category for providers outside pool.
             avail_rows: list[RoutingCandidateAudit] = []
             pool_set = set(pool)
+            health_blocked = self._health_blocked_set(self.registry.active_provider_ids())
             for provider_id in PROVIDER_IDS:
                 if provider_id not in self.registry._records:
                     continue
@@ -646,6 +688,15 @@ class ModelRouter:
                             self._model_id(provider_id),
                             eligible=False,
                             rejection_reason=REJECT_UNAVAILABLE,
+                        )
+                    )
+                elif provider_id in health_blocked:
+                    avail_rows.append(
+                        RoutingCandidateAudit(
+                            provider_id,
+                            self._model_id(provider_id),
+                            eligible=False,
+                            rejection_reason=REJECT_HEALTH_COOLDOWN,
                         )
                     )
                 elif provider_id not in pool_set:
@@ -733,8 +784,18 @@ class ModelRouter:
                 factor_snapshot=snapshot,
             )
 
-        # Order: availability/category → hard capabilities → budget → rank.
-        capable = self.registry.providers_supporting(category)
+        # Order: static availability/state → dynamic health → category →
+        # hard capabilities → budget → rank.
+        active = self.registry.active_provider_ids()
+        health_eligible = self._filter_by_health(active)
+        capable = tuple(
+            provider_id
+            for provider_id in health_eligible
+            if (
+                self.registry.profile(provider_id) is not None
+                and category in self.registry.profile(provider_id).task_categories
+            )
+        )
         category_matches = capable
         capable = self._filter_by_requirements(capable, requirements)
         if capable:
@@ -756,6 +817,18 @@ class ModelRouter:
             else ()
         )
 
+        health_blocked = self._health_blocked_set(active)
+        health_rows = tuple(
+            RoutingCandidateAudit(
+                provider_id,
+                self._model_id(provider_id),
+                eligible=False,
+                rejection_reason=REJECT_HEALTH_COOLDOWN,
+            )
+            for provider_id in active
+            if provider_id in health_blocked
+        )
+
         failure_considered, failure_rejected = self._audit_rows_for_pool(
             pool=category_matches or (),
             requirements=requirements,
@@ -763,19 +836,32 @@ class ModelRouter:
             selected=(),
         )
         if not category_matches:
-            # Mark available non-supporters.
+            # Mark available non-supporters / health-blocked.
             rows = []
-            for provider_id in self.registry.available_provider_ids():
-                rows.append(
-                    RoutingCandidateAudit(
-                        provider_id,
-                        self._model_id(provider_id),
-                        eligible=False,
-                        rejection_reason=REJECT_UNSUPPORTED_CATEGORY,
+            for provider_id in active:
+                if provider_id in health_blocked:
+                    rows.append(
+                        RoutingCandidateAudit(
+                            provider_id,
+                            self._model_id(provider_id),
+                            eligible=False,
+                            rejection_reason=REJECT_HEALTH_COOLDOWN,
+                        )
                     )
-                )
+                else:
+                    rows.append(
+                        RoutingCandidateAudit(
+                            provider_id,
+                            self._model_id(provider_id),
+                            eligible=False,
+                            rejection_reason=REJECT_UNSUPPORTED_CATEGORY,
+                        )
+                    )
             failure_considered = tuple(rows)
             failure_rejected = failure_considered
+        else:
+            failure_considered = health_rows + failure_considered
+            failure_rejected = tuple(c for c in failure_considered if not c.eligible)
         failure_snapshot = self._factor_for(
             mode=MODE_AUTO,
             role_id=role_id,
@@ -787,9 +873,15 @@ class ModelRouter:
 
         fallback = self.registry.auto_capability_fallback
         if fallback == FALLBACK_GENERAL:
-            general = self.registry.providers_supporting("general")
-            general_before = general
-            general = self._filter_by_requirements(general, requirements)
+            general_before = tuple(
+                provider_id
+                for provider_id in health_eligible
+                if (
+                    self.registry.profile(provider_id) is not None
+                    and "general" in self.registry.profile(provider_id).task_categories
+                )
+            )
+            general = self._filter_by_requirements(general_before, requirements)
             if general:
                 return self._select_from_capable(
                     role_id=role_id,
@@ -822,7 +914,7 @@ class ModelRouter:
             order = tuple(
                 p
                 for p in self.registry.auto_provider_order
-                if self.registry.is_available(p)
+                if self.registry.is_available(p) and p in set(health_eligible)
             )
             order_before = order
             order = self._filter_by_requirements(order, requirements)

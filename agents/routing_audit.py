@@ -16,6 +16,7 @@ REJECT_UNSUPPORTED_CATEGORY = "unsupported_category"
 REJECT_CAPABILITY_MISMATCH = "capability_mismatch"
 REJECT_BUDGET_DENIED = "budget_denied"
 REJECT_UNKNOWN_COST_DENIED = "unknown_cost_denied"
+REJECT_HEALTH_COOLDOWN = "health_cooldown"
 
 REJECTION_REASON_CODES = frozenset(
     {
@@ -25,6 +26,7 @@ REJECTION_REASON_CODES = frozenset(
         REJECT_CAPABILITY_MISMATCH,
         REJECT_BUDGET_DENIED,
         REJECT_UNKNOWN_COST_DENIED,
+        REJECT_HEALTH_COOLDOWN,
     }
 )
 
@@ -74,6 +76,8 @@ class RoutingFactorSnapshot:
     selected_provider: str | None = None
     selected_model: str | None = None
     mode: str | None = None
+    health_state: str | None = None
+    health_reason: str | None = None
     extra: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -106,6 +110,8 @@ class RoutingFactorSnapshot:
             "selected_provider": self.selected_provider,
             "selected_model": self.selected_model,
             "mode": self.mode,
+            "health_state": self.health_state,
+            "health_reason": self.health_reason,
             "extra": dict(self.extra),
         }
 
@@ -132,6 +138,8 @@ def build_factor_snapshot(
     latency_class: str | None = None,
     estimated_cost=None,
     max_affordable_cost=None,
+    health_state: str | None = None,
+    health_reason: str | None = None,
     extra: Mapping[str, object] | None = None,
 ) -> RoutingFactorSnapshot:
     caps = ()
@@ -158,6 +166,8 @@ def build_factor_snapshot(
         selected_provider=selected_provider,
         selected_model=selected_model,
         mode=mode,
+        health_state=health_state,
+        health_reason=health_reason,
         extra=dict(extra or {}),
     )
 

@@ -50,6 +50,8 @@ class ExpertManager:
         self.mistral = mistral
         self.finops = finops
         self.budget_guard = budget_guard
+        self.health_tracker = None
+        self.observability = None
         self.last_errors = {}
         self.last_provider_results = {}
         self.last_usage = []
@@ -64,6 +66,65 @@ class ExpertManager:
         if provider_id not in PROVIDER_IDS:
             return None
         return getattr(self, provider_id)
+
+    def _emit_provider_outcome(
+        self,
+        *,
+        provider_id: str,
+        model_id: str,
+        success: bool,
+        error_code: str | None = None,
+        exception_type: str | None = None,
+    ) -> None:
+        obs = self.observability
+        if obs is not None:
+            from observability.helpers import safe_emit
+
+            safe_emit(
+                obs,
+                "provider.completed" if success else "provider.failed",
+                context=obs.create_context(task_id=str(self.last_task_id or "")),
+                component="provider",
+                provider=provider_id,
+                model=model_id,
+                status="ok" if success else "failed",
+                error_code=error_code,
+                exception_type=exception_type,
+            )
+
+    def _record_health_outcome(
+        self,
+        *,
+        provider_id: str,
+        model_id: str,
+        result,
+    ) -> None:
+        tracker = self.health_tracker
+        if tracker is None:
+            return
+        if isinstance(result, BaseException):
+            from agents.routing_health import is_qualifying_provider_failure
+
+            if is_qualifying_provider_failure(result):
+                tracker.record_failure(
+                    provider_id,
+                    model_id,
+                    error_class=type(result).__name__,
+                )
+                self._emit_provider_outcome(
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    success=False,
+                    error_code="provider_failure",
+                    exception_type=type(result).__name__,
+                )
+            return
+        tracker.record_success(provider_id, model_id)
+        self._emit_provider_outcome(
+            provider_id=provider_id,
+            model_id=model_id,
+            success=True,
+        )
 
     def _normalize_result(self, provider_id, agent, result) -> ProviderResult:
         if isinstance(result, ProviderResult):
@@ -191,6 +252,12 @@ class ExpertManager:
 
         for (provider_id, agent), result in zip(available, results):
             reservation = self.last_reservations.get(provider_id)
+            model_id = getattr(agent, "model", "") or ""
+            self._record_health_outcome(
+                provider_id=provider_id,
+                model_id=model_id,
+                result=result,
+            )
             if isinstance(result, BaseException):
                 self.last_errors[provider_id] = {
                     "type": type(result).__name__,

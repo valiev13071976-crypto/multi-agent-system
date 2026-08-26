@@ -28,6 +28,7 @@ from agents.model_profile import routing_category_for_role
 from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier
 from agents.routing_requirements import derive_task_requirements
+from agents.routing_health import ProviderHealthTracker, load_routing_health_policy
 from config.pricing import (
     load_budget_guard_enabled,
     load_budget_limits,
@@ -93,7 +94,13 @@ class RouterV2:
     def __init__(self):
         registry = ProviderRegistry.from_env()
         self.provider_registry = registry
-        self.model_router = ModelRouter(registry)
+        health_policy = load_routing_health_policy()
+        self.health_tracker = (
+            ProviderHealthTracker(policy=health_policy)
+            if health_policy.enabled
+            else None
+        )
+        self.model_router = ModelRouter(registry, health_tracker=self.health_tracker)
 
         self.finops = FinOpsService(
             prices=load_price_quotes(),
@@ -122,6 +129,7 @@ class RouterV2:
             finops=self.finops,
             budget_guard=self.budget_guard,
         )
+        expert_manager.health_tracker = self.health_tracker
 
         self.tool_gateway = ToolGateway(NullSearchProvider())
 
