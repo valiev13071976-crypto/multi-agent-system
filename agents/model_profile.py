@@ -43,6 +43,7 @@ PROVIDER_PROFILE_ENV = {
     "grok": "XAI",
     "deepseek": "DEEPSEEK",
     "moonshot": "MOONSHOT",
+    "mistral": "MISTRAL",
 }
 
 AUTO_CAPABILITY_FALLBACK_ENV = "AUTO_CAPABILITY_FALLBACK"

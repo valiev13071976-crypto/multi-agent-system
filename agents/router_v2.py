@@ -6,6 +6,7 @@ from agents.gemini_agent import GeminiAgent
 from agents.grok_agent import GrokAgent
 from agents.deepseek_agent import DeepSeekAgent
 from agents.moonshot_agent import MoonshotAgent
+from agents.mistral_agent import MistralAgent
 
 from agents.peer_review import PeerReview
 from agents.fact_validator import FactValidator
@@ -44,6 +45,7 @@ ALLOWED_MODE_VALUES = (
     "grok",
     "deepseek",
     "moonshot",
+    "mistral",
     "both",
     "auto",
 )
@@ -61,6 +63,7 @@ PROVIDER_CLASSES = {
     "grok": GrokAgent,
     "deepseek": DeepSeekAgent,
     "moonshot": MoonshotAgent,
+    "mistral": MistralAgent,
 }
 
 

@@ -19,11 +19,11 @@ def load_model_profiles(records: dict) -> dict[str, ModelProfile]:
         raw_window = os.getenv(f"{prefix}_CONTEXT_WINDOW")
         if raw_window and str(raw_window).strip().isdigit():
             context_window = int(str(raw_window).strip())
-        quality_status = os.getenv(f"{prefix}_QUALITY_STATUS") or (
-            "provisional" if provider_id == "moonshot" else "provisional"
-        )
+        quality_status = os.getenv(f"{prefix}_QUALITY_STATUS") or "provisional"
         # Existing providers treated as provisional unless explicitly verified.
-        if provider_id != "moonshot" and not os.getenv(f"{prefix}_QUALITY_STATUS"):
+        if provider_id not in {"moonshot", "mistral"} and not os.getenv(
+            f"{prefix}_QUALITY_STATUS"
+        ):
             quality_status = "provisional"
         model_state = os.getenv(f"{prefix}_MODEL_STATE") or "active"
         enabled = True
@@ -31,6 +31,10 @@ def load_model_profiles(records: dict) -> dict[str, ModelProfile]:
             from agents.moonshot_agent import moonshot_enabled
 
             enabled = moonshot_enabled()
+        elif provider_id == "mistral":
+            from agents.mistral_agent import mistral_enabled
+
+            enabled = mistral_enabled()
         profiles[provider_id] = build_model_profile(
             provider_id,
             record.model,

@@ -102,6 +102,7 @@ def procurement_model_eval_snapshot() -> dict:
             "grok",
             "deepseek",
             "moonshot",
+            "mistral",
         ],
     }
 

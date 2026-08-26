@@ -44,6 +44,7 @@ class ProcurementModelEvalTests(unittest.TestCase):
         snap = procurement_model_eval_snapshot()
         self.assertTrue(snap["no_quality_claim_without_live"])
         self.assertIn("moonshot", snap["providers_comparable"])
+        self.assertIn("mistral", snap["providers_comparable"])
 
 
 if __name__ == "__main__":

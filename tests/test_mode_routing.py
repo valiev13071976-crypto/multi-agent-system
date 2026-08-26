@@ -17,6 +17,7 @@ PROVIDER_ENV = {
     "grok": ("XAI_API_KEY", "XAI_MODEL"),
     "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"),
     "moonshot": ("MOONSHOT_API_KEY", "MOONSHOT_DEFAULT_MODEL"),
+    "mistral": ("MISTRAL_API_KEY", "MISTRAL_DEFAULT_MODEL"),
 }
 
 
@@ -24,6 +25,7 @@ def env_for(*providers):
     overrides = {
         "AUTO_PROVIDER_ORDER": "",
         "MOONSHOT_ENABLED": "false",
+        "MISTRAL_ENABLED": "false",
     }
     for provider in providers:
         key_env, model_env = PROVIDER_ENV[provider]
@@ -31,6 +33,8 @@ def env_for(*providers):
         overrides[model_env] = "fake-model"
         if provider == "moonshot":
             overrides["MOONSHOT_ENABLED"] = "true"
+        if provider == "mistral":
+            overrides["MISTRAL_ENABLED"] = "true"
     return overrides
 
 
@@ -111,6 +115,14 @@ class ModeRoutingTests(unittest.TestCase):
             "openai", "moonshot", mode="moonshot"
         )
         self.assertEqual(mocks["moonshot"].await_count, 1)
+        self.assertEqual(mocks["openai"].await_count, 0)
+        self._assert_contract(response.json())
+
+    def test_mode_mistral_calls_only_mistral(self):
+        response, mocks = self._analyze(
+            "openai", "mistral", mode="mistral"
+        )
+        self.assertEqual(mocks["mistral"].await_count, 1)
         self.assertEqual(mocks["openai"].await_count, 0)
         self._assert_contract(response.json())
 

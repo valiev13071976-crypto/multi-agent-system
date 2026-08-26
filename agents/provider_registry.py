@@ -9,6 +9,7 @@ PROVIDER_IDS = (
     "grok",
     "deepseek",
     "moonshot",
+    "mistral",
 )
 
 PROVIDER_ENV = (
@@ -18,6 +19,7 @@ PROVIDER_ENV = (
     ("grok", "XAI_API_KEY", "XAI_MODEL"),
     ("deepseek", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"),
     ("moonshot", "MOONSHOT_API_KEY", "MOONSHOT_DEFAULT_MODEL"),
+    ("mistral", "MISTRAL_API_KEY", "MISTRAL_DEFAULT_MODEL"),
 )
 
 AUTO_PROVIDER_ORDER_ENV = "AUTO_PROVIDER_ORDER"
@@ -125,6 +127,7 @@ class ProviderRegistry:
             load_model_profiles,
         )
         from agents.moonshot_agent import moonshot_enabled, resolve_moonshot_model
+        from agents.mistral_agent import mistral_enabled, resolve_mistral_model
         from security.secrets import EnvSecretStore
 
         secrets = EnvSecretStore()
@@ -137,6 +140,12 @@ class ProviderRegistry:
                 if not model:
                     model = os.getenv("MOONSHOT_MODEL") or ""
                 available = bool(moonshot_enabled()) and bool(api_key) and bool(model)
+            elif provider_id == "mistral":
+                api_key = secrets.get("MISTRAL_API_KEY") or ""
+                model = resolve_mistral_model()
+                if not model:
+                    model = os.getenv("MISTRAL_MODEL") or ""
+                available = bool(mistral_enabled()) and bool(api_key) and bool(model)
             else:
                 api_key = os.getenv(key_env) or ""
                 model = os.getenv(model_env) or ""
@@ -207,6 +216,22 @@ class ProviderRegistry:
             "moonshot_status": status,
             "enabled": enabled,
             "available": self.is_available("moonshot"),
+        }
+
+    def mistral_health(self) -> dict:
+        """Compose-time health for Mistral (no network probe)."""
+
+        from agents.mistral_agent import mistral_enabled, mistral_status, resolve_mistral_model
+        from security.secrets import EnvSecretStore
+
+        enabled = mistral_enabled()
+        has_key = bool(EnvSecretStore().get("MISTRAL_API_KEY"))
+        has_model = bool(resolve_mistral_model() or os.getenv("MISTRAL_MODEL"))
+        status = mistral_status(enabled=enabled, has_key=has_key, has_model=has_model)
+        return {
+            "mistral_status": status,
+            "enabled": enabled,
+            "available": self.is_available("mistral"),
         }
 
     def active_provider_ids(self) -> tuple[str, ...]:
