@@ -25,6 +25,7 @@ from agents.moonshot_versions import (
     MOONSHOT_PROVIDER_ADAPTER_VERSION,
     MOONSHOT_PROVIDER_ID,
     MOONSHOT_TRUSTED_BASE_URLS,
+    resolve_moonshot_chat_temperature,
 )
 from agents.provider_result import usage_from_chat_completions_response
 from security.secrets import EnvSecretStore, SecretStore
@@ -119,7 +120,7 @@ class MoonshotAgent:
         payload = {
             "model": self.model,
             "messages": [{"role": "user", "content": str(prompt or "")}],
-            "temperature": 0.7,
+            "temperature": resolve_moonshot_chat_temperature(self.model),
         }
         url = f"{self.base_url}/chat/completions"
         try:

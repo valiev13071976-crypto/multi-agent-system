@@ -14,7 +14,11 @@ from agents.moonshot_errors import (
     MoonshotProviderError,
 )
 from agents.moonshot_fake import FakeMoonshotProvider
-from agents.moonshot_versions import MOONSHOT_PROVIDER_ID
+from agents.moonshot_versions import (
+    MOONSHOT_DEFAULT_CHAT_TEMPERATURE,
+    MOONSHOT_PROVIDER_ID,
+    resolve_moonshot_chat_temperature,
+)
 
 
 class _Store:
@@ -109,6 +113,43 @@ class MoonshotProviderTests(unittest.IsolatedAsyncioTestCase):
         result = await fake.run("buy now")
         self.assertIn("CALL_TOOL", result.text)
         self.assertEqual(fake.tool_invocations, 0)
+
+    def test_resolve_temperature_model_aware(self):
+        self.assertEqual(resolve_moonshot_chat_temperature("kimi-k2.6"), 1.0)
+        self.assertEqual(resolve_moonshot_chat_temperature("kimi-k2.7-code"), 1.0)
+        self.assertEqual(
+            resolve_moonshot_chat_temperature("kimi-k3"),
+            MOONSHOT_DEFAULT_CHAT_TEMPERATURE,
+        )
+        self.assertEqual(
+            resolve_moonshot_chat_temperature("unknown-model"),
+            MOONSHOT_DEFAULT_CHAT_TEMPERATURE,
+        )
+
+    async def test_kimi_k26_request_uses_temperature_one(self):
+        response = MagicMock()
+        response.status_code = 200
+        response.json.return_value = {
+            "choices": [{"message": {"content": "KIMI_OK"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1},
+        }
+        transport = MagicMock()
+        transport.post = AsyncMock(return_value=response)
+        agent = MoonshotAgent(
+            secret_store=_Store(),
+            env={
+                "MOONSHOT_ENABLED": "true",
+                "MOONSHOT_DEFAULT_MODEL": "kimi-k2.6",
+                "MOONSHOT_BASE_URL": "https://api.moonshot.ai/v1",
+            },
+            transport=transport,
+        )
+        await agent.run("Reply exactly: KIMI_OK")
+        self.assertTrue(transport.post.await_count)
+        kwargs = transport.post.await_args.kwargs
+        body = kwargs.get("json") or {}
+        self.assertEqual(body.get("model"), "kimi-k2.6")
+        self.assertEqual(body.get("temperature"), 1.0)
 
 
 if __name__ == "__main__":

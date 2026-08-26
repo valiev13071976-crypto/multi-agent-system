@@ -28,6 +28,27 @@ MOONSHOT_DOCUMENTED_MODEL_EXAMPLES = (
     "kimi-k2.7-code",
 )
 
+# Default chat temperature for models without a fixed API constraint.
+MOONSHOT_DEFAULT_CHAT_TEMPERATURE = 0.7
+
+# API-confirmed: these models reject any temperature other than 1
+# (error: "invalid temperature: only 1 is allowed for this model").
+MOONSHOT_TEMPERATURE_FIXED_TO_ONE = frozenset(
+    {
+        "kimi-k2.6",
+        "kimi-k2.7-code",
+    }
+)
+
+
+def resolve_moonshot_chat_temperature(model_id: str) -> float:
+    """Return request temperature for a Moonshot model id (model-aware)."""
+
+    mid = str(model_id or "").strip()
+    if mid in MOONSHOT_TEMPERATURE_FIXED_TO_ONE:
+        return 1.0
+    return float(MOONSHOT_DEFAULT_CHAT_TEMPERATURE)
+
 QUALITY_STATUS_PROVISIONAL = "provisional"
 QUALITY_STATUS_VERIFIED = "verified"
 QUALITY_STATUSES = (QUALITY_STATUS_PROVISIONAL, QUALITY_STATUS_VERIFIED)
