@@ -215,11 +215,29 @@ class RouterV2:
                 ),
             }
 
+            budget_constraints = None
+            # mode=both: no routing-time budget filter (fan-out preserved;
+            # execution-time BudgetGuard remains authoritative).
+            if (
+                resolved_mode != "both"
+                and self.budget_guard is not None
+                and self.budget_guard.enforcement_active
+            ):
+                candidates = tuple(
+                    (provider_id, self.provider_registry.model(provider_id))
+                    for provider_id in self.provider_registry.available_provider_ids()
+                )
+                budget_constraints = self.budget_guard.routing_constraints(
+                    task_id=self.last_task_id,
+                    candidates=candidates,
+                )
+
             decision = self.model_router.decide(
                 mode=resolved_mode,
                 role_id=resolved_role,
                 category=routing_category,
                 requirements=self.last_requirements,
+                budget_constraints=budget_constraints,
             )
             self.last_decision = decision
 

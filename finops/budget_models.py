@@ -193,12 +193,20 @@ class BudgetForecast:
 
 @dataclass(frozen=True)
 class BudgetConstraints:
-    """Hook payload for ModelRouter — advisory + hard exclusions."""
+    """Read-only router-facing budget contract (no reservation state).
+
+    Built by BudgetGuard for ModelRouter selection. ``excluded_providers`` and
+    optional ``candidate_costs`` / ``max_affordable_cost`` drive eligibility.
+    ``preferred_cheaper`` is advisory soft-degrade preference from guard evaluate.
+    """
 
     max_affordable_cost: Decimal | None = None
+    remaining_budget: Decimal | None = None
     excluded_providers: tuple[str, ...] = ()
     excluded_models: tuple[str, ...] = ()
     preferred_cheaper: tuple[tuple[str, str], ...] = ()
+    candidate_costs: Mapping[str, Decimal | None] = field(default_factory=dict)
+    unknown_cost_policy: str | None = None
     decision: str = DECISION_CONTINUE
     reason_code: str = "within_budget"
     metadata_safe: Mapping[str, object] = field(default_factory=dict)
@@ -213,4 +221,19 @@ class BudgetConstraints:
             object.__setattr__(
                 self, "max_affordable_cost", Decimal(str(self.max_affordable_cost))
             )
+        if self.remaining_budget is not None and not isinstance(
+            self.remaining_budget, Decimal
+        ):
+            object.__setattr__(
+                self, "remaining_budget", Decimal(str(self.remaining_budget))
+            )
+        costs: dict[str, Decimal | None] = {}
+        for key, value in dict(self.candidate_costs or {}).items():
+            if value is None:
+                costs[str(key)] = None
+            elif isinstance(value, Decimal):
+                costs[str(key)] = value
+            else:
+                costs[str(key)] = Decimal(str(value))
+        object.__setattr__(self, "candidate_costs", MappingProxyType(costs))
         object.__setattr__(self, "metadata_safe", _meta(self.metadata_safe))

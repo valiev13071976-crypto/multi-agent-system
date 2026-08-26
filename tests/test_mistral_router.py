@@ -77,13 +77,16 @@ class MistralRouterTests(unittest.TestCase):
 
     def test_budget_can_exclude_mistral(self):
         constraints = BudgetConstraints(excluded_providers=("mistral",))
-        decision = ModelRouter(self._reg()).decide(
+        decision = ModelRouter(
+            self._reg(openai_cats="general,research")
+        ).decide(
             mode="auto",
             role_id="researcher",
             category="research",
             budget_constraints=constraints,
         )
         self.assertNotIn("mistral", decision.provider_ids)
+        self.assertEqual(decision.provider_ids, ("openai",))
 
     def test_provisional_quality_not_verified_flag(self):
         profile = self._reg().profile("mistral")

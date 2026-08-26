@@ -446,11 +446,155 @@ class BudgetGuard:
             preferred = ((decision.recommended_provider, decision.recommended_model),)
         return BudgetConstraints(
             max_affordable_cost=decision.max_affordable_cost,
+            remaining_budget=decision.remaining_budget,
             excluded_providers=decision.excluded_providers,
             excluded_models=decision.excluded_models,
             preferred_cheaper=preferred,
+            unknown_cost_policy=self.finops._limits.unknown_cost_policy,
             decision=decision.decision,
             reason_code=decision.reason_code,
+        )
+
+    def _routing_remaining_for_policy(
+        self,
+        policy: BudgetPolicy,
+        *,
+        task_id: str,
+        agent_id: str | None,
+        provider: str,
+        model: str,
+        when,
+    ) -> Decimal | None:
+        if policy.hard_limit is None:
+            return None
+        key = self._policy_key(
+            policy,
+            task_id=task_id,
+            agent_id=agent_id,
+            provider=provider,
+            model=model,
+            when=when,
+        )
+        reserved, _, spent = self.store.get_totals(scope_ref(policy.scope, key))
+        return policy.hard_limit - (reserved + spent)
+
+    def _max_affordable_for_routing(
+        self,
+        *,
+        task_id: str,
+        agent_id: str | None,
+        when,
+    ) -> Decimal | None:
+        """Min remaining hard budget across scopes that do not need a provider key."""
+
+        max_affordable: Decimal | None = None
+        for policy in self.policies:
+            if policy.hard_limit is None:
+                continue
+            if policy.scope in {SCOPE_PROVIDER, SCOPE_MODEL, SCOPE_AGENT}:
+                # Resolved per-candidate in _routing_candidate_allowed.
+                continue
+            remaining = self._routing_remaining_for_policy(
+                policy,
+                task_id=task_id,
+                agent_id=agent_id,
+                provider="",
+                model="",
+                when=when,
+            )
+            if remaining is None:
+                continue
+            max_affordable = (
+                remaining if max_affordable is None else min(max_affordable, remaining)
+            )
+        return max_affordable
+
+    def _routing_candidate_allowed(
+        self,
+        *,
+        task_id: str,
+        provider: str,
+        model: str,
+        estimated_cost: Decimal | None,
+        agent_id: str | None,
+        when,
+    ) -> bool:
+        """Hard-budget eligibility only. Unknown cost is never treated as zero."""
+
+        legacy = self.finops.check_budget(
+            estimated_cost, when=when, task_id=task_id
+        )
+        if not legacy.allowed:
+            return False
+        if estimated_cost is None:
+            # Allowed only when FinOps unknown-cost policy allows (already checked).
+            return True
+        for policy in self.policies:
+            if policy.hard_limit is None:
+                continue
+            remaining = self._routing_remaining_for_policy(
+                policy,
+                task_id=task_id,
+                agent_id=agent_id,
+                provider=provider,
+                model=model,
+                when=when,
+            )
+            if remaining is not None and estimated_cost > remaining:
+                return False
+        return True
+
+    def routing_constraints(
+        self,
+        *,
+        task_id: str,
+        candidates: tuple[tuple[str, str], ...] = (),
+        agent_id: str | None = None,
+        now=None,
+    ) -> BudgetConstraints | None:
+        """Read-only pre-routing budget view. Never reserves or spends.
+
+        Estimates each candidate via FinOps pricing and marks providers that
+        violate hard limits or the configured unknown-cost deny policy.
+        Soft-threshold degrade preference is not applied here; ModelRouter ranks
+        among hard-eligible capable candidates with the existing policy.
+        """
+
+        if not self.enforcement_active:
+            return None
+
+        stamp = now or utc_now()
+        max_affordable = self._max_affordable_for_routing(
+            task_id=task_id, agent_id=agent_id, when=stamp
+        )
+        excluded: list[str] = []
+        excluded_models: list[str] = []
+        costs: dict[str, Decimal | None] = {}
+
+        for cand_provider, cand_model in candidates:
+            cost = self.estimate_request_cost(cand_provider, cand_model)
+            costs[cand_provider] = cost
+            if not self._routing_candidate_allowed(
+                task_id=task_id,
+                provider=cand_provider,
+                model=cand_model,
+                estimated_cost=cost,
+                agent_id=agent_id,
+                when=stamp,
+            ):
+                excluded.append(cand_provider)
+                excluded_models.append(f"{cand_provider}/{cand_model}")
+
+        return BudgetConstraints(
+            max_affordable_cost=max_affordable,
+            remaining_budget=max_affordable,
+            excluded_providers=tuple(dict.fromkeys(excluded)),
+            excluded_models=tuple(dict.fromkeys(excluded_models)),
+            candidate_costs=costs,
+            unknown_cost_policy=self.finops._limits.unknown_cost_policy,
+            decision=DECISION_CONTINUE,
+            reason_code="routing_budget_filter",
+            metadata_safe={"read_only": True, "reserved": False},
         )
 
     def reserve(

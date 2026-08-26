@@ -176,6 +176,8 @@ class RouterRequirementsPlumbingTests(unittest.IsolatedAsyncioTestCase):
             router.last_route_context = None
             router.last_task_id = None
             router.last_workflow_id = None
+            router.budget_guard = None
+            router.finops = None
 
             baseline = router.model_router.decide(
                 mode="openai",

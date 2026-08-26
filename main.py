@@ -9,7 +9,11 @@ from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
 from agents.router import Router
-from agents.model_router import NoCapableProviderError, ProviderCapabilityMismatchError
+from agents.model_router import (
+    BudgetRoutingDeniedError,
+    NoCapableProviderError,
+    ProviderCapabilityMismatchError,
+)
 from agents.router_v2 import (
     ALLOWED_API_ROLE_VALUES,
     ALLOWED_MODE_VALUES,
@@ -220,6 +224,18 @@ async def analyze(request: AnalyzeRequest):
                 "message": "Selected provider does not satisfy required model capabilities.",
                 "provider": e.provider,
                 "missing_capabilities": list(e.missing_capabilities),
+                "category": e.category,
+            },
+        )
+
+    except BudgetRoutingDeniedError as e:
+        raise HTTPException(
+            status_code=429,
+            detail={
+                "error": "finops_budget_denied",
+                "message": redact("Request blocked by FinOps budget policy."),
+                "reason": redact(str(e.reason)),
+                "provider": e.provider,
                 "category": e.category,
             },
         )

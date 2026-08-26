@@ -26,13 +26,16 @@ REASON_EXPLICIT_PROVIDER = "explicit_provider"
 REASON_ALL_AVAILABLE_PROVIDERS = "all_available_providers"
 REASON_AUTO_PROVIDER = "auto_provider"
 REASON_AUTO_CAPABILITY_MATCH = "auto_capability_match"
+REASON_AUTO_BUDGET_MATCH = "auto_budget_match"
 REASON_AUTO_GENERAL_FALLBACK = "auto_general_fallback"
 REASON_AUTO_PRIORITY_FALLBACK = "auto_priority_fallback"
 REASON_AUTO_REQUIREMENTS_MATCH = "auto_requirements_match"
 REASON_EXPLICIT_CAPABILITY_MISMATCH = "explicit_capability_mismatch"
+REASON_EXPLICIT_BUDGET_DENIED = "explicit_budget_denied"
 
 EXPLICIT_MODES = frozenset(PROVIDER_IDS)
 MODE_AUTO = "auto"
+MODE_BOTH = "both"
 
 
 @dataclass(frozen=True)
@@ -92,14 +95,32 @@ class ProviderCapabilityMismatchError(Exception):
         )
 
 
+class BudgetRoutingDeniedError(Exception):
+    """Capable candidate(s) exist but none satisfy routing budget constraints."""
+
+    def __init__(
+        self,
+        reason: str = "budget_no_affordable_capable_route",
+        *,
+        provider: str | None = None,
+        category: str | None = None,
+    ):
+        self.reason = reason
+        self.provider = provider
+        self.category = category
+        super().__init__(reason)
+
+
 class ModelRouter:
     """
     Formalizes mode → provider selection.
     Does not inspect the user prompt or classify tasks.
 
     ``mode=both`` intentionally does not apply TaskRequirements capability
-    filtering (preserves multi-provider fan-out semantics). Capability
-    filtering applies to ``auto`` and validates explicit single-provider mode.
+    filtering or routing-time budget filtering (preserves multi-provider
+    fan-out; execution-time BudgetGuard remains authoritative). Capability
+    and budget eligibility apply to ``auto``; explicit mode validates both
+    without silent re-route.
     """
 
     def __init__(self, registry: ProviderRegistry):
@@ -146,12 +167,12 @@ class ModelRouter:
         budget_constraints=None,
         requirements=None,
     ) -> RoutingDecision:
-        if mode == "both":
+        if mode == MODE_BOTH or mode == "both":
             # Limitation (documented): both keeps availability fan-out only.
-            # TaskRequirements capability filtering is not applied here to avoid
-            # silently dropping providers from an explicit multi-provider request.
+            # TaskRequirements and routing-time budget filters are not applied
+            # here to avoid silently dropping providers from an explicit
+            # multi-provider request. Execution-time BudgetGuard still runs.
             provider_ids = self.registry.available_provider_ids()
-            provider_ids = self._apply_budget_constraints(provider_ids, budget_constraints)
             return self._decision(
                 role_id,
                 provider_ids,
@@ -175,19 +196,54 @@ class ModelRouter:
             requirements=requirements,
         )
 
+    def _budget_active(self, budget_constraints) -> bool:
+        if budget_constraints is None:
+            return False
+        if getattr(budget_constraints, "excluded_providers", ()):
+            return True
+        if getattr(budget_constraints, "preferred_cheaper", ()):
+            return True
+        if getattr(budget_constraints, "max_affordable_cost", None) is not None:
+            return True
+        if getattr(budget_constraints, "candidate_costs", None):
+            return True
+        if getattr(budget_constraints, "unknown_cost_policy", None) is not None:
+            return True
+        return False
+
     def _apply_budget_constraints(
         self, provider_ids: tuple[str, ...], budget_constraints
     ) -> tuple[str, ...]:
         if budget_constraints is None:
             return tuple(provider_ids)
         excluded = set(getattr(budget_constraints, "excluded_providers", ()) or ())
-        filtered = tuple(p for p in provider_ids if p not in excluded)
+        filtered = [p for p in provider_ids if p not in excluded]
+
+        costs = dict(getattr(budget_constraints, "candidate_costs", None) or {})
+        max_cost = getattr(budget_constraints, "max_affordable_cost", None)
+        if costs or max_cost is not None:
+            kept = []
+            for provider_id in filtered:
+                if provider_id in costs:
+                    cost = costs[provider_id]
+                    if cost is None:
+                        # Unknown price is never treated as zero; eligibility was
+                        # already decided when building constraints (allow/deny).
+                        kept.append(provider_id)
+                        continue
+                    if max_cost is not None and cost > max_cost:
+                        continue
+                    kept.append(provider_id)
+                else:
+                    kept.append(provider_id)
+            filtered = kept
+
         preferred = getattr(budget_constraints, "preferred_cheaper", ()) or ()
         if preferred:
             preferred_ids = tuple(p for p, _m in preferred if p in filtered)
             if preferred_ids:
                 return preferred_ids
-        return filtered
+        return tuple(filtered)
 
     def _filter_by_requirements(
         self, provider_ids: tuple[str, ...], requirements
@@ -206,6 +262,19 @@ class ModelRouter:
                 matched.append(provider_id)
         return tuple(matched)
 
+    def _raise_budget_denied(
+        self,
+        *,
+        provider: str | None = None,
+        category: str | None = None,
+        reason: str = "budget_no_affordable_capable_route",
+    ):
+        raise BudgetRoutingDeniedError(
+            reason,
+            provider=provider,
+            category=category,
+        )
+
     def _decide_explicit(
         self,
         *,
@@ -216,24 +285,49 @@ class ModelRouter:
         requirements=None,
     ) -> RoutingDecision:
         provider_ids = (mode,)
-        provider_ids = self._apply_budget_constraints(provider_ids, budget_constraints)
-        if not provider_ids and budget_constraints is not None:
-            return self._decision(role_id, (), REASON_EXPLICIT_PROVIDER)
 
-        if provider_ids and requirements is not None:
-            provider_id = provider_ids[0]
-            # Unavailable providers keep provider_not_configured semantics in RouterV2.
-            if self.registry.is_available(provider_id):
-                profile = self.registry.profile(provider_id)
-                missing = missing_capabilities(profile, requirements)
-                if missing:
-                    raise ProviderCapabilityMismatchError(
-                        provider_id,
-                        missing_capabilities=missing,
-                        category=category,
-                    )
+        if requirements is not None and self.registry.is_available(mode):
+            profile = self.registry.profile(mode)
+            missing = missing_capabilities(profile, requirements)
+            if missing:
+                raise ProviderCapabilityMismatchError(
+                    mode,
+                    missing_capabilities=missing,
+                    category=category,
+                )
+
+        if self._budget_active(budget_constraints):
+            eligible = self._apply_budget_constraints(provider_ids, budget_constraints)
+            if not eligible:
+                # Explicit choice is authoritative — never silent re-route.
+                raise BudgetRoutingDeniedError(
+                    getattr(budget_constraints, "reason_code", None)
+                    or "budget_hard_limit_exceeded",
+                    provider=mode,
+                    category=category,
+                )
 
         return self._decision(role_id, provider_ids, REASON_EXPLICIT_PROVIDER)
+
+    def _select_from_capable(
+        self,
+        *,
+        role_id: str,
+        category: str,
+        capable: tuple[str, ...],
+        budget_constraints,
+        success_reason: str,
+    ) -> RoutingDecision:
+        eligible = self._apply_budget_constraints(capable, budget_constraints)
+        if eligible:
+            selected = self._rank_providers(eligible)
+            reason = success_reason
+            if self._budget_active(budget_constraints) and set(eligible) != set(capable):
+                reason = REASON_AUTO_BUDGET_MATCH
+            return self._decision(role_id, (selected,), reason)
+        if capable and self._budget_active(budget_constraints):
+            self._raise_budget_denied(category=category)
+        raise NoCapableProviderError(category, reason="category")
 
     def _decide_auto(
         self,
@@ -245,16 +339,17 @@ class ModelRouter:
         if not self.registry.available_provider_ids():
             return self._decision(role_id, (), REASON_AUTO_PROVIDER)
 
+        # Order: availability/category → hard capabilities → budget → rank.
         capable = self.registry.providers_supporting(category)
-        capable = self._apply_budget_constraints(capable, budget_constraints)
         category_matches = capable
         capable = self._filter_by_requirements(capable, requirements)
         if capable:
-            selected = self._rank_providers(capable)
-            return self._decision(
-                role_id,
-                (selected,),
-                REASON_AUTO_CAPABILITY_MATCH,
+            return self._select_from_capable(
+                role_id=role_id,
+                category=category,
+                capable=capable,
+                budget_constraints=budget_constraints,
+                success_reason=REASON_AUTO_CAPABILITY_MATCH,
             )
 
         requirements_blocked = bool(category_matches) and not capable
@@ -268,15 +363,15 @@ class ModelRouter:
         fallback = self.registry.auto_capability_fallback
         if fallback == FALLBACK_GENERAL:
             general = self.registry.providers_supporting("general")
-            general = self._apply_budget_constraints(general, budget_constraints)
             general_before = general
             general = self._filter_by_requirements(general, requirements)
             if general:
-                selected = self._rank_providers(general)
-                return self._decision(
-                    role_id,
-                    (selected,),
-                    REASON_AUTO_GENERAL_FALLBACK,
+                return self._select_from_capable(
+                    role_id=role_id,
+                    category=category,
+                    capable=general,
+                    budget_constraints=budget_constraints,
+                    success_reason=REASON_AUTO_GENERAL_FALLBACK,
                 )
             if general_before and not general:
                 fail_reason = "requirements"
@@ -288,13 +383,10 @@ class ModelRouter:
             )
 
         if fallback == FALLBACK_PRIORITY:
-            order = self._apply_budget_constraints(
-                tuple(
-                    p
-                    for p in self.registry.auto_provider_order
-                    if self.registry.is_available(p)
-                ),
-                budget_constraints,
+            order = tuple(
+                p
+                for p in self.registry.auto_provider_order
+                if self.registry.is_available(p)
             )
             order_before = order
             order = self._filter_by_requirements(order, requirements)
@@ -311,12 +403,16 @@ class ModelRouter:
                         ),
                     )
                 return self._decision(role_id, (), REASON_AUTO_PRIORITY_FALLBACK)
-            selected = order[0]
-            return self._decision(
-                role_id,
-                (selected,),
-                REASON_AUTO_PRIORITY_FALLBACK,
-            )
+            eligible = self._apply_budget_constraints(order, budget_constraints)
+            if not eligible:
+                if self._budget_active(budget_constraints):
+                    self._raise_budget_denied(category=category)
+                return self._decision(role_id, (), REASON_AUTO_PRIORITY_FALLBACK)
+            selected = eligible[0]
+            reason = REASON_AUTO_PRIORITY_FALLBACK
+            if self._budget_active(budget_constraints) and set(eligible) != set(order):
+                reason = REASON_AUTO_BUDGET_MATCH
+            return self._decision(role_id, (selected,), reason)
 
         if fallback == FALLBACK_ERROR:
             raise NoCapableProviderError(

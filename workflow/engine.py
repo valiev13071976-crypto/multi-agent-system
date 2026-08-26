@@ -20,6 +20,7 @@ ERROR_CODES = {
     "NoProvidersAvailableError": "no_providers_available",
     "NoCapableProviderError": "no_capable_provider",
     "ProviderCapabilityMismatchError": "provider_capability_mismatch",
+    "BudgetRoutingDeniedError": "finops_budget_denied",
     "FinOpsBudgetDeniedError": "finops_budget_denied",
 }
 
