@@ -20,7 +20,7 @@ from agents.validators.consistency import VALIDATOR_VERSION as CONSISTENCY_VALID
 from agents.validators.structural import VALIDATOR_VERSION as STRUCTURAL_VALIDATOR_VERSION
 
 # Eval suite
-CORE_SUITE_VERSION = "1.7.0"
+CORE_SUITE_VERSION = "1.8.0"
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -225,3 +225,30 @@ def procurement_rfq_draft_snapshot() -> dict:
         "external_send": False,
         "side_effects": 0,
     }
+
+
+def moonshot_provider_adapter_snapshot() -> dict:
+    from agents.moonshot_versions import MOONSHOT_PROVIDER_ADAPTER_VERSION, MOONSHOT_PROVIDER_ID
+
+    return {
+        "moonshot_provider_adapter_version": MOONSHOT_PROVIDER_ADAPTER_VERSION,
+        "provider_id": MOONSHOT_PROVIDER_ID,
+        "enabled_default": False,
+        "openai_compatible": True,
+        "secret_via_secret_store": True,
+        "no_tool_gateway_from_adapter": True,
+        "no_failover_redesign": True,
+        "pricing_default": "unknown",
+    }
+
+
+def moonshot_model_registry_snapshot() -> dict:
+    from agents.moonshot_registry import moonshot_model_registry_snapshot as snap_fn
+
+    return snap_fn()
+
+
+def procurement_model_eval_snapshot() -> dict:
+    from agents.procurement_model_eval import procurement_model_eval_snapshot as snap_fn
+
+    return snap_fn()

@@ -8,6 +8,7 @@ PROVIDER_IDS = (
     "gemini",
     "grok",
     "deepseek",
+    "moonshot",
 )
 
 PROVIDER_ENV = (
@@ -16,6 +17,7 @@ PROVIDER_ENV = (
     ("gemini", "GEMINI_API_KEY", "GEMINI_MODEL"),
     ("grok", "XAI_API_KEY", "XAI_MODEL"),
     ("deepseek", "DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"),
+    ("moonshot", "MOONSHOT_API_KEY", "MOONSHOT_DEFAULT_MODEL"),
 )
 
 AUTO_PROVIDER_ORDER_ENV = "AUTO_PROVIDER_ORDER"
@@ -122,15 +124,27 @@ class ProviderRegistry:
             load_auto_routing_policy,
             load_model_profiles,
         )
+        from agents.moonshot_agent import moonshot_enabled, resolve_moonshot_model
+        from security.secrets import EnvSecretStore
 
+        secrets = EnvSecretStore()
         records = {}
         for provider_id, key_env, model_env in PROVIDER_ENV:
-            api_key = os.getenv(key_env) or ""
-            model = os.getenv(model_env) or ""
+            if provider_id == "moonshot":
+                api_key = secrets.get("MOONSHOT_API_KEY") or ""
+                model = resolve_moonshot_model()
+                # Also accept MOONSHOT_MODEL alias for registry model_env compatibility
+                if not model:
+                    model = os.getenv("MOONSHOT_MODEL") or ""
+                available = bool(moonshot_enabled()) and bool(api_key) and bool(model)
+            else:
+                api_key = os.getenv(key_env) or ""
+                model = os.getenv(model_env) or ""
+                available = bool(api_key) and bool(model)
             records[provider_id] = ProviderRecord(
                 provider_id=provider_id,
                 model=model,
-                available=bool(api_key) and bool(model),
+                available=available,
             )
         return cls(
             records,
@@ -174,7 +188,26 @@ class ProviderRegistry:
         profile = self.profile(provider_id)
         if profile is None or not profile.enabled:
             return False
+        state = getattr(profile, "model_state", "active")
+        if state in {"disabled", "deprecated"}:
+            return False
         return profile.model_id == self.model(provider_id)
+
+    def moonshot_health(self) -> dict:
+        """Compose-time health for Moonshot (no network probe)."""
+
+        from agents.moonshot_agent import moonshot_enabled, moonshot_status, resolve_moonshot_model
+        from security.secrets import EnvSecretStore
+
+        enabled = moonshot_enabled()
+        has_key = bool(EnvSecretStore().get("MOONSHOT_API_KEY"))
+        has_model = bool(resolve_moonshot_model() or os.getenv("MOONSHOT_MODEL"))
+        status = moonshot_status(enabled=enabled, has_key=has_key, has_model=has_model)
+        return {
+            "moonshot_status": status,
+            "enabled": enabled,
+            "available": self.is_available("moonshot"),
+        }
 
     def active_provider_ids(self) -> tuple[str, ...]:
         return tuple(

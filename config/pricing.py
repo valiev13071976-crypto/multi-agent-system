@@ -13,6 +13,11 @@ def load_price_quotes() -> dict[tuple[str, str], PriceQuote]:
         output_raw = os.getenv(f"{prefix}_OUTPUT_PRICE_PER_MILLION")
         if not (input_raw and str(input_raw).strip() and output_raw and str(output_raw).strip()):
             continue
+        # Moonshot: never invent pricing. Quotes only when explicitly verified.
+        if provider_id == "moonshot":
+            status = str(os.getenv("MOONSHOT_PRICE_STATUS") or "unknown").strip().lower()
+            if status != "verified":
+                continue
         try:
             input_price = Decimal(str(input_raw).strip())
             output_price = Decimal(str(output_raw).strip())
@@ -20,7 +25,12 @@ def load_price_quotes() -> dict[tuple[str, str], PriceQuote]:
             raise InvalidBudgetPolicyError(
                 f"Invalid price for {provider_id}: {input_raw!r}/{output_raw!r}"
             ) from exc
-        model_id = os.getenv(f"{prefix}_MODEL") or ""
+        if provider_id == "moonshot":
+            from agents.moonshot_agent import resolve_moonshot_model
+
+            model_id = resolve_moonshot_model() or (os.getenv(f"{prefix}_MODEL") or "")
+        else:
+            model_id = os.getenv(f"{prefix}_MODEL") or ""
         currency = (os.getenv(f"{prefix}_PRICE_CURRENCY") or CURRENCY_USD).strip() or CURRENCY_USD
         quotes[(provider_id, model_id)] = PriceQuote(
             provider_id=provider_id,

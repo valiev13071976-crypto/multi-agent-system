@@ -16,17 +16,21 @@ PROVIDER_ENV = {
     "gemini": ("GEMINI_API_KEY", "GEMINI_MODEL"),
     "grok": ("XAI_API_KEY", "XAI_MODEL"),
     "deepseek": ("DEEPSEEK_API_KEY", "DEEPSEEK_MODEL"),
+    "moonshot": ("MOONSHOT_API_KEY", "MOONSHOT_DEFAULT_MODEL"),
 }
 
 
 def env_for(*providers):
     overrides = {
         "AUTO_PROVIDER_ORDER": "",
+        "MOONSHOT_ENABLED": "false",
     }
     for provider in providers:
         key_env, model_env = PROVIDER_ENV[provider]
         overrides[key_env] = "fake-key"
         overrides[model_env] = "fake-model"
+        if provider == "moonshot":
+            overrides["MOONSHOT_ENABLED"] = "true"
     return overrides
 
 
@@ -99,6 +103,14 @@ class ModeRoutingTests(unittest.TestCase):
             "openai", "deepseek", mode="deepseek"
         )
         self.assertEqual(mocks["deepseek"].await_count, 1)
+        self.assertEqual(mocks["openai"].await_count, 0)
+        self._assert_contract(response.json())
+
+    def test_mode_moonshot_calls_only_moonshot(self):
+        response, mocks = self._analyze(
+            "openai", "moonshot", mode="moonshot"
+        )
+        self.assertEqual(mocks["moonshot"].await_count, 1)
         self.assertEqual(mocks["openai"].await_count, 0)
         self._assert_contract(response.json())
 

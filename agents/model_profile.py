@@ -42,6 +42,7 @@ PROVIDER_PROFILE_ENV = {
     "gemini": "GEMINI",
     "grok": "XAI",
     "deepseek": "DEEPSEEK",
+    "moonshot": "MOONSHOT",
 }
 
 AUTO_CAPABILITY_FALLBACK_ENV = "AUTO_CAPABILITY_FALLBACK"
@@ -116,6 +117,13 @@ class ModelProfile:
     supports_vision: bool
     supports_structured_output: bool
     context_class: str
+    # P18 optional metadata (defaults preserve prior semantics)
+    context_window: int | None = None
+    quality_status: str = "provisional"
+    model_state: str = "active"
+    supports_reasoning: bool = False
+    supports_multilingual: bool = False
+    supports_coding: bool = False
 
 
 def routing_category_for_role(role_id: str) -> str:
@@ -214,8 +222,20 @@ def build_model_profile(
     vision_raw: str | None = None,
     structured_raw: str | None = None,
     enabled: bool = True,
+    context_window: int | None = None,
+    quality_status: str = "provisional",
+    model_state: str = "active",
+    reasoning_raw: str | None = None,
+    multilingual_raw: str | None = None,
+    coding_raw: str | None = None,
 ) -> ModelProfile:
     prefix = PROVIDER_PROFILE_ENV[provider_id]
+    status = str(quality_status or "provisional").strip().lower()
+    if status not in {"provisional", "verified"}:
+        status = "provisional"
+    state = str(model_state or "active").strip().lower()
+    if state not in {"active", "deprecated", "disabled"}:
+        state = "active"
     return ModelProfile(
         provider_id=provider_id,
         model_id=model_id or "",
@@ -238,4 +258,14 @@ def build_model_profile(
         context_class=parse_class_value(
             context_raw, CONTEXT_CLASSES, DEFAULT_CONTEXT_CLASS, f"{prefix}_CONTEXT_CLASS"
         ),
+        context_window=context_window,
+        quality_status=status,
+        model_state=state,
+        supports_reasoning=parse_bool_flag(
+            reasoning_raw, False, f"{prefix}_SUPPORTS_REASONING"
+        ),
+        supports_multilingual=parse_bool_flag(
+            multilingual_raw, False, f"{prefix}_SUPPORTS_MULTILINGUAL"
+        ),
+        supports_coding=parse_bool_flag(coding_raw, False, f"{prefix}_SUPPORTS_CODING"),
     )

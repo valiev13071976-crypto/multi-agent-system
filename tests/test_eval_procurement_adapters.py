@@ -30,7 +30,7 @@ ADAPTER_HANDLERS = (
 
 class EvalProcurementAdaptersTests(unittest.TestCase):
     def test_core_suite_version(self):
-        self.assertEqual(CORE_SUITE_VERSION, "1.7.0")
+        self.assertEqual(CORE_SUITE_VERSION, "1.8.0")
 
     def test_adapter_core_handlers_pass(self):
         for name in ADAPTER_HANDLERS:

@@ -13,6 +13,7 @@ PROVIDER_IDS = (
     "gemini",
     "grok",
     "deepseek",
+    "moonshot",
 )
 
 
@@ -34,6 +35,7 @@ class ExpertManager:
         gemini=None,
         grok=None,
         deepseek=None,
+        moonshot=None,
         finops=None,
         budget_guard=None,
     ):
@@ -42,6 +44,7 @@ class ExpertManager:
         self.gemini = gemini
         self.grok = grok
         self.deepseek = deepseek
+        self.moonshot = moonshot
         self.finops = finops
         self.budget_guard = budget_guard
         self.last_errors = {}

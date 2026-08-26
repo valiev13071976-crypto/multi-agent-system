@@ -4,9 +4,16 @@
       {
         "artifact_id": "core",
         "artifact_type": "eval_suite",
-        "content_hash": "5fd6fab8fb25c041c27225b0c16c5a28818e88e0305a39f2103528bd4c3af683",
+        "content_hash": "a90a0f7a66258da0a5a34eebcb0ce39f2728dfe90a951cf9de715b22a2377d05",
         "schema_version": "1",
-        "version": "1.7.0"
+        "version": "1.8.0"
+      },
+      {
+        "artifact_id": "procurement_model_eval",
+        "artifact_type": "eval_suite",
+        "content_hash": "3b38eeb9c0088261482c2fe3cf08e87f0a15c1babf8adc471f8aa073a58c0ea6",
+        "schema_version": "1",
+        "version": "1.0.0"
       },
       {
         "artifact_id": "Judge",
@@ -82,6 +89,13 @@
         "artifact_id": "memory_retrieval_policy",
         "artifact_type": "policy",
         "content_hash": "604492686cb66989a5810f856aedb1b89679142f3b6b83b553df5a9f7111c1eb",
+        "schema_version": "1",
+        "version": "1.0.0"
+      },
+      {
+        "artifact_id": "moonshot_model_registry",
+        "artifact_type": "policy",
+        "content_hash": "5df03d5e20bf593ab501cdac3d0d939edcbcab82ba29f3e9eb197ddf0b53d01c",
         "schema_version": "1",
         "version": "1.0.0"
       },
@@ -184,6 +198,13 @@
         "version": "1.0.0"
       },
       {
+        "artifact_id": "moonshot_provider_adapter",
+        "artifact_type": "tool_schema",
+        "content_hash": "9cb94c07a91df04c31117cd3fd47a60de7fb6808327007a85e4a08646ac882c8",
+        "schema_version": "1",
+        "version": "1.0.0"
+      },
+      {
         "artifact_id": "procurement_adapter_schema",
         "artifact_type": "tool_schema",
         "content_hash": "bea3ea20d58f642d2204643b5ea674a95fc60b437ea5fccacc9e3b03267a373e",
@@ -226,7 +247,7 @@
         "version": "1.0.0"
       }
     ],
-    "manifest_hash": "2cbdb6a5179ae402a4c3e91f1e627a653db972f27c7b1c32c75f56383f0fb1f3"
+    "manifest_hash": "c9f558ffa549078dea88c7c0100410ed3bc3d5b2ba6a87e1c3c95f1d2e4cc4b6"
   },
   "baseline_id": "core_v1",
   "case_outcomes": {
@@ -471,6 +492,102 @@
       "status": "passed"
     },
     "memory_unvalidated_not_auto_promoted": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_429_bounded": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_api_analyze_contract": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_auto_capability_route": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_budget_can_exclude": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_disabled_by_default": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_explicit_fake_route": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_financial_still_denied": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_finops_exact_usage": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_injection_procurement_immune": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_long_context_profile": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_malformed_safe": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_missing_key_safe": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_no_direct_tool_invoke": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_provisional_quality": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_timeout_normalized": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "moonshot_unknown_price_not_zero": {
       "critical": true,
       "passed": true,
       "reason_codes": [],
@@ -821,7 +938,7 @@
       "status": "passed"
     }
   },
-  "created_at": "2026-08-26T05:14:48.294300+00:00",
+  "created_at": "2026-08-26T05:47:50.324477+00:00",
   "critical_case_ids": [
     "compat_analyze_public_keys",
     "document_chunk_provenance_preserved",
@@ -862,6 +979,22 @@
     "memory_secret_ingest_denied",
     "memory_sensitive_encrypted",
     "memory_unvalidated_not_auto_promoted",
+    "moonshot_429_bounded",
+    "moonshot_api_analyze_contract",
+    "moonshot_auto_capability_route",
+    "moonshot_budget_can_exclude",
+    "moonshot_disabled_by_default",
+    "moonshot_explicit_fake_route",
+    "moonshot_financial_still_denied",
+    "moonshot_finops_exact_usage",
+    "moonshot_injection_procurement_immune",
+    "moonshot_long_context_profile",
+    "moonshot_malformed_safe",
+    "moonshot_missing_key_safe",
+    "moonshot_no_direct_tool_invoke",
+    "moonshot_provisional_quality",
+    "moonshot_timeout_normalized",
+    "moonshot_unknown_price_not_zero",
     "procurement_adapters_arbitrary_url_denied",
     "procurement_adapters_catalog_validated_ref",
     "procurement_adapters_external_disabled_default",
@@ -915,15 +1048,15 @@
     "safety_unknown_write_op",
     "safety_write_bypass_impossible"
   ],
-  "reference_commit": "7fd7ef33829f0e88a1bfaa7172016e7fe0b17d38",
+  "reference_commit": "c25e0bdf0ce40608ce66cea8800b47357cdac99d",
   "suite_id": "core",
-  "suite_version": "1.7.0",
+  "suite_version": "1.8.0",
   "summary": {
     "failed": 0,
     "pass_rate": 1.0,
-    "passed": 97,
+    "passed": 113,
     "skipped": 1,
     "status": "passed",
-    "total": 98
+    "total": 114
   }
 }

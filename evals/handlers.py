@@ -3641,6 +3641,304 @@ def procurement_adapters_no_public_api(case) -> HandlerResult:
     return procurement_no_public_api(case)
 
 
+@handler("moonshot_disabled_by_default")
+def moonshot_disabled_by_default(case) -> HandlerResult:
+    from agents.moonshot_agent import moonshot_enabled
+    from agents.provider_registry import ProviderRegistry
+    import os
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, {"MOONSHOT_ENABLED": "false", "MOONSHOT_API_KEY": "x", "MOONSHOT_DEFAULT_MODEL": "kimi-k3"}, clear=False):
+        if moonshot_enabled():
+            return _fail(["enabled"])
+        reg = ProviderRegistry.from_env()
+        if reg.is_available("moonshot"):
+            return _fail(["available"])
+        if "moonshot" in reg.available_provider_ids():
+            return _fail(["in_auto_pool"])
+    return _ok({"disabled": True})
+
+
+@handler("moonshot_missing_key_safe")
+def moonshot_missing_key_safe(case) -> HandlerResult:
+    import os
+    from unittest.mock import patch
+
+    from agents.provider_registry import ProviderRegistry
+
+    with patch.dict(
+        os.environ,
+        {
+            "MOONSHOT_ENABLED": "true",
+            "MOONSHOT_API_KEY": "",
+            "MOONSHOT_DEFAULT_MODEL": "kimi-k3",
+            "OPENAI_API_KEY": "ok",
+            "OPENAI_MODEL": "gpt",
+        },
+        clear=False,
+    ):
+        reg = ProviderRegistry.from_env()
+        if reg.is_available("moonshot"):
+            return _fail(["moonshot_available"])
+        if not reg.is_available("openai"):
+            return _fail(["openai_broken"])
+        health = reg.moonshot_health()
+        if health.get("moonshot_status") != "blocked":
+            return _fail(["bad_status"], health)
+    return _ok({"openai_ok": True})
+
+
+@handler("moonshot_explicit_fake_route")
+def moonshot_explicit_fake_route(case) -> HandlerResult:
+    from agents.model_router import ModelRouter, REASON_EXPLICIT_PROVIDER
+    from agents.provider_registry import ProviderRecord, ProviderRegistry
+
+    records = {pid: ProviderRecord(pid, f"{pid}-m", pid == "moonshot") for pid in (
+        "openai", "anthropic", "gemini", "grok", "deepseek", "moonshot"
+    )}
+    records["moonshot"] = ProviderRecord("moonshot", "kimi-k3", True)
+    reg = ProviderRegistry(records)
+    decision = ModelRouter(reg).decide(mode="moonshot", role_id="researcher")
+    if decision.provider_ids != ("moonshot",) or decision.reason != REASON_EXPLICIT_PROVIDER:
+        return _fail(["route"], {"ids": list(decision.provider_ids), "reason": decision.reason})
+    return _ok({"model": decision.models.get("moonshot")})
+
+
+@handler("moonshot_auto_capability_route")
+def moonshot_auto_capability_route(case) -> HandlerResult:
+    from agents.model_profile import build_model_profile
+    from agents.model_router import ModelRouter, REASON_AUTO_CAPABILITY_MATCH
+    from agents.provider_registry import ProviderRecord, ProviderRegistry
+
+    records = {
+        "moonshot": ProviderRecord("moonshot", "kimi-k3", True),
+        "openai": ProviderRecord("openai", "gpt", True),
+        "anthropic": ProviderRecord("anthropic", "c", False),
+        "gemini": ProviderRecord("gemini", "g", False),
+        "grok": ProviderRecord("grok", "x", False),
+        "deepseek": ProviderRecord("deepseek", "d", False),
+    }
+    profiles = {
+        "moonshot": build_model_profile(
+            "moonshot", "kimi-k3",
+            task_categories_raw="general,research",
+            quality_raw="premium",
+        ),
+        "openai": build_model_profile(
+            "openai", "gpt", task_categories_raw="general", quality_raw="standard"
+        ),
+    }
+    reg = ProviderRegistry(
+        records,
+        profiles=profiles,
+        auto_provider_order=("openai", "moonshot"),
+        auto_routing_policy="quality",
+    )
+    decision = ModelRouter(reg).decide(mode="auto", role_id="researcher", category="research")
+    if decision.provider_ids != ("moonshot",):
+        return _fail(["not_selected"], {"ids": list(decision.provider_ids)})
+    if decision.reason != REASON_AUTO_CAPABILITY_MATCH:
+        return _fail(["reason"], {"reason": decision.reason})
+    return _ok({"selected": "moonshot"})
+
+
+@handler("moonshot_long_context_profile")
+def moonshot_long_context_profile(case) -> HandlerResult:
+    from agents.model_profile import build_model_profile
+
+    profile = build_model_profile(
+        "moonshot", "kimi-k3", context_raw="long", context_window=1_000_000
+    )
+    if profile.context_class != "long" or profile.context_window != 1_000_000:
+        return _fail(["profile"], {"class": profile.context_class, "window": profile.context_window})
+    return _ok({"long_context": True})
+
+
+@handler("moonshot_provisional_quality")
+def moonshot_provisional_quality(case) -> HandlerResult:
+    from agents.model_profile import build_model_profile
+
+    profile = build_model_profile("moonshot", "kimi-k3", quality_status="provisional")
+    if profile.quality_status == "verified":
+        return _fail(["treated_as_verified"])
+    if profile.quality_status != "provisional":
+        return _fail(["unexpected"], {"status": profile.quality_status})
+    return _ok({"provisional": True})
+
+
+@handler("moonshot_unknown_price_not_zero")
+def moonshot_unknown_price_not_zero(case) -> HandlerResult:
+    from decimal import Decimal
+
+    from finops.service import FinOpsService
+
+    cost = FinOpsService(prices={}, limits=None).estimate("moonshot", "kimi-k3", 100, 50)
+    if cost is not None:
+        return _fail(["priced"], {"cost": str(cost)})
+    if cost == Decimal("0"):
+        return _fail(["zero"])
+    return _ok({"unknown": True})
+
+
+@handler("moonshot_finops_exact_usage")
+def moonshot_finops_exact_usage(case) -> HandlerResult:
+    import asyncio
+
+    from agents.moonshot_fake import FakeMoonshotProvider
+    from finops.models import CURRENCY_USD, UsageRecord, utc_now
+    from finops.service import FinOpsService
+
+    fake = FakeMoonshotProvider(input_tokens=33, output_tokens=12)
+    result = asyncio.run(fake.run("x"))
+    finops = FinOpsService(prices={}, limits=None)
+    finops.record_usage(
+        UsageRecord(
+            task_id="m1",
+            provider_id=result.provider_id,
+            model_id=result.model_id,
+            input_tokens=result.input_tokens,
+            output_tokens=result.output_tokens,
+            total_tokens=result.total_tokens,
+            estimated_cost=None,
+            currency=CURRENCY_USD,
+            timestamp=utc_now(),
+        )
+    )
+    rows = finops._store.records_for_task("m1")
+    if not rows or rows[0].input_tokens != 33 or rows[0].output_tokens != 12:
+        return _fail(["usage"], {"rows": len(rows)})
+    return _ok({"input": 33, "output": 12})
+
+
+@handler("moonshot_budget_can_exclude")
+def moonshot_budget_can_exclude(case) -> HandlerResult:
+    from agents.model_profile import build_model_profile
+    from agents.model_router import ModelRouter
+    from agents.provider_registry import ProviderRecord, ProviderRegistry
+    from finops.budget_models import BudgetConstraints
+
+    records = {
+        "moonshot": ProviderRecord("moonshot", "kimi-k3", True),
+        "openai": ProviderRecord("openai", "gpt", True),
+        "anthropic": ProviderRecord("anthropic", "c", False),
+        "gemini": ProviderRecord("gemini", "g", False),
+        "grok": ProviderRecord("grok", "x", False),
+        "deepseek": ProviderRecord("deepseek", "d", False),
+    }
+    profiles = {
+        "moonshot": build_model_profile("moonshot", "kimi-k3", task_categories_raw="general,research", quality_raw="premium"),
+        "openai": build_model_profile("openai", "gpt", task_categories_raw="general,research"),
+    }
+    reg = ProviderRegistry(records, profiles=profiles, auto_provider_order=("moonshot", "openai"), auto_routing_policy="quality")
+    decision = ModelRouter(reg).decide(
+        mode="auto",
+        role_id="researcher",
+        category="research",
+        budget_constraints=BudgetConstraints(excluded_providers=("moonshot",)),
+    )
+    if "moonshot" in decision.provider_ids:
+        return _fail(["not_excluded"])
+    return _ok({"excluded": True})
+
+
+@handler("moonshot_429_bounded")
+def moonshot_429_bounded(case) -> HandlerResult:
+    import asyncio
+
+    from agents.moonshot_errors import MOONSHOT_RATE_LIMIT, MoonshotProviderError
+    from agents.moonshot_fake import FakeMoonshotProvider
+
+    fake = FakeMoonshotProvider(mode="429")
+    try:
+        asyncio.run(fake.run("x"))
+        return _fail(["no_error"])
+    except MoonshotProviderError as exc:
+        if exc.category != MOONSHOT_RATE_LIMIT:
+            return _fail(["category"], {"c": exc.category})
+    if fake.retry_count != 1:
+        return _fail(["retry_loop"], {"n": fake.retry_count})
+    return _ok({"bounded": True})
+
+
+@handler("moonshot_timeout_normalized")
+def moonshot_timeout_normalized(case) -> HandlerResult:
+    import asyncio
+
+    from agents.moonshot_errors import MOONSHOT_TIMEOUT, MoonshotProviderError
+    from agents.moonshot_fake import FakeMoonshotProvider
+
+    try:
+        asyncio.run(FakeMoonshotProvider(mode="timeout").run("x"))
+        return _fail(["no_error"])
+    except MoonshotProviderError as exc:
+        if exc.category != MOONSHOT_TIMEOUT:
+            return _fail(["category"], {"c": exc.category})
+    return _ok({"timeout": True})
+
+
+@handler("moonshot_malformed_safe")
+def moonshot_malformed_safe(case) -> HandlerResult:
+    import asyncio
+
+    from agents.moonshot_errors import MOONSHOT_MALFORMED_RESPONSE, MoonshotProviderError
+    from agents.moonshot_fake import FakeMoonshotProvider
+
+    try:
+        asyncio.run(FakeMoonshotProvider(mode="malformed").run("x"))
+        return _fail(["no_error"])
+    except MoonshotProviderError as exc:
+        if exc.category != MOONSHOT_MALFORMED_RESPONSE:
+            return _fail(["category"], {"c": exc.category})
+    return _ok({"safe": True})
+
+
+@handler("moonshot_injection_procurement_immune")
+def moonshot_injection_procurement_immune(case) -> HandlerResult:
+    return procurement_prompt_injection_no_override(case)
+
+
+@handler("moonshot_financial_still_denied")
+def moonshot_financial_still_denied(case) -> HandlerResult:
+    return procurement_no_purchase_execution(case)
+
+
+@handler("moonshot_no_direct_tool_invoke")
+def moonshot_no_direct_tool_invoke(case) -> HandlerResult:
+    import asyncio
+
+    from agents.moonshot_fake import FakeMoonshotProvider
+
+    fake = FakeMoonshotProvider(mode="tool_instruction")
+    result = asyncio.run(fake.run("invoke tools"))
+    if fake.tool_invocations != 0:
+        return _fail(["invoked"])
+    if "CALL_TOOL" not in result.text:
+        return _fail(["no_instruction_text"])
+    return _ok({"no_tool_invoke": True})
+
+
+@handler("moonshot_api_analyze_contract")
+def moonshot_api_analyze_contract(case) -> HandlerResult:
+    from agents.router_v2 import ALLOWED_MODE_VALUES
+    from tests.test_smoke import CONTRACT_KEYS
+
+    if "moonshot" not in ALLOWED_MODE_VALUES:
+        return _fail(["mode_missing"])
+    # Success response keys remain exactly the contract — mode addition must not expand response.
+    expected = (
+        "summary",
+        "best_solution",
+        "analysis",
+        "risks",
+        "action_plan",
+        "confidence",
+        "role",
+    )
+    if tuple(CONTRACT_KEYS) != expected:
+        return _fail(["contract_changed"], {"keys": list(CONTRACT_KEYS)})
+    return _ok({"modes": list(ALLOWED_MODE_VALUES), "contract": list(expected)})
+
+
 def get_handler(name: str):
     if name not in HANDLER_REGISTRY:
         raise KeyError(f"unknown_handler:{name}")

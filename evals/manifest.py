@@ -28,6 +28,9 @@ from evals.versions import (
     procurement_adapter_schema_snapshot,
     procurement_external_research_policy_snapshot,
     procurement_rfq_draft_snapshot,
+    moonshot_provider_adapter_snapshot,
+    moonshot_model_registry_snapshot,
+    procurement_model_eval_snapshot,
     policy_snapshot,
     prompt_content_hash,
     routing_policy_snapshot,
@@ -343,6 +346,40 @@ def build_version_registry() -> VersionRegistry:
             artifact_id="procurement_rfq_draft",
             version=PROCUREMENT_RFQ_DRAFT_VERSION,
             content_hash=content_hash(proc_rfq),
+        )
+    )
+
+    from agents.moonshot_versions import (
+        MOONSHOT_MODEL_REGISTRY_VERSION,
+        MOONSHOT_PROVIDER_ADAPTER_VERSION,
+        PROCUREMENT_MODEL_EVAL_VERSION,
+    )
+
+    moon_adapter = moonshot_provider_adapter_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="tool_schema",
+            artifact_id="moonshot_provider_adapter",
+            version=MOONSHOT_PROVIDER_ADAPTER_VERSION,
+            content_hash=content_hash(moon_adapter),
+        )
+    )
+    moon_reg = moonshot_model_registry_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="moonshot_model_registry",
+            version=MOONSHOT_MODEL_REGISTRY_VERSION,
+            content_hash=content_hash(moon_reg),
+        )
+    )
+    proc_model_eval = procurement_model_eval_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="eval_suite",
+            artifact_id="procurement_model_eval",
+            version=PROCUREMENT_MODEL_EVAL_VERSION,
+            content_hash=content_hash(proc_model_eval),
         )
     )
 

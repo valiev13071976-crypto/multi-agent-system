@@ -18,23 +18,19 @@ USER_PROMPT = "Найди поставщика"
 OTHER_PROMPT = "Сравни поставщиков"
 
 
-def registry_with(*available, models=None):
+def registry_with(*available, models=None, profiles=None):
+    from agents.provider_registry import PROVIDER_IDS
+
     models = models or {}
     records = {}
-    for provider_id in (
-        "openai",
-        "anthropic",
-        "gemini",
-        "grok",
-        "deepseek",
-    ):
+    for provider_id in PROVIDER_IDS:
         model = models.get(provider_id, f"{provider_id}-model")
         records[provider_id] = ProviderRecord(
             provider_id=provider_id,
             model=model if provider_id in available else model,
             available=provider_id in available,
         )
-    return ProviderRegistry(records)
+    return ProviderRegistry(records, profiles=profiles)
 
 
 class ModelRouterTests(unittest.TestCase):

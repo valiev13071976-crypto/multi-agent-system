@@ -15,6 +15,22 @@ def load_model_profiles(records: dict) -> dict[str, ModelProfile]:
     profiles = {}
     for provider_id, record in records.items():
         prefix = PROVIDER_PROFILE_ENV[provider_id]
+        context_window = None
+        raw_window = os.getenv(f"{prefix}_CONTEXT_WINDOW")
+        if raw_window and str(raw_window).strip().isdigit():
+            context_window = int(str(raw_window).strip())
+        quality_status = os.getenv(f"{prefix}_QUALITY_STATUS") or (
+            "provisional" if provider_id == "moonshot" else "provisional"
+        )
+        # Existing providers treated as provisional unless explicitly verified.
+        if provider_id != "moonshot" and not os.getenv(f"{prefix}_QUALITY_STATUS"):
+            quality_status = "provisional"
+        model_state = os.getenv(f"{prefix}_MODEL_STATE") or "active"
+        enabled = True
+        if provider_id == "moonshot":
+            from agents.moonshot_agent import moonshot_enabled
+
+            enabled = moonshot_enabled()
         profiles[provider_id] = build_model_profile(
             provider_id,
             record.model,
@@ -26,7 +42,13 @@ def load_model_profiles(records: dict) -> dict[str, ModelProfile]:
             tools_raw=os.getenv(f"{prefix}_SUPPORTS_TOOLS"),
             vision_raw=os.getenv(f"{prefix}_SUPPORTS_VISION"),
             structured_raw=os.getenv(f"{prefix}_SUPPORTS_STRUCTURED_OUTPUT"),
-            enabled=True,
+            enabled=enabled,
+            context_window=context_window,
+            quality_status=quality_status,
+            model_state=model_state,
+            reasoning_raw=os.getenv(f"{prefix}_SUPPORTS_REASONING"),
+            multilingual_raw=os.getenv(f"{prefix}_SUPPORTS_MULTILINGUAL"),
+            coding_raw=os.getenv(f"{prefix}_SUPPORTS_CODING"),
         )
     return profiles
 
