@@ -27,6 +27,8 @@ ALLOWED_LABEL_KEYS = frozenset(
         "scope_type",
         "document_type",
         "parser_id",
+        "source_type",
+        "trust_level",
     }
 )
 
@@ -113,6 +115,12 @@ class MetricsCollector:
     document_bytes_total: int = 0
     spreadsheet_sheet_total: int = 0
     spreadsheet_range_extract_total: int = 0
+    knowledge_ingest_total: int = 0
+    knowledge_retrieval_total: int = 0
+    knowledge_refresh_total: int = 0
+    knowledge_refresh_failure_total: int = 0
+    knowledge_stale_result_total: int = 0
+    knowledge_denied_total: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})
@@ -237,6 +245,12 @@ class MetricsCollector:
                 "document_bytes_total": self.document_bytes_total,
                 "spreadsheet_sheet_total": self.spreadsheet_sheet_total,
                 "spreadsheet_range_extract_total": self.spreadsheet_range_extract_total,
+                "knowledge_ingest_total": self.knowledge_ingest_total,
+                "knowledge_retrieval_total": self.knowledge_retrieval_total,
+                "knowledge_refresh_total": self.knowledge_refresh_total,
+                "knowledge_refresh_failure_total": self.knowledge_refresh_failure_total,
+                "knowledge_stale_result_total": self.knowledge_stale_result_total,
+                "knowledge_denied_total": self.knowledge_denied_total,
                 "latency": latency,
                 "by_label": by_label,
             }

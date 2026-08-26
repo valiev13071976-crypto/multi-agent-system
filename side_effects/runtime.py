@@ -146,6 +146,7 @@ class SideEffectRuntime:
     recovery_orchestrator: object | None = None
     memory_runtime: object | None = None
     document_runtime: object | None = None
+    knowledge_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -239,6 +240,16 @@ class SideEffectRuntime:
                     self.document_runtime is None
                     or self.document_runtime.health().get("persistence_ready", True)
                 ),
+                knowledge_status=(
+                    (self.knowledge_runtime.health().get("knowledge_status") or "healthy")
+                    if self.knowledge_runtime is not None
+                    else "healthy"
+                ),
+                knowledge_enabled=bool(self.knowledge_runtime is not None),
+                knowledge_persistence_ready=bool(
+                    self.knowledge_runtime is None
+                    or self.knowledge_runtime.health().get("persistence_ready", True)
+                ),
             )
             meta["observability"] = {
                 "overall_status": snap.overall_status,
@@ -261,6 +272,8 @@ class SideEffectRuntime:
             meta["memory"] = dict(self.memory_runtime.health())
         if self.document_runtime is not None:
             meta["documents"] = dict(self.document_runtime.health())
+        if self.knowledge_runtime is not None:
+            meta["knowledge"] = dict(self.knowledge_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -316,6 +329,11 @@ class SideEffectRuntime:
         if self.document_runtime is not None and hasattr(self.document_runtime, "close"):
             try:
                 self.document_runtime.close()
+            except Exception:
+                pass
+        if self.knowledge_runtime is not None and hasattr(self.knowledge_runtime, "close"):
+            try:
+                self.knowledge_runtime.close()
             except Exception:
                 pass
 
@@ -534,6 +552,23 @@ def _finalize_runtime(
     if document_runtime is not None:
         engine.document_service = document_runtime.service
 
+    knowledge_runtime = None
+    from knowledge.runtime import build_knowledge_runtime
+
+    try:
+        knowledge_runtime = build_knowledge_runtime(
+            env=env,
+            memory_service=memory_runtime.service if memory_runtime else None,
+            document_service=document_runtime.service if document_runtime else None,
+            tool_gateway=tool_gateway,
+            observability=obs,
+            freeze=True,
+        )
+    except Exception:
+        knowledge_runtime = None
+    if knowledge_runtime is not None:
+        engine.knowledge_service = knowledge_runtime.service
+
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -554,6 +589,7 @@ def _finalize_runtime(
         recovery_orchestrator=recovery,
         memory_runtime=memory_runtime,
         document_runtime=document_runtime,
+        knowledge_runtime=knowledge_runtime,
     )
 
 

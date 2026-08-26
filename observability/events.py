@@ -95,6 +95,15 @@ EVENT_TYPES = frozenset(
         "document.denied",
         "spreadsheet.inspected",
         "spreadsheet.range_extracted",
+        "knowledge.source_registered",
+        "knowledge.ingested",
+        "knowledge.retrieved",
+        "knowledge.refresh_started",
+        "knowledge.refresh_completed",
+        "knowledge.refresh_failed",
+        "knowledge.stale",
+        "knowledge.denied",
+        "knowledge.conflict_detected",
     }
 )
 

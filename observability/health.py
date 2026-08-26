@@ -29,6 +29,7 @@ class OperationalHealthSnapshot:
     recovery_status: str = HEALTH_HEALTHY
     memory_status: str = HEALTH_HEALTHY
     document_status: str = HEALTH_HEALTHY
+    knowledge_status: str = HEALTH_HEALTHY
     active_workflows: int = 0
     waiting_approval: int = 0
     uncertain_side_effects: int = 0
@@ -88,6 +89,9 @@ def build_operational_health(
     document_status: str = HEALTH_HEALTHY,
     documents_enabled: bool = False,
     document_persistence_ready: bool = True,
+    knowledge_status: str = HEALTH_HEALTHY,
+    knowledge_enabled: bool = False,
+    knowledge_persistence_ready: bool = True,
     now: datetime | None = None,
 ) -> OperationalHealthSnapshot:
     persistence_status = HEALTH_HEALTHY if persistence_ready else HEALTH_DEGRADED
@@ -130,6 +134,10 @@ def build_operational_health(
     if documents_enabled and not document_persistence_ready:
         doc_status = HEALTH_BLOCKED
 
+    know_status = knowledge_status if knowledge_status in HEALTH_STATUSES else HEALTH_HEALTHY
+    if knowledge_enabled and not knowledge_persistence_ready:
+        know_status = HEALTH_BLOCKED
+
     finops = finops_status if finops_status in HEALTH_STATUSES else HEALTH_HEALTHY
     if budget_soft_threshold or budget_uncertain:
         finops = _worst(finops, HEALTH_DEGRADED)
@@ -149,6 +157,7 @@ def build_operational_health(
         recovery_status,
         mem_status,
         doc_status,
+        know_status,
         finops,
         HEALTH_HEALTHY,
     )
@@ -166,6 +175,7 @@ def build_operational_health(
         recovery_status=recovery_status,
         memory_status=mem_status,
         document_status=doc_status,
+        knowledge_status=know_status,
         active_workflows=int(active_workflows),
         waiting_approval=int(waiting_approval),
         uncertain_side_effects=int(uncertain_side_effects),

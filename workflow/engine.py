@@ -70,6 +70,7 @@ class WorkflowEngine:
         observability=None,
         memory_service=None,
         document_service=None,
+        knowledge_service=None,
     ):
         self.state_manager = state_manager or StateManager(step_names=step_names)
         self.protected_steps = protected_steps
@@ -80,6 +81,7 @@ class WorkflowEngine:
         self.observability = observability
         self.memory_service = memory_service
         self.document_service = document_service
+        self.knowledge_service = knowledge_service
         self.last_workflow_id = None
         self.last_task_id = None
         self.last_approval_id = None
@@ -97,6 +99,14 @@ class WorkflowEngine:
         if self.document_service is None:
             raise RuntimeError("document_service_unavailable")
         return self.document_service.ingest(request, requesting_scope=requesting_scope)
+
+    def retrieve_knowledge_context(self, query, *, requesting_scope=None):
+        """Optional DI: hybrid knowledge/RAG context via KnowledgeService."""
+        if self.knowledge_service is None:
+            return None
+        return self.knowledge_service.retrieve_knowledge_context(
+            query, requesting_scope=requesting_scope
+        )
 
     def _obs_ctx(self, workflow_id: str = "", task_id: str = ""):
         obs = self.observability

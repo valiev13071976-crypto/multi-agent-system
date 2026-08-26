@@ -20,7 +20,7 @@ from agents.validators.consistency import VALIDATOR_VERSION as CONSISTENCY_VALID
 from agents.validators.structural import VALIDATOR_VERSION as STRUCTURAL_VALIDATOR_VERSION
 
 # Eval suite
-CORE_SUITE_VERSION = "1.4.0"
+CORE_SUITE_VERSION = "1.5.0"
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -147,4 +147,31 @@ def document_chunker_snapshot() -> dict:
 
     snap = chunker_policy_snapshot()
     snap["document_chunker_version"] = DOCUMENT_CHUNKER_VERSION
+    return snap
+
+
+def knowledge_policy_snapshot() -> dict:
+    from knowledge.models import KNOWLEDGE_POLICY_VERSION
+    from knowledge.write_policy import knowledge_policy_snapshot as snap_fn
+
+    snap = snap_fn()
+    snap["knowledge_policy_version"] = KNOWLEDGE_POLICY_VERSION
+    return snap
+
+
+def knowledge_retrieval_policy_snapshot() -> dict:
+    from knowledge.models import KNOWLEDGE_RETRIEVAL_VERSION
+    from knowledge.ranking import retrieval_policy_snapshot
+
+    snap = retrieval_policy_snapshot()
+    snap["knowledge_retrieval_version"] = KNOWLEDGE_RETRIEVAL_VERSION
+    return snap
+
+
+def knowledge_source_registry_snapshot() -> dict:
+    from knowledge.models import KNOWLEDGE_SOURCE_REGISTRY_VERSION
+    from knowledge.registry import source_registry_snapshot
+
+    snap = source_registry_snapshot()
+    snap["knowledge_source_registry_version"] = KNOWLEDGE_SOURCE_REGISTRY_VERSION
     return snap

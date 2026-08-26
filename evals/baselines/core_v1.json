@@ -1,8 +1,8 @@
 {
   "artifact_versions": {
-    "manifest_hash": "bb7c0e892d0e36018cb3ac6f36b89f586c7bded3b39dd894ca68c8c45929add7",
-    "suite_content_hash": "f85a5355aca112040821a6a50f683290591e9977fb7ec3de7779d2b04ab1bc0b",
-    "suite_version": "1.4.0"
+    "manifest_hash": "7f535b72332c8b54b78bb288299728cdd2280c185dda5f0b3c3a1d02f00e20e8",
+    "suite_content_hash": "67de4c488df617bbfc08ad29429492eac60bb15987ae7ba69abacf663c314b4f",
+    "suite_version": "1.5.0"
   },
   "baseline_id": "core_v1",
   "case_outcomes": {
@@ -122,6 +122,78 @@
     },
     "judge_offline_shape": {
       "critical": false,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_arbitrary_url_denied": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_citations_preserved": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_conflicts_returned_separately": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_cross_scope_denied": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_disabled_source_excluded": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_external_via_tool_gateway": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_no_secret_leakage": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_no_vector_db_required": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_ssrf_denied": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_stale_handling": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_untrusted_no_policy_override": {
+      "critical": true,
+      "passed": true,
+      "reason_codes": [],
+      "status": "passed"
+    },
+    "knowledge_unverified_not_auto_promoted": {
+      "critical": true,
       "passed": true,
       "reason_codes": [],
       "status": "passed"
@@ -365,6 +437,18 @@
     "finops_missing_reservation_blocks",
     "finops_release_restores_capacity",
     "finops_unknown_cost_not_zero",
+    "knowledge_arbitrary_url_denied",
+    "knowledge_citations_preserved",
+    "knowledge_conflicts_returned_separately",
+    "knowledge_cross_scope_denied",
+    "knowledge_disabled_source_excluded",
+    "knowledge_external_via_tool_gateway",
+    "knowledge_no_secret_leakage",
+    "knowledge_no_vector_db_required",
+    "knowledge_ssrf_denied",
+    "knowledge_stale_handling",
+    "knowledge_untrusted_no_policy_override",
+    "knowledge_unverified_not_auto_promoted",
     "memory_cross_scope_denied",
     "memory_deleted_not_retrievable",
     "memory_expired_not_retrievable",
@@ -399,13 +483,13 @@
   ],
   "reference_commit": "88b0d32b3701d7ceaafeffb91a592f06e7b406ae",
   "suite_id": "core",
-  "suite_version": "1.4.0",
+  "suite_version": "1.5.0",
   "summary": {
     "failed": 0,
     "pass_rate": 1.0,
-    "passed": 55,
+    "passed": 67,
     "skipped": 1,
     "status": "passed",
-    "total": 56
+    "total": 68
   }
 }

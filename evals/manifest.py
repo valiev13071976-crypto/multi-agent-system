@@ -20,6 +20,9 @@ from evals.versions import (
     document_chunker_snapshot,
     document_parser_registry_snapshot,
     document_policy_snapshot,
+    knowledge_policy_snapshot,
+    knowledge_retrieval_policy_snapshot,
+    knowledge_source_registry_snapshot,
     policy_snapshot,
     prompt_content_hash,
     routing_policy_snapshot,
@@ -213,6 +216,41 @@ def build_version_registry() -> VersionRegistry:
             artifact_id="document_chunker",
             version=DOCUMENT_CHUNKER_VERSION,
             content_hash=content_hash(doc_chunk),
+        )
+    )
+
+    # External knowledge / RAG (P15)
+    from knowledge.models import (
+        KNOWLEDGE_POLICY_VERSION,
+        KNOWLEDGE_RETRIEVAL_VERSION,
+        KNOWLEDGE_SOURCE_REGISTRY_VERSION,
+    )
+
+    know_pol = knowledge_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="knowledge_policy",
+            version=KNOWLEDGE_POLICY_VERSION,
+            content_hash=content_hash(know_pol),
+        )
+    )
+    know_ret = knowledge_retrieval_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="knowledge_retrieval_policy",
+            version=KNOWLEDGE_RETRIEVAL_VERSION,
+            content_hash=content_hash(know_ret),
+        )
+    )
+    know_reg = knowledge_source_registry_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="knowledge_source_registry",
+            version=KNOWLEDGE_SOURCE_REGISTRY_VERSION,
+            content_hash=content_hash(know_reg),
         )
     )
 
