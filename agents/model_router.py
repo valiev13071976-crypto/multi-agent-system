@@ -106,7 +106,11 @@ class ModelRouter:
         role_id: str,
         category: str | None = None,
         budget_constraints=None,
+        requirements=None,
     ) -> RoutingDecision:
+        # ``requirements`` is accepted for forward plumbing only (P0.1).
+        # Selection behaviour is intentionally unchanged in this patch.
+        _ = requirements
         if mode == "both":
             provider_ids = self.registry.available_provider_ids()
             provider_ids = self._apply_budget_constraints(provider_ids, budget_constraints)

@@ -1,5 +1,11 @@
 from dataclasses import dataclass
 import re
+from typing import Mapping
+
+from agents.routing_requirements import (
+    TaskRequirements,
+    derive_task_requirements,
+)
 
 
 CATEGORY_STRATEGY = "strategy"
@@ -118,6 +124,15 @@ class TaskClassification:
     role_id: str
     confidence: float
     reason: str
+    requirements: TaskRequirements | None = None
+
+    def __post_init__(self):
+        if self.requirements is None:
+            object.__setattr__(
+                self,
+                "requirements",
+                derive_task_requirements(category=self.category),
+            )
 
 
 def _normalize(user_request: str) -> str:
@@ -141,22 +156,39 @@ def _technical_hit(text: str) -> bool:
     )
 
 
-def _result(category: str, reason: str, confidence: float) -> TaskClassification:
+def _result(
+    category: str,
+    reason: str,
+    confidence: float,
+    *,
+    text: str = "",
+    metadata: Mapping | None = None,
+) -> TaskClassification:
     return TaskClassification(
         category=category,
         role_id=CATEGORY_TO_ROLE[category],
         confidence=confidence,
         reason=reason,
+        requirements=derive_task_requirements(
+            category=category,
+            text=text,
+            metadata=metadata,
+        ),
     )
 
 
 class TaskClassifier:
     """
     Deterministic offline task classifier.
-    Not wired into RouterV2 or ModelRouter.
+    Produces category/role plus associated TaskRequirements.
+    Wired into RouterV2 when role == "auto".
     """
 
-    def classify(self, user_request: str) -> TaskClassification:
+    def classify(
+        self,
+        user_request: str,
+        metadata: Mapping | None = None,
+    ) -> TaskClassification:
         text = _normalize(user_request)
 
         if _technical_hit(text):
@@ -164,6 +196,8 @@ class TaskClassifier:
                 CATEGORY_TECHNICAL,
                 REASON_TECHNICAL_ARTIFACT,
                 CONFIDENCE_STRONG,
+                text=text,
+                metadata=metadata,
             )
 
         critique_hits = _count_hits(text, CRITIQUE_PHRASES)
@@ -175,6 +209,8 @@ class TaskClassifier:
                 CATEGORY_CRITIQUE,
                 REASON_CRITIQUE_INTENT,
                 confidence,
+                text=text,
+                metadata=metadata,
             )
 
         trend_phrase_hits = _count_hits(text, TREND_PHRASES)
@@ -191,6 +227,8 @@ class TaskClassifier:
                 CATEGORY_TREND_ANALYSIS,
                 REASON_TREND_INTENT,
                 confidence,
+                text=text,
+                metadata=metadata,
             )
 
         research_hits = _count_hits(text, RESEARCH_PHRASES) + _count_hits(
@@ -204,6 +242,8 @@ class TaskClassifier:
                 CATEGORY_RESEARCH,
                 REASON_RESEARCH_INTENT,
                 confidence,
+                text=text,
+                metadata=metadata,
             )
 
         strategy_hits = _count_hits(text, STRATEGY_PHRASES) + _count_hits(
@@ -217,14 +257,21 @@ class TaskClassifier:
                 CATEGORY_STRATEGY,
                 REASON_STRATEGY_INTENT,
                 confidence,
+                text=text,
+                metadata=metadata,
             )
 
         return _result(
             CATEGORY_GENERAL,
             REASON_GENERAL_FALLBACK,
             CONFIDENCE_FALLBACK,
+            text=text,
+            metadata=metadata,
         )
 
 
-def classify_task(user_request: str) -> TaskClassification:
-    return TaskClassifier().classify(user_request)
+def classify_task(
+    user_request: str,
+    metadata: Mapping | None = None,
+) -> TaskClassification:
+    return TaskClassifier().classify(user_request, metadata=metadata)
