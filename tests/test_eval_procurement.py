@@ -30,7 +30,7 @@ PROCUREMENT_HANDLERS = (
 
 class EvalProcurementTests(unittest.TestCase):
     def test_core_suite_version(self):
-        self.assertEqual(CORE_SUITE_VERSION, "1.6.0")
+        self.assertEqual(CORE_SUITE_VERSION, "1.7.0")
 
     def test_procurement_core_handlers_pass(self):
         for name in PROCUREMENT_HANDLERS:

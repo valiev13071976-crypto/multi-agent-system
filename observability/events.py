@@ -118,6 +118,13 @@ EVENT_TYPES = frozenset(
         "procurement.rejected",
         "procurement.completed",
         "procurement.failed",
+        "procurement.external_search_started",
+        "procurement.external_search_completed",
+        "procurement.external_search_failed",
+        "procurement.catalog_read_started",
+        "procurement.catalog_read_completed",
+        "procurement.catalog_read_failed",
+        "procurement.rfq_draft_created",
     }
 )
 

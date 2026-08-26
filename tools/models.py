@@ -95,6 +95,12 @@ FORBIDDEN_DYNAMIC_KEYS = frozenset(
         "base_url",
         "endpoint_url",
         "import_path",
+        "headers",
+        "auth",
+        "authorization",
+        "timeout",
+        "method",
+        "raw_url",
     }
 )
 

@@ -129,6 +129,11 @@ class MetricsCollector:
     procurement_recommendations_total: int = 0
     procurement_approval_required_total: int = 0
     procurement_failures_total: int = 0
+    procurement_external_search_total: int = 0
+    procurement_external_search_failure_total: int = 0
+    procurement_catalog_read_total: int = 0
+    procurement_catalog_read_failure_total: int = 0
+    procurement_rfq_draft_total: int = 0
     # latency_ms sums + counts by name
     latency: dict[str, dict[str, float]] = field(
         default_factory=lambda: defaultdict(lambda: {"sum_ms": 0.0, "count": 0.0})
@@ -266,6 +271,11 @@ class MetricsCollector:
                 "procurement_recommendations_total": self.procurement_recommendations_total,
                 "procurement_approval_required_total": self.procurement_approval_required_total,
                 "procurement_failures_total": self.procurement_failures_total,
+                "procurement_external_search_total": self.procurement_external_search_total,
+                "procurement_external_search_failure_total": self.procurement_external_search_failure_total,
+                "procurement_catalog_read_total": self.procurement_catalog_read_total,
+                "procurement_catalog_read_failure_total": self.procurement_catalog_read_failure_total,
+                "procurement_rfq_draft_total": self.procurement_rfq_draft_total,
                 "latency": latency,
                 "by_label": by_label,
             }

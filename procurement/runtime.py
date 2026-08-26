@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 
 from procurement.access import ProcurementAccessPolicy
+from procurement.adapters.policy import ProcurementExternalResearchPolicy
+from procurement.adapters.registry import build_offline_procurement_gateway
 from procurement.comparator import SupplierComparator
 from procurement.discovery import SupplierDiscoveryService
 from procurement.errors import ProcurementError
@@ -31,6 +33,11 @@ def procurement_enabled(env: dict | None = None) -> bool:
     return raw in {"1", "true", "yes", "on"}
 
 
+def _env_bool(source: dict, key: str, default: bool = False) -> bool:
+    raw = str(source.get(key, "true" if default else "false")).strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
 def procurement_config(env: dict | None = None) -> dict:
     source = env if env is not None else os.environ
     return {
@@ -38,7 +45,28 @@ def procurement_config(env: dict | None = None) -> dict:
         "backend": str(source.get("PROCUREMENT_BACKEND", "memory") or "memory").strip().lower(),
         "db_path": str(source.get("PROCUREMENT_DB_PATH") or "").strip() or None,
         "minimum_valid_offers": int(source.get("PROCUREMENT_MIN_VALID_OFFERS", "2") or 2),
+        "external_search_enabled": _env_bool(source, "PROCUREMENT_EXTERNAL_SEARCH_ENABLED", False),
+        "external_max_queries": int(source.get("PROCUREMENT_EXTERNAL_MAX_QUERIES", "2") or 2),
+        "external_max_results": int(source.get("PROCUREMENT_EXTERNAL_MAX_RESULTS", "5") or 5),
+        "catalog_max_items": int(source.get("PROCUREMENT_CATALOG_MAX_ITEMS", "50") or 50),
+        "rfq_draft_max_chars": int(source.get("PROCUREMENT_RFQ_DRAFT_MAX_CHARS", "8000") or 8000),
+        "external_timeout_seconds": float(
+            source.get("PROCUREMENT_EXTERNAL_TIMEOUT_SECONDS", "10") or 10
+        ),
     }
+
+
+def build_external_research_policy(env: dict | None = None) -> ProcurementExternalResearchPolicy:
+    cfg = procurement_config(env)
+    return ProcurementExternalResearchPolicy(
+        enabled=cfg["external_search_enabled"],
+        max_queries=cfg["external_max_queries"],
+        max_results_per_query=cfg["external_max_results"],
+        max_total_results=max(cfg["external_max_results"] * 2, cfg["external_max_results"]),
+        catalog_max_items=cfg["catalog_max_items"],
+        rfq_draft_max_chars=cfg["rfq_draft_max_chars"],
+        timeout_seconds=cfg["external_timeout_seconds"],
+    )
 
 
 def build_procurement_store(
@@ -91,6 +119,9 @@ class ProcurementRuntime:
         recommendation_service: ProcurementRecommendationService,
         store=None,
         enabled: bool = True,
+        external_research_policy: ProcurementExternalResearchPolicy | None = None,
+        tool_gateway=None,
+        adapters: dict | None = None,
     ):
         self.service = service
         self.workflow = workflow
@@ -105,11 +136,13 @@ class ProcurementRuntime:
         self.recommendation_service = recommendation_service
         self.store = store
         self.enabled = bool(enabled)
+        self.external_research_policy = external_research_policy or ProcurementExternalResearchPolicy()
+        self.tool_gateway = tool_gateway
+        self.adapters = dict(adapters or {})
 
     def health(self) -> dict:
         ready = bool(getattr(self.store, "available", True)) if self.store is not None else True
         if self.store is None:
-            # in-memory
             ready = True
             backend = "memory"
             mode = "memory"
@@ -123,6 +156,25 @@ class ProcurementRuntime:
             status = "blocked"
         elif self.service.knowledge_service is None and self.service.document_service is None:
             status = "degraded"
+
+        ext_policy = self.external_research_policy
+        if not ext_policy.enabled:
+            external_research_status = "disabled"
+        else:
+            search = self.adapters.get("supplier_search")
+            if search is None or not getattr(search, "enabled", False):
+                external_research_status = "degraded"
+            elif getattr(search, "backend", None) is None:
+                external_research_status = "degraded"
+            else:
+                external_research_status = "healthy"
+            if (
+                getattr(self.service, "require_external_discovery", False)
+                and external_research_status != "healthy"
+            ):
+                external_research_status = "blocked"
+                status = "blocked"
+
         return {
             "procurement_status": status,
             "enabled": self.enabled,
@@ -130,6 +182,8 @@ class ProcurementRuntime:
             "persistence_backend": backend,
             "connection_mode": mode,
             "workflow_version": self.workflow.workflow_version,
+            "external_research_status": external_research_status,
+            "external_search_enabled": bool(ext_policy.enabled),
         }
 
     def close(self) -> None:
@@ -153,8 +207,9 @@ def build_procurement_runtime(
     observability=None,
     shared_connection=None,
     encryption: EncryptionService | None = None,
+    search_backend=None,
+    catalog_backend=None,
 ) -> ProcurementRuntime | None:
-    _ = tool_gateway
     cfg = procurement_config(env)
     if not cfg["enabled"]:
         return None
@@ -163,6 +218,18 @@ def build_procurement_runtime(
     scoring = ProcurementScoringPolicy()
     access = ProcurementAccessPolicy()
     validator = ProcurementValidator()
+    external_policy = build_external_research_policy(env)
+    adapters = {}
+    if tool_gateway is None:
+        _, tool_gateway, adapters = build_offline_procurement_gateway(
+            policy=external_policy,
+            search_backend=search_backend,
+            catalog_backend=catalog_backend,
+            observability=observability,
+        )
+    else:
+        adapters = dict(getattr(tool_gateway, "_procurement_adapters", {}) or {})
+
     blocked_reason = None
     store = None
     request_store = None
@@ -178,7 +245,6 @@ def build_procurement_runtime(
         )
     except ProcurementPersistenceUnavailableError as exc:
         if cfg["backend"] in {"sqlite", "durable"} or cfg["db_path"]:
-            # Configured durable backend must not silently fall back to memory.
             blocked_reason = exc.reason
             request_store = InMemoryRequestStore()
             supplier_repo = InMemorySupplierRepository()
@@ -239,6 +305,8 @@ def build_procurement_runtime(
         autonomy_gate=autonomy_gate,
         hitl_service=hitl_service,
         observability=observability,
+        tool_gateway=tool_gateway,
+        external_research_policy=external_policy,
         enabled=True,
     )
     if blocked_reason:
@@ -258,4 +326,7 @@ def build_procurement_runtime(
         recommendation_service=recommendation_service,
         store=store,
         enabled=True,
+        external_research_policy=external_policy,
+        tool_gateway=tool_gateway,
+        adapters=adapters,
     )

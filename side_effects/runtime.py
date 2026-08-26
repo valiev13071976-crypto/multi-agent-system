@@ -364,6 +364,7 @@ def build_tool_gateway(
     hitl,
     github_enabled: bool = False,
     observability: ObservabilityRuntime | None = None,
+    env: dict | None = None,
 ) -> tuple[ToolRegistry, ToolGateway]:
     """Register built-in tools, optionally GitHub write tool, then freeze."""
 
@@ -403,6 +404,16 @@ def build_tool_gateway(
         tool_registry.register(
             github_issue_labels_descriptor(enabled=False), adapter=None
         )
+    # P17 procurement adapters (offline fakes by default; external search disabled)
+    try:
+        from procurement.adapters.registry import register_procurement_adapters
+        from procurement.runtime import build_external_research_policy
+
+        policy = build_external_research_policy(env)
+        adapters = register_procurement_adapters(tool_registry, policy=policy)
+        gateway._procurement_adapters = adapters  # noqa: SLF001
+    except Exception:
+        gateway._procurement_adapters = {}
     tool_registry.freeze()
     gateway.side_effect_executor = executor
     gateway.gate = gate
@@ -447,6 +458,7 @@ def _finalize_runtime(
         if hasattr(registry, "get")
         else False,
         observability=obs,
+        env=env,
     )
     recovery = None
     from recovery.runtime import (

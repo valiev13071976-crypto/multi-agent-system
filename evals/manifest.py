@@ -25,6 +25,9 @@ from evals.versions import (
     knowledge_source_registry_snapshot,
     procurement_policy_snapshot,
     procurement_scoring_snapshot,
+    procurement_adapter_schema_snapshot,
+    procurement_external_research_policy_snapshot,
+    procurement_rfq_draft_snapshot,
     policy_snapshot,
     prompt_content_hash,
     routing_policy_snapshot,
@@ -306,6 +309,40 @@ def build_version_registry() -> VersionRegistry:
                     ],
                 }
             ),
+        )
+    )
+
+    from procurement.adapters.models import (
+        PROCUREMENT_ADAPTER_SCHEMA_VERSION,
+        PROCUREMENT_EXTERNAL_RESEARCH_POLICY_VERSION,
+        PROCUREMENT_RFQ_DRAFT_VERSION,
+    )
+
+    proc_adapter = procurement_adapter_schema_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="tool_schema",
+            artifact_id="procurement_adapter_schema",
+            version=PROCUREMENT_ADAPTER_SCHEMA_VERSION,
+            content_hash=content_hash(proc_adapter),
+        )
+    )
+    proc_ext = procurement_external_research_policy_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="policy",
+            artifact_id="procurement_external_research_policy",
+            version=PROCUREMENT_EXTERNAL_RESEARCH_POLICY_VERSION,
+            content_hash=content_hash(proc_ext),
+        )
+    )
+    proc_rfq = procurement_rfq_draft_snapshot()
+    reg.register(
+        ArtifactVersion(
+            artifact_type="tool_schema",
+            artifact_id="procurement_rfq_draft",
+            version=PROCUREMENT_RFQ_DRAFT_VERSION,
+            content_hash=content_hash(proc_rfq),
         )
     )
 

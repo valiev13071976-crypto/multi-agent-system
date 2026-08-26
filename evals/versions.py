@@ -20,7 +20,7 @@ from agents.validators.consistency import VALIDATOR_VERSION as CONSISTENCY_VALID
 from agents.validators.structural import VALIDATOR_VERSION as STRUCTURAL_VALIDATOR_VERSION
 
 # Eval suite
-CORE_SUITE_VERSION = "1.6.0"
+CORE_SUITE_VERSION = "1.7.0"
 
 
 def normalize_prompt_text(text: str) -> str:
@@ -196,3 +196,32 @@ def procurement_scoring_snapshot() -> dict:
     from procurement.policy import ProcurementScoringPolicy
 
     return ProcurementScoringPolicy().as_dict()
+
+
+def procurement_adapter_schema_snapshot() -> dict:
+    from procurement.adapters.descriptors import procurement_adapter_schema_snapshot as snap_fn
+    from procurement.adapters.models import PROCUREMENT_ADAPTER_SCHEMA_VERSION
+
+    snap = snap_fn()
+    snap["procurement_adapter_schema_version"] = PROCUREMENT_ADAPTER_SCHEMA_VERSION
+    return snap
+
+
+def procurement_external_research_policy_snapshot() -> dict:
+    from procurement.adapters.models import PROCUREMENT_EXTERNAL_RESEARCH_POLICY_VERSION
+    from procurement.adapters.policy import external_research_policy_snapshot
+
+    snap = external_research_policy_snapshot()
+    snap["procurement_external_research_policy_version"] = PROCUREMENT_EXTERNAL_RESEARCH_POLICY_VERSION
+    return snap
+
+
+def procurement_rfq_draft_snapshot() -> dict:
+    from procurement.adapters.models import PROCUREMENT_RFQ_DRAFT_VERSION
+
+    return {
+        "procurement_rfq_draft_version": PROCUREMENT_RFQ_DRAFT_VERSION,
+        "requires_human_send": True,
+        "external_send": False,
+        "side_effects": 0,
+    }
