@@ -19,6 +19,7 @@ ERROR_CODES = {
     "ProviderNotConfiguredError": "provider_not_configured",
     "NoProvidersAvailableError": "no_providers_available",
     "NoCapableProviderError": "no_capable_provider",
+    "ProviderCapabilityMismatchError": "provider_capability_mismatch",
     "FinOpsBudgetDeniedError": "finops_budget_denied",
 }
 

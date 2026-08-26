@@ -20,6 +20,16 @@ PROVIDER_ENV = {
     "mistral": ("MISTRAL_API_KEY", "MISTRAL_DEFAULT_MODEL"),
 }
 
+PROVIDER_SUPPORT_PREFIX = {
+    "openai": "OPENAI",
+    "anthropic": "ANTHROPIC",
+    "gemini": "GEMINI",
+    "grok": "XAI",
+    "deepseek": "DEEPSEEK",
+    "moonshot": "MOONSHOT",
+    "mistral": "MISTRAL",
+}
+
 
 def env_for(*providers):
     overrides = {
@@ -35,6 +45,11 @@ def env_for(*providers):
             overrides["MOONSHOT_ENABLED"] = "true"
         if provider == "mistral":
             overrides["MISTRAL_ENABLED"] = "true"
+        # Test fixtures enable profile capability flags so P0.2 filtering does not
+        # 503 every auto route; individual tests may override to false.
+        prefix = PROVIDER_SUPPORT_PREFIX[provider]
+        overrides[f"{prefix}_SUPPORTS_CODING"] = "true"
+        overrides[f"{prefix}_SUPPORTS_REASONING"] = "true"
     return overrides
 
 

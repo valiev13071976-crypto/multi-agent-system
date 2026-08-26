@@ -156,6 +156,15 @@ class RouterRequirementsPlumbingTests(unittest.IsolatedAsyncioTestCase):
             router = RouterV2()
             router.provider_registry = registry
             router.model_router = ModelRouter(registry)
+            # Ensure explicit openai satisfies coding requirement from technical classify.
+            from agents.model_profile import build_model_profile
+
+            registry._profiles["openai"] = build_model_profile(
+                "openai",
+                "gpt-test",
+                task_categories_raw="general,technical",
+                coding_raw="true",
+            )
             router.task_classifier = TaskClassifier()
             router.pipeline = mock.Mock()
             router.pipeline.expert_manager = mock.Mock()
