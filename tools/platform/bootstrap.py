@@ -12,6 +12,14 @@ from tools.platform.descriptors import (
     browser_descriptor,
     calendar_descriptor,
     crm_descriptor,
+    data_aggregate_descriptor,
+    data_compare_descriptor,
+    data_generate_excel_descriptor,
+    data_match_descriptor,
+    data_normalize_descriptor,
+    data_profile_descriptor,
+    data_reconcile_descriptor,
+    data_search_descriptor,
     document_compare_descriptor,
     document_convert_descriptor,
     document_detect_descriptor,
@@ -45,6 +53,7 @@ from tools.platform.scaffold import (
     TerminalScaffoldAdapter,
 )
 from tools.registry import ToolRegistry
+from data_intel.tools import DataIntelToolAdapter
 
 
 def _workspace_roots(env: dict | None = None) -> tuple[str, ...]:
@@ -69,6 +78,7 @@ def register_platform_tools(
     env: dict | None = None,
     document_service=None,
     document_intelligence=None,
+    data_intelligence=None,
     credential_store: IntegrationCredentialStore | None = None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
@@ -80,6 +90,8 @@ def register_platform_tools(
     )
     doc = DocumentToolAdapter(document_service, intelligence=document_intelligence)
     doc_enabled = document_service is not None or document_intelligence is not None
+    data = DataIntelToolAdapter(data_intelligence)
+    data_enabled = data_intelligence is not None
     terminal_enabled = (env or os.environ).get("TOOL_TERMINAL_ENABLED", "").lower() in {
         "1",
         "true",
@@ -110,6 +122,14 @@ def register_platform_tools(
         (document_compare_descriptor(enabled=doc_enabled), doc),
         (document_generate_descriptor(enabled=doc_enabled), doc),
         (document_convert_descriptor(enabled=doc_enabled), doc),
+        (data_profile_descriptor(enabled=data_enabled), data),
+        (data_normalize_descriptor(enabled=data_enabled), data),
+        (data_search_descriptor(enabled=data_enabled), data),
+        (data_match_descriptor(enabled=data_enabled), data),
+        (data_compare_descriptor(enabled=data_enabled), data),
+        (data_reconcile_descriptor(enabled=data_enabled), data),
+        (data_aggregate_descriptor(enabled=data_enabled), data),
+        (data_generate_excel_descriptor(enabled=data_enabled), data),
         (mcp_descriptor(enabled=False), mcp),
         (cms_descriptor(enabled=False), CmsScaffoldAdapter(adapter_id="cms")),
         (bitrix_descriptor(enabled=bitrix_enabled), bitrix),

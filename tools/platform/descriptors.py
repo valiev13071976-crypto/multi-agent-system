@@ -46,6 +46,14 @@ TOOL_DOC_STRUCTURED = "document.structured_extract"
 TOOL_DOC_COMPARE = "document.compare"
 TOOL_DOC_GENERATE = "document.generate"
 TOOL_DOC_CONVERT = "document.convert"
+TOOL_DATA_PROFILE = "data.profile"
+TOOL_DATA_NORMALIZE = "data.normalize"
+TOOL_DATA_SEARCH = "data.search"
+TOOL_DATA_MATCH = "data.match"
+TOOL_DATA_COMPARE = "data.compare"
+TOOL_DATA_RECONCILE = "data.reconcile"
+TOOL_DATA_AGGREGATE = "data.aggregate"
+TOOL_DATA_GENERATE_EXCEL = "data.generate_excel"
 TOOL_MCP = "mcp.invoke"
 TOOL_CMS = "cms.product"
 TOOL_BITRIX = "bitrix.catalog"
@@ -337,6 +345,116 @@ def document_convert_descriptor(*, enabled: bool = True) -> ToolDescriptor:
         operations=("convert",),
         enabled=enabled,
         timeout=60.0,
+    )
+
+
+def data_profile_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_PROFILE,
+        name="Data Profile",
+        description="Profile dataset schema, roles, and types",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("profile",),
+        enabled=enabled,
+        timeout=30.0,
+    )
+
+
+def data_normalize_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_NORMALIZE,
+        name="Data Normalize",
+        description="Normalize and clean a tenant-scoped dataset",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("normalize",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def data_search_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_SEARCH,
+        name="Data Search",
+        description="Search dataset rows by INN/company/SKU/EAN and filters",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("search",),
+        enabled=enabled,
+        timeout=30.0,
+    )
+
+
+def data_match_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_MATCH,
+        name="Data Match",
+        description="Match counterparties or products with conflict rules",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("match",),
+        enabled=enabled,
+    )
+
+
+def data_compare_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_COMPARE,
+        name="Data Compare",
+        description="Compare supplier price lists",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("compare",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def data_reconcile_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_RECONCILE,
+        name="Data Reconcile",
+        description="Reconcile payments, stock, or VAT amounts",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("reconcile",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def data_aggregate_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_AGGREGATE,
+        name="Data Aggregate",
+        description="Grouped aggregations over dataset rows",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("aggregate",),
+        enabled=enabled,
+    )
+
+
+def data_generate_excel_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DATA_GENERATE_EXCEL,
+        name="Data Generate Excel",
+        description="Generate finished searchable XLSX workbook",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("generate_excel",),
+        enabled=enabled,
+        timeout=120.0,
     )
 
 
