@@ -31,15 +31,18 @@ from agents.role_registry import (
 )
 from agents.context_manager import ContextManager
 from security.api_auth import (
+    PublicRateLimitMiddleware,
     configure_security,
     get_audit_log,
     get_resource_authorizer,
     get_security_context,
 )
 from security.errors import ResourceNotFoundError, UnauthorizedError
+from security.hitl_auth import HitlActionPayload, HitlHttpAuthorizer
 from security.identity import RequestSecurityContext
 from security.rbac import (
     PERM_ANALYZE_EXECUTE,
+    PERM_HITL_APPROVE,
     PERM_WORKFLOW_CANCEL,
     PERM_WORKFLOW_CREATE,
     PERM_WORKFLOW_READ,
@@ -153,6 +156,15 @@ class WorkflowStatusResponse(BaseModel):
     queue_task_id: str | None = None
 
 
+class ApprovalActionRequest(BaseModel):
+    """Backward-compat only — identity is taken from RequestSecurityContext."""
+
+    approver_id: str | None = None
+    approver_role: str | None = None
+    tenant_id: str | None = None
+    expected_version: int | None = None
+
+
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     """Read-only repo probe if GITHUB_WRITE_PROBE_ON_STARTUP=true. No writes.
@@ -185,6 +197,9 @@ app = FastAPI(
 )
 
 app.add_middleware(RequestSizeLimitMiddleware)
+app.add_middleware(PublicRateLimitMiddleware)
+
+_hitl_http = HitlHttpAuthorizer(resource_authorizer=get_resource_authorizer())
 
 _origins = cors_allow_origins()
 if _origins:
@@ -480,6 +495,94 @@ async def cancel_workflow(
             status_code=404,
             detail={"error": "workflow_not_found", "message": redact(str(exc))},
         )
+
+
+@app.post("/api/workflows/{workflow_id}/approvals/{approval_id}/approve")
+async def approve_workflow_hitl(
+    workflow_id: str,
+    approval_id: str,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+    body: ApprovalActionRequest | None = None,
+):
+    hitl = getattr(side_effect_runtime, "hitl_service", None)
+    if hitl is None or workflow_runtime is None:
+        raise HTTPException(status_code=503, detail={"error": "hitl_unavailable"})
+    try:
+        state = router.workflow_engine.state_manager.get(workflow_id)
+        payload = HitlActionPayload(
+            approver_id=body.approver_id if body else None,
+            approver_role=body.approver_role if body else None,
+            tenant_id=body.tenant_id if body else None,
+            expected_version=body.expected_version if body else None,
+        )
+        record = _hitl_http.approve(
+            ctx,
+            approval_id=approval_id,
+            workflow_id=workflow_id,
+            hitl=hitl,
+            workflow_state=state,
+            payload=payload,
+        )
+        get_audit_log().record(
+            "hitl.approved",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            resource_ref=approval_id,
+            outcome="ok",
+        )
+        return {
+            "approval_id": record.approval_id,
+            "workflow_id": record.workflow_id,
+            "status": record.status,
+        }
+    except ResourceNotFoundError:
+        raise HTTPException(status_code=404, detail={"error": "approval_not_found"})
+    except UnauthorizedError as exc:
+        raise HTTPException(status_code=403, detail={"error": getattr(exc, "error_code", "unauthorized")})
+
+
+@app.post("/api/workflows/{workflow_id}/approvals/{approval_id}/reject")
+async def reject_workflow_hitl(
+    workflow_id: str,
+    approval_id: str,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+    body: ApprovalActionRequest | None = None,
+):
+    hitl = getattr(side_effect_runtime, "hitl_service", None)
+    if hitl is None or workflow_runtime is None:
+        raise HTTPException(status_code=503, detail={"error": "hitl_unavailable"})
+    try:
+        state = router.workflow_engine.state_manager.get(workflow_id)
+        payload = HitlActionPayload(
+            approver_id=body.approver_id if body else None,
+            approver_role=body.approver_role if body else None,
+            tenant_id=body.tenant_id if body else None,
+            expected_version=body.expected_version if body else None,
+        )
+        record = _hitl_http.reject(
+            ctx,
+            approval_id=approval_id,
+            workflow_id=workflow_id,
+            hitl=hitl,
+            workflow_state=state,
+            payload=payload,
+        )
+        get_audit_log().record(
+            "hitl.rejected",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            resource_ref=approval_id,
+            outcome="ok",
+        )
+        return {
+            "approval_id": record.approval_id,
+            "workflow_id": record.workflow_id,
+            "status": record.status,
+        }
+    except ResourceNotFoundError:
+        raise HTTPException(status_code=404, detail={"error": "approval_not_found"})
+    except UnauthorizedError as exc:
+        raise HTTPException(status_code=403, detail={"error": getattr(exc, "error_code", "unauthorized")})
 
 
 @app.post("/api/workflows/{workflow_id}/resume")

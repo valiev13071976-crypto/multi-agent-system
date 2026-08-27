@@ -228,7 +228,7 @@ class DocumentService:
         )
 
     def get(self, document_id: str, *, requesting_scope: MemoryScope) -> DocumentRecord | None:
-        row = self.store.get(document_id)
+        row = self.store.get(document_id, scope=requesting_scope)
         if row is None or row.status == STATUS_DELETED:
             return None
         try:
@@ -238,13 +238,13 @@ class DocumentService:
         return row
 
     def delete(self, document_id: str, *, requesting_scope: MemoryScope, reason: str = "delete") -> DocumentRecord:
-        row = self.store.get(document_id)
+        row = self.store.get(document_id, scope=requesting_scope)
         if row is None:
             raise DocumentError("document_not_found")
         if row.status == STATUS_DELETED:
             return row
         self._require_access(requesting_scope, row.scope, OP_DELETE, row.document_type)
-        deleted = self.store.delete(document_id, expected_version=row.version)
+        deleted = self.store.delete(document_id, expected_version=row.version, scope=requesting_scope)
         self._parsed_cache.pop(document_id, None)
         self._emit("document.deleted", status="deleted", metadata={"reason": reason, "document_type": row.document_type})
         return deleted
@@ -254,7 +254,7 @@ class DocumentService:
         if row is None:
             return ()
         self.access.require(requesting=requesting_scope, target=row.scope, operation=OP_EXTRACT)
-        return self.store.list_chunks(document_id)
+        return self.store.list_chunks(document_id, scope=requesting_scope)
 
     def get_sheet(self, document_id: str, sheet_name: str, *, requesting_scope: MemoryScope):
         parsed = self._require_parsed(document_id, requesting_scope)
@@ -320,7 +320,7 @@ class DocumentService:
         q = request.query.lower().strip()
         results = []
         for doc in docs:
-            for chunk in self.store.list_chunks(doc.document_id):
+            for chunk in self.store.list_chunks(doc.document_id, scope=request.scope):
                 text = chunk.content_safe or ""
                 if chunk.encrypted_content and self.encryption is not None and not text:
                     try:
@@ -430,7 +430,7 @@ class DocumentService:
         return saved
 
     def _promote_chunks_to_memory(self, document_id: str, *, requesting_scope: MemoryScope) -> None:
-        chunks = self.store.list_chunks(document_id)
+        chunks = self.store.list_chunks(document_id, scope=requesting_scope)
         for ch in chunks:
             text = ch.content_safe
             if not text and ch.encrypted_content and self.encryption is not None:

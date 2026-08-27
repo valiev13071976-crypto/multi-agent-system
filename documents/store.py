@@ -24,13 +24,13 @@ class DocumentStore:
     ) -> DocumentRecord:
         raise NotImplementedError
 
-    def get(self, document_id: str) -> DocumentRecord | None:
+    def get(self, document_id: str, *, scope: MemoryScope | None = None) -> DocumentRecord | None:
         raise NotImplementedError
 
     def update(self, record: DocumentRecord, *, expected_version: int) -> DocumentRecord:
         raise NotImplementedError
 
-    def delete(self, document_id: str, *, expected_version: int | None = None) -> DocumentRecord:
+    def delete(self, document_id: str, *, expected_version: int | None = None, scope: MemoryScope | None = None) -> DocumentRecord:
         raise NotImplementedError
 
     def find_by_hash(self, scope: MemoryScope, content_hash: str) -> DocumentRecord | None:
@@ -42,7 +42,7 @@ class DocumentStore:
     def save_chunks(self, document_id: str, chunks: tuple[DocumentChunkRecord, ...]) -> None:
         raise NotImplementedError
 
-    def list_chunks(self, document_id: str) -> tuple[DocumentChunkRecord, ...]:
+    def list_chunks(self, document_id: str, *, scope: MemoryScope | None = None) -> tuple[DocumentChunkRecord, ...]:
         raise NotImplementedError
 
     def get_provenance(self, document_id: str) -> DocumentProvenance | None:
@@ -105,9 +105,14 @@ class InMemoryDocumentStore(DocumentStore):
             self._chunks.setdefault(record.document_id, [])
             return record
 
-    def get(self, document_id: str):
+    def get(self, document_id: str, *, scope: MemoryScope | None = None):
         with self._lock:
-            return self._docs.get(document_id)
+            row = self._docs.get(document_id)
+            if row is None:
+                return None
+            if scope is not None and row.scope.key() != scope.key():
+                return None
+            return row
 
     def update(self, record, *, expected_version: int):
         if not self.available:
@@ -120,8 +125,8 @@ class InMemoryDocumentStore(DocumentStore):
             self._docs[updated.document_id] = updated
             return updated
 
-    def delete(self, document_id: str, *, expected_version: int | None = None):
-        current = self.get(document_id)
+    def delete(self, document_id: str, *, expected_version: int | None = None, scope: MemoryScope | None = None):
+        current = self.get(document_id, scope=scope)
         if current is None:
             raise DocumentVersionConflict("document_not_found")
         if expected_version is not None and current.version != expected_version:
@@ -166,8 +171,12 @@ class InMemoryDocumentStore(DocumentStore):
         with self._lock:
             self._chunks[document_id] = list(chunks)
 
-    def list_chunks(self, document_id: str):
+    def list_chunks(self, document_id: str, *, scope: MemoryScope | None = None):
         with self._lock:
+            if scope is not None:
+                doc = self._docs.get(document_id)
+                if doc is None or doc.scope.key() != scope.key():
+                    return ()
             return tuple(self._chunks.get(document_id, ()))
 
     def get_provenance(self, document_id: str):

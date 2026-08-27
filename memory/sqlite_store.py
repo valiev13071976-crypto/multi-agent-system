@@ -21,6 +21,8 @@ from memory.models import (
     utc_now,
 )
 from memory.store import MemoryPersistenceUnavailableError, MemoryStore, MemoryVersionConflict
+from security.config import DEFAULT_LEGACY_TENANT
+from security.tenant import scope_tenant_ref
 
 
 DDL = f"""
@@ -54,10 +56,10 @@ CREATE TABLE IF NOT EXISTS memory_records (
     metadata_json TEXT NOT NULL DEFAULT '{{}}'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_active_dedup
-ON memory_records(scope_type, scope_id, memory_type, content_hash)
+ON memory_records(tenant_ref, scope_type, scope_id, memory_type, content_hash)
 WHERE status = 'active';
 CREATE INDEX IF NOT EXISTS idx_memory_scope
-ON memory_records(scope_type, scope_id, status);
+ON memory_records(tenant_ref, scope_type, scope_id, status);
 CREATE TABLE IF NOT EXISTS memory_provenance (
     memory_id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL,
@@ -108,6 +110,33 @@ def _dt_from_db(value: str | None) -> datetime | None:
 
 def _json_dumps(value) -> str:
     return json.dumps(sanitize_metadata(value or {}), separators=(",", ":"), sort_keys=True)
+
+
+def _tenant_key(scope: MemoryScope) -> str:
+    return scope_tenant_ref(scope.tenant_ref)
+
+
+def _migrate_tenant_scope(conn: sqlite3.Connection) -> None:
+    """Backfill legacy rows and rebuild tenant-aware indexes."""
+    conn.execute(
+        """
+        UPDATE memory_records
+        SET tenant_ref=?
+        WHERE tenant_ref IS NULL OR TRIM(tenant_ref)='' OR tenant_ref='_'
+        """,
+        (DEFAULT_LEGACY_TENANT,),
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_memory_active_dedup")
+    conn.execute("DROP INDEX IF EXISTS idx_memory_scope")
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_active_dedup
+        ON memory_records(tenant_ref, scope_type, scope_id, memory_type, content_hash)
+        WHERE status = 'active';
+        CREATE INDEX IF NOT EXISTS idx_memory_scope
+        ON memory_records(tenant_ref, scope_type, scope_id, status);
+        """
+    )
 
 
 class SqliteMemoryStore(MemoryStore):
@@ -171,10 +200,13 @@ class SqliteMemoryStore(MemoryStore):
                 row = conn.execute(
                     "SELECT value FROM memory_schema_meta WHERE key='schema_version'"
                 ).fetchone()
-                if row is not None and int(row["value"]) > MEMORY_SCHEMA_VERSION:
+                current = int(row["value"]) if row is not None else 1
+                if current > MEMORY_SCHEMA_VERSION:
                     raise MemoryPersistenceUnavailableError(
                         "memory_schema_version_unsupported"
                     )
+                if current < 2:
+                    _migrate_tenant_scope(conn)
                 conn.execute(
                     "INSERT OR REPLACE INTO memory_schema_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(MEMORY_SCHEMA_VERSION)),
@@ -232,7 +264,7 @@ class SqliteMemoryStore(MemoryStore):
                         record.scope.workspace_id,
                         record.scope.project_id,
                         record.scope.actor_ref,
-                        record.scope.tenant_ref,
+                        _tenant_key(record.scope),
                         record.title,
                         record.content_safe,
                         record.encrypted_content,
@@ -300,11 +332,20 @@ class SqliteMemoryStore(MemoryStore):
                     pass
                 raise MemoryPersistenceUnavailableError() from exc
 
-    def get(self, memory_id: str) -> MemoryRecord | None:
+    def get(self, memory_id: str, *, scope: MemoryScope | None = None) -> MemoryRecord | None:
         with self._lock:
-            row = self._connect().execute(
-                "SELECT * FROM memory_records WHERE memory_id=?", (memory_id,)
-            ).fetchone()
+            if scope is not None:
+                row = self._connect().execute(
+                    """
+                    SELECT * FROM memory_records
+                    WHERE memory_id=? AND tenant_ref=? AND scope_type=? AND scope_id=?
+                    """,
+                    (memory_id, _tenant_key(scope), scope.scope_type, scope.scope_id),
+                ).fetchone()
+            else:
+                row = self._connect().execute(
+                    "SELECT * FROM memory_records WHERE memory_id=?", (memory_id,)
+                ).fetchone()
             if row is None:
                 return None
             return self._row_to_record(row)
@@ -349,8 +390,8 @@ class SqliteMemoryStore(MemoryStore):
             assert updated is not None
             return updated
 
-    def delete(self, memory_id: str, *, expected_version: int | None = None) -> MemoryRecord:
-        current = self.get(memory_id)
+    def delete(self, memory_id: str, *, expected_version: int | None = None, scope: MemoryScope | None = None) -> MemoryRecord:
+        current = self.get(memory_id, scope=scope)
         if current is None:
             raise MemoryVersionConflict("memory_not_found")
         if expected_version is not None and current.version != expected_version:
@@ -380,54 +421,57 @@ class SqliteMemoryStore(MemoryStore):
     def list_by_scope(self, scope: MemoryScope, *, statuses: tuple[str, ...] | None = None) -> tuple[MemoryRecord, ...]:
         allowed = statuses or (STATUS_ACTIVE,)
         placeholders = ",".join("?" for _ in allowed)
+        tenant = _tenant_key(scope)
         with self._lock:
             rows = self._connect().execute(
                 f"""
                 SELECT * FROM memory_records
-                WHERE scope_type=? AND scope_id=? AND status IN ({placeholders})
+                WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND status IN ({placeholders})
                 ORDER BY memory_id
                 """,
-                (scope.scope_type, scope.scope_id, *allowed),
+                (tenant, scope.scope_type, scope.scope_id, *allowed),
             ).fetchall()
             return tuple(self._row_to_record(r) for r in rows)
 
     def find_by_hash(self, scope: MemoryScope, memory_type: str, content_hash: str) -> MemoryRecord | None:
+        tenant = _tenant_key(scope)
         with self._lock:
             row = self._connect().execute(
                 """
                 SELECT * FROM memory_records
-                WHERE scope_type=? AND scope_id=? AND memory_type=? AND content_hash=?
+                WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND memory_type=? AND content_hash=?
                   AND status='active'
                 LIMIT 1
                 """,
-                (scope.scope_type, scope.scope_id, memory_type, content_hash),
+                (tenant, scope.scope_type, scope.scope_id, memory_type, content_hash),
             ).fetchone()
             return self._row_to_record(row) if row else None
 
     def find_active(self, scope: MemoryScope, memory_type: str | None = None) -> tuple[MemoryRecord, ...]:
+        tenant = _tenant_key(scope)
         with self._lock:
             if memory_type:
                 rows = self._connect().execute(
                     """
                     SELECT * FROM memory_records
-                    WHERE scope_type=? AND scope_id=? AND status='active' AND memory_type=?
+                    WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND status='active' AND memory_type=?
                     ORDER BY memory_id
                     """,
-                    (scope.scope_type, scope.scope_id, memory_type),
+                    (tenant, scope.scope_type, scope.scope_id, memory_type),
                 ).fetchall()
             else:
                 rows = self._connect().execute(
                     """
                     SELECT * FROM memory_records
-                    WHERE scope_type=? AND scope_id=? AND status='active'
+                    WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND status='active'
                     ORDER BY memory_id
                     """,
-                    (scope.scope_type, scope.scope_id),
+                    (tenant, scope.scope_type, scope.scope_id),
                 ).fetchall()
             return tuple(self._row_to_record(r) for r in rows)
 
-    def expire(self, memory_id: str, *, now: datetime | None = None) -> MemoryRecord:
-        current = self.get(memory_id)
+    def expire(self, memory_id: str, *, now: datetime | None = None, scope: MemoryScope | None = None) -> MemoryRecord:
+        current = self.get(memory_id, scope=scope)
         if current is None:
             raise MemoryVersionConflict("memory_not_found")
         from memory.store import _clone
@@ -556,6 +600,7 @@ class SqliteMemoryStore(MemoryStore):
         if not tokens:
             return ()
         safe = " ".join('"' + t.replace('"', "") + '"' for t in tokens[:20])
+        tenant = _tenant_key(scope)
         with self._lock:
             try:
                 rows = self._connect().execute(
@@ -563,10 +608,10 @@ class SqliteMemoryStore(MemoryStore):
                     SELECT f.memory_id FROM memory_fts f
                     JOIN memory_records r ON r.memory_id = f.memory_id
                     WHERE memory_fts MATCH ?
-                      AND r.scope_type=? AND r.scope_id=? AND r.status='active'
+                      AND r.tenant_ref=? AND r.scope_type=? AND r.scope_id=? AND r.status='active'
                     LIMIT ?
                     """,
-                    (safe, scope.scope_type, scope.scope_id, int(limit)),
+                    (safe, tenant, scope.scope_type, scope.scope_id, int(limit)),
                 ).fetchall()
                 return tuple(r["memory_id"] for r in rows)
             except sqlite3.Error:

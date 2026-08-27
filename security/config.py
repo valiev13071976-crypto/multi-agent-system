@@ -54,6 +54,11 @@ def rate_limit_unauthenticated_per_minute(env: dict | None = None) -> int:
     return max(1, int(panda_env(env).get("SECURITY_RATE_LIMIT_IP_PER_MIN") or "30"))
 
 
+def rate_limit_health_per_minute(env: dict | None = None) -> int:
+    """Separate generous limit for load-balancer / Railway health probes."""
+    return max(1, int(panda_env(env).get("SECURITY_RATE_LIMIT_HEALTH_PER_MIN") or "300"))
+
+
 def cors_allow_origins(env: dict | None = None) -> tuple[str, ...]:
     raw = (panda_env(env).get("SECURITY_CORS_ORIGINS") or "").strip()
     if not raw:

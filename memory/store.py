@@ -33,13 +33,13 @@ class MemoryStore:
     def create(self, record: MemoryRecord, provenance: MemoryProvenance, tags: tuple[str, ...] = ()) -> MemoryRecord:
         raise NotImplementedError
 
-    def get(self, memory_id: str) -> MemoryRecord | None:
+    def get(self, memory_id: str, *, scope: MemoryScope | None = None) -> MemoryRecord | None:
         raise NotImplementedError
 
     def update(self, record: MemoryRecord, *, expected_version: int) -> MemoryRecord:
         raise NotImplementedError
 
-    def delete(self, memory_id: str, *, expected_version: int | None = None) -> MemoryRecord:
+    def delete(self, memory_id: str, *, expected_version: int | None = None, scope: MemoryScope | None = None) -> MemoryRecord:
         raise NotImplementedError
 
     def list_by_scope(self, scope: MemoryScope, *, statuses: tuple[str, ...] | None = None) -> tuple[MemoryRecord, ...]:
@@ -51,7 +51,7 @@ class MemoryStore:
     def find_active(self, scope: MemoryScope, memory_type: str | None = None) -> tuple[MemoryRecord, ...]:
         raise NotImplementedError
 
-    def expire(self, memory_id: str, *, now: datetime | None = None) -> MemoryRecord:
+    def expire(self, memory_id: str, *, now: datetime | None = None, scope: MemoryScope | None = None) -> MemoryRecord:
         raise NotImplementedError
 
     def link(self, link: MemoryLink) -> MemoryLink:
@@ -92,9 +92,14 @@ class InMemoryMemoryStore(MemoryStore):
             self._provenance[tagged.memory_id] = provenance
             return tagged
 
-    def get(self, memory_id: str) -> MemoryRecord | None:
+    def get(self, memory_id: str, *, scope: MemoryScope | None = None) -> MemoryRecord | None:
         with self._lock:
-            return self._records.get(memory_id)
+            row = self._records.get(memory_id)
+            if row is None:
+                return None
+            if scope is not None and row.scope.key() != scope.key():
+                return None
+            return row
 
     def update(self, record: MemoryRecord, *, expected_version: int) -> MemoryRecord:
         if not self.available:
@@ -109,12 +114,14 @@ class InMemoryMemoryStore(MemoryStore):
             self._records[updated.memory_id] = updated
             return updated
 
-    def delete(self, memory_id: str, *, expected_version: int | None = None) -> MemoryRecord:
+    def delete(self, memory_id: str, *, expected_version: int | None = None, scope: MemoryScope | None = None) -> MemoryRecord:
         if not self.available:
             raise MemoryPersistenceUnavailableError()
         with self._lock:
             current = self._records.get(memory_id)
             if current is None:
+                raise MemoryVersionConflict("memory_not_found")
+            if scope is not None and current.scope.key() != scope.key():
                 raise MemoryVersionConflict("memory_not_found")
             if expected_version is not None and current.version != expected_version:
                 raise MemoryVersionConflict()
@@ -163,10 +170,14 @@ class InMemoryMemoryStore(MemoryStore):
             ]
         return tuple(sorted(rows, key=lambda r: r.memory_id))
 
-    def expire(self, memory_id: str, *, now: datetime | None = None) -> MemoryRecord:
+    def expire(self, memory_id: str, *, now: datetime | None = None, scope: MemoryScope | None = None) -> MemoryRecord:
         stamp = now or utc_now()
         with self._lock:
-            current = self._require(memory_id)
+            current = self._records.get(memory_id)
+            if current is None:
+                raise MemoryVersionConflict("memory_not_found")
+            if scope is not None and current.scope.key() != scope.key():
+                raise MemoryVersionConflict("memory_not_found")
             updated = _clone(
                 current,
                 status=STATUS_EXPIRED,

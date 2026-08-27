@@ -7,6 +7,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 
 from security.config import (
+    rate_limit_health_per_minute,
     rate_limit_per_tenant_per_minute,
     rate_limit_per_user_per_minute,
     rate_limit_unauthenticated_per_minute,
@@ -29,11 +30,13 @@ class RateLimiter:
         user_limit: int | None = None,
         tenant_limit: int | None = None,
         ip_limit: int | None = None,
+        health_limit: int | None = None,
         window_seconds: float = 60.0,
     ):
         self.user_limit = user_limit or rate_limit_per_user_per_minute()
         self.tenant_limit = tenant_limit or rate_limit_per_tenant_per_minute()
         self.ip_limit = ip_limit or rate_limit_unauthenticated_per_minute()
+        self.health_limit = health_limit or rate_limit_health_per_minute()
         self.window_seconds = window_seconds
         self._buckets: dict[str, _Bucket] = defaultdict(lambda: _Bucket(window_start=time.monotonic()))
 
@@ -57,3 +60,7 @@ class RateLimiter:
     def check_unauthenticated(self, *, source_ip: str) -> None:
         ip = source_ip or "unknown"
         self._check(f"ip:{ip}", self.ip_limit)
+
+    def check_health(self, *, source_ip: str) -> None:
+        ip = source_ip or "unknown"
+        self._check(f"health:{ip}", self.health_limit)

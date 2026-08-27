@@ -17,7 +17,7 @@ from security.encryption import (
 )
 
 
-MEMORY_SCHEMA_VERSION = 1
+MEMORY_SCHEMA_VERSION = 2
 MEMORY_POLICY_VERSION = "1.0.0"
 MEMORY_RETRIEVAL_VERSION = "1.0.0"
 
@@ -124,8 +124,9 @@ class MemoryScope:
             raise ValueError("scope_id_required")
 
     def key(self) -> tuple[str, str, str]:
-        tenant = str(self.tenant_ref or "").strip() or "_"
-        return (tenant, self.scope_type, self.scope_id)
+        from security.tenant import scope_tenant_ref
+
+        return (scope_tenant_ref(self.tenant_ref), self.scope_type, self.scope_id)
 
 
 @dataclass(frozen=True)

@@ -310,10 +310,10 @@ class MemoryService:
         now: datetime | None = None,
     ) -> MemoryRecord:
         stamp = now or utc_now()
-        old = self.store.get(old_memory_id)
+        req = requesting_scope or new_request.scope
+        old = self.store.get(old_memory_id, scope=req)
         if old is None:
             raise MemoryVersionConflict("memory_not_found")
-        req = requesting_scope or new_request.scope
         self._require_access(
             requesting=req,
             target=old.scope,
@@ -356,7 +356,7 @@ class MemoryService:
         now: datetime | None = None,
     ) -> MemoryRecord:
         _ = now
-        row = self.store.get(memory_id)
+        row = self.store.get(memory_id, scope=requesting_scope)
         if row is None:
             # Idempotent: fabricate tombstone-like denial avoidance
             raise MemoryVersionConflict("memory_not_found")
@@ -368,7 +368,7 @@ class MemoryService:
             operation=OP_DELETE,
             memory_type=row.memory_type,
         )
-        deleted = self.store.delete(memory_id, expected_version=row.version)
+        deleted = self.store.delete(memory_id, expected_version=row.version, scope=requesting_scope)
         self._emit("memory.forgotten", status="deleted", metadata={"reason": reason})
         self._metric(
             "memory_forget_total",
@@ -379,7 +379,7 @@ class MemoryService:
         return deleted
 
     def get(self, memory_id: str, *, requesting_scope) -> MemoryRecord | None:
-        row = self.store.get(memory_id)
+        row = self.store.get(memory_id, scope=requesting_scope)
         if row is None or row.status == "deleted":
             return None
         try:

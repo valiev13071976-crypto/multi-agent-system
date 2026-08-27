@@ -6,6 +6,8 @@ import uuid
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, Request
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.responses import JSONResponse
 
 from security.audit import SecurityAuditLog
 from security.auth import AuthService
@@ -72,6 +74,38 @@ def _client_ip(request: Request) -> str:
     if request.client is not None:
         return request.client.host or ""
     return ""
+
+
+def _has_auth_credential(request: Request) -> bool:
+    if request.headers.get("X-API-Key"):
+        return True
+    auth = request.headers.get("Authorization") or ""
+    return auth.lower().startswith("bearer ") and len(auth) > 7
+
+
+class PublicRateLimitMiddleware(BaseHTTPMiddleware):
+    """Per-IP rate limit for unauthenticated/public routes only."""
+
+    async def dispatch(self, request: Request, call_next):
+        if _has_auth_credential(request):
+            return await call_next(request)
+        limiter = get_rate_limiter()
+        ip = _client_ip(request)
+        try:
+            if request.url.path == "/health":
+                limiter.check_health(source_ip=ip)
+            else:
+                limiter.check_unauthenticated(source_ip=ip)
+        except RateLimitedError as exc:
+            headers = {}
+            if exc.retry_after_seconds is not None:
+                headers["Retry-After"] = str(int(exc.retry_after_seconds) + 1)
+            return JSONResponse(
+                status_code=429,
+                content={"error": exc.error_code},
+                headers=headers,
+            )
+        return await call_next(request)
 
 
 def _http_error_for(exc: SecurityError) -> HTTPException:

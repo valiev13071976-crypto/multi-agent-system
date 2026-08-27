@@ -32,3 +32,8 @@ def scope_execution_key(tenant_id: str, execution_key: str) -> str:
 
 def tenants_match(expected: str | None, actual: str | None) -> bool:
     return normalize_tenant_id(expected) == normalize_tenant_id(actual)
+
+
+def scope_tenant_ref(tenant_ref: str | None) -> str:
+    """Normalized tenant for MemoryScope / persistence queries."""
+    return normalize_tenant_id(tenant_ref)

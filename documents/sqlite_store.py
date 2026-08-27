@@ -19,6 +19,8 @@ from documents.models import (
 )
 from documents.store import DocumentStore, DocumentVersionConflict, _clone
 from memory.models import MemoryScope, utc_now
+from security.config import DEFAULT_LEGACY_TENANT
+from security.tenant import scope_tenant_ref
 
 
 DDL = f"""
@@ -55,10 +57,10 @@ CREATE TABLE IF NOT EXISTS documents (
     warnings_json TEXT NOT NULL DEFAULT '[]'
 );
 CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_active_dedup
-ON documents(scope_type, scope_id, content_hash)
+ON documents(tenant_ref, scope_type, scope_id, content_hash)
 WHERE status NOT IN ('deleted');
 CREATE INDEX IF NOT EXISTS idx_documents_scope
-ON documents(scope_type, scope_id, status);
+ON documents(tenant_ref, scope_type, scope_id, status);
 CREATE TABLE IF NOT EXISTS document_provenance (
     document_id TEXT PRIMARY KEY,
     source_type TEXT NOT NULL,
@@ -119,6 +121,32 @@ def _json_dumps(value) -> str:
     return json.dumps(sanitize_metadata(value or {}), separators=(",", ":"), sort_keys=True)
 
 
+def _tenant_key(scope: MemoryScope) -> str:
+    return scope_tenant_ref(scope.tenant_ref)
+
+
+def _migrate_tenant_scope(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        UPDATE documents
+        SET tenant_ref=?
+        WHERE tenant_ref IS NULL OR TRIM(tenant_ref)='' OR tenant_ref='_'
+        """,
+        (DEFAULT_LEGACY_TENANT,),
+    )
+    conn.execute("DROP INDEX IF EXISTS idx_documents_active_dedup")
+    conn.execute("DROP INDEX IF EXISTS idx_documents_scope")
+    conn.executescript(
+        """
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_active_dedup
+        ON documents(tenant_ref, scope_type, scope_id, content_hash)
+        WHERE status NOT IN ('deleted');
+        CREATE INDEX IF NOT EXISTS idx_documents_scope
+        ON documents(tenant_ref, scope_type, scope_id, status);
+        """
+    )
+
+
 class SqliteDocumentStore(DocumentStore):
     def __init__(
         self,
@@ -170,8 +198,11 @@ class SqliteDocumentStore(DocumentStore):
                 row = conn.execute(
                     "SELECT value FROM document_schema_meta WHERE key='schema_version'"
                 ).fetchone()
-                if row is not None and int(row["value"] if not isinstance(row, tuple) else row[0]) > DOCUMENT_SCHEMA_VERSION:
+                current = int(row["value"] if not isinstance(row, tuple) else row[0]) if row is not None else 1
+                if current > DOCUMENT_SCHEMA_VERSION:
                     raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+                if current < 2:
+                    _migrate_tenant_scope(conn)
                 conn.execute(
                     "INSERT OR REPLACE INTO document_schema_meta(key, value) VALUES (?, ?)",
                     ("schema_version", str(DOCUMENT_SCHEMA_VERSION)),
@@ -227,7 +258,7 @@ class SqliteDocumentStore(DocumentStore):
                         record.scope.workspace_id,
                         record.scope.project_id,
                         record.scope.actor_ref,
-                        record.scope.tenant_ref,
+                        _tenant_key(record.scope),
                         record.filename_safe,
                         record.media_type,
                         record.document_type,
@@ -293,11 +324,20 @@ class SqliteDocumentStore(DocumentStore):
                     pass
                 raise DocumentError(DOCUMENT_STORE_UNAVAILABLE) from exc
 
-    def get(self, document_id: str):
+    def get(self, document_id: str, *, scope: MemoryScope | None = None):
         with self._lock:
-            row = self._connect().execute(
-                "SELECT * FROM documents WHERE document_id=?", (document_id,)
-            ).fetchone()
+            if scope is not None:
+                row = self._connect().execute(
+                    """
+                    SELECT * FROM documents
+                    WHERE document_id=? AND tenant_ref=? AND scope_type=? AND scope_id=?
+                    """,
+                    (document_id, _tenant_key(scope), scope.scope_type, scope.scope_id),
+                ).fetchone()
+            else:
+                row = self._connect().execute(
+                    "SELECT * FROM documents WHERE document_id=?", (document_id,)
+                ).fetchone()
             return self._row_to_record(row) if row else None
 
     def update(self, record, *, expected_version: int):
@@ -334,8 +374,8 @@ class SqliteDocumentStore(DocumentStore):
             assert updated is not None
             return updated
 
-    def delete(self, document_id: str, *, expected_version: int | None = None):
-        current = self.get(document_id)
+    def delete(self, document_id: str, *, expected_version: int | None = None, scope: MemoryScope | None = None):
+        current = self.get(document_id, scope=scope)
         if current is None:
             raise DocumentVersionConflict("document_not_found")
         if expected_version is not None and current.version != expected_version:
@@ -349,38 +389,40 @@ class SqliteDocumentStore(DocumentStore):
         return updated
 
     def find_by_hash(self, scope: MemoryScope, content_hash: str):
+        tenant = _tenant_key(scope)
         with self._lock:
             row = self._connect().execute(
                 """
                 SELECT * FROM documents
-                WHERE scope_type=? AND scope_id=? AND content_hash=?
+                WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND content_hash=?
                   AND status != 'deleted'
                 LIMIT 1
                 """,
-                (scope.scope_type, scope.scope_id, content_hash),
+                (tenant, scope.scope_type, scope.scope_id, content_hash),
             ).fetchone()
             return self._row_to_record(row) if row else None
 
     def list_by_scope(self, scope: MemoryScope, *, statuses=None):
+        tenant = _tenant_key(scope)
         with self._lock:
             if statuses:
                 placeholders = ",".join("?" for _ in statuses)
                 rows = self._connect().execute(
                     f"""
                     SELECT * FROM documents
-                    WHERE scope_type=? AND scope_id=? AND status IN ({placeholders})
+                    WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND status IN ({placeholders})
                     ORDER BY document_id
                     """,
-                    (scope.scope_type, scope.scope_id, *statuses),
+                    (tenant, scope.scope_type, scope.scope_id, *statuses),
                 ).fetchall()
             else:
                 rows = self._connect().execute(
                     """
                     SELECT * FROM documents
-                    WHERE scope_type=? AND scope_id=? AND status != 'deleted'
+                    WHERE tenant_ref=? AND scope_type=? AND scope_id=? AND status != 'deleted'
                     ORDER BY document_id
                     """,
-                    (scope.scope_type, scope.scope_id),
+                    (tenant, scope.scope_type, scope.scope_id),
                 ).fetchall()
             return tuple(self._row_to_record(r) for r in rows)
 
@@ -425,14 +467,25 @@ class SqliteDocumentStore(DocumentStore):
                     pass
                 raise DocumentError(DOCUMENT_STORE_UNAVAILABLE) from exc
 
-    def list_chunks(self, document_id: str):
+    def list_chunks(self, document_id: str, *, scope: MemoryScope | None = None):
         with self._lock:
-            rows = self._connect().execute(
-                """
-                SELECT * FROM document_chunks WHERE document_id=? ORDER BY ordinal
-                """,
-                (document_id,),
-            ).fetchall()
+            if scope is not None:
+                rows = self._connect().execute(
+                    """
+                    SELECT c.* FROM document_chunks c
+                    JOIN documents d ON d.document_id = c.document_id
+                    WHERE c.document_id=? AND d.tenant_ref=? AND d.scope_type=? AND d.scope_id=?
+                    ORDER BY c.ordinal
+                    """,
+                    (document_id, _tenant_key(scope), scope.scope_type, scope.scope_id),
+                ).fetchall()
+            else:
+                rows = self._connect().execute(
+                    """
+                    SELECT * FROM document_chunks WHERE document_id=? ORDER BY ordinal
+                    """,
+                    (document_id,),
+                ).fetchall()
             return tuple(self._chunk_from_row(r) for r in rows)
 
     def get_provenance(self, document_id: str):

@@ -65,7 +65,7 @@ class MemoryRetriever:
         for row in candidates:
             if row.status == STATUS_ACTIVE and row.expires_at is not None and row.expires_at <= stamp:
                 try:
-                    store.expire(row.memory_id, now=stamp)
+                    store.expire(row.memory_id, now=stamp, scope=query.scope)
                 except Exception:
                     pass
                 if not query.include_expired:
