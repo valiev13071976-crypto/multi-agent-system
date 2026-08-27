@@ -152,6 +152,7 @@ class SideEffectRuntime:
     procurement_runtime: object | None = None
     workflow_runtime: object | None = None
     acquisition_runtime: object | None = None
+    data_intelligence_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -387,6 +388,13 @@ class SideEffectRuntime:
                 self.acquisition_runtime.close()
             except Exception:
                 pass
+        if self.data_intelligence_runtime is not None:
+            store = getattr(self.data_intelligence_runtime, "store", None)
+            if store is not None and hasattr(store, "close"):
+                try:
+                    store.close()
+                except Exception:
+                    pass
 
 
 def build_tool_gateway(
@@ -400,6 +408,7 @@ def build_tool_gateway(
     env: dict | None = None,
     document_service=None,
     document_intelligence=None,
+    data_intelligence=None,
     freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
     """Register built-in tools, platform adapters, optionally GitHub write, then freeze."""
@@ -457,6 +466,7 @@ def build_tool_gateway(
         env=env,
         document_service=document_service,
         document_intelligence=document_intelligence,
+        data_intelligence=data_intelligence,
     )
     router = ToolRouter(gateway.registry)
     for adapter in platform["adapters"].values():
@@ -554,6 +564,62 @@ def _finalize_runtime(
         if getattr(document_runtime, "intelligence", None) is not None:
             engine.document_intelligence = document_runtime.intelligence
 
+    # Workflow before tools so Data Intelligence can register data.large_process
+    # and tools can be enabled against the real service before registry freeze.
+    workflow_runtime = None
+    try:
+        from workflow.service import build_workflow_runtime
+
+        workflow_runtime = build_workflow_runtime(
+            state_manager=engine.state_manager,
+            workflow_engine=engine,
+            observability=obs,
+            autonomy_gate=gate,
+            hitl_service=hitl,
+        )
+        try:
+            workflow_runtime.recover_and_reenqueue_persisted()
+        except Exception:
+            pass
+    except Exception:
+        workflow_runtime = None
+
+    if workflow_runtime is not None:
+        try:
+            from documents.intelligence.workflow_def import register_document_workflows
+            from documents.runtime import attach_workflow_runtime
+
+            register_document_workflows(
+                workflow_runtime.definitions, workflow_runtime.platform
+            )
+            attach_workflow_runtime(document_runtime, workflow_runtime)
+        except Exception:
+            pass
+
+    data_intelligence_runtime = None
+    try:
+        from data_intel.runtime import build_data_intelligence_runtime
+
+        shared_di = None
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_di = persistence.connection
+        data_intelligence_runtime = build_data_intelligence_runtime(
+            env=env,
+            document_service=document_runtime.service if document_runtime else None,
+            workflow_runtime=workflow_runtime,
+            observability=obs,
+            shared_connection=shared_di,
+        )
+        if data_intelligence_runtime is not None:
+            engine.data_intelligence = data_intelligence_runtime.service
+    except Exception:
+        data_intelligence_runtime = None
+
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
         executor=executor,
@@ -569,6 +635,9 @@ def _finalize_runtime(
             document_runtime.intelligence
             if document_runtime and getattr(document_runtime, "intelligence", None)
             else None
+        ),
+        data_intelligence=(
+            data_intelligence_runtime.service if data_intelligence_runtime else None
         ),
     )
     recovery = None
@@ -689,38 +758,6 @@ def _finalize_runtime(
     if procurement_runtime is not None:
         engine.procurement_service = procurement_runtime.service
 
-    workflow_runtime = None
-    try:
-        from workflow.service import build_workflow_runtime
-
-        workflow_runtime = build_workflow_runtime(
-            state_manager=engine.state_manager,
-            workflow_engine=engine,
-            observability=obs,
-            autonomy_gate=gate,
-            hitl_service=hitl,
-        )
-        # Composition-time recovery: re-enqueue persisted runnable workflows into
-        # the fresh in-memory TaskQueue (idempotent if called again at worker start).
-        try:
-            workflow_runtime.recover_and_reenqueue_persisted()
-        except Exception:
-            pass
-    except Exception:
-        workflow_runtime = None
-
-    if workflow_runtime is not None:
-        try:
-            from documents.intelligence.workflow_def import register_document_workflows
-            from documents.runtime import attach_workflow_runtime
-
-            register_document_workflows(
-                workflow_runtime.definitions, workflow_runtime.platform
-            )
-            attach_workflow_runtime(document_runtime, workflow_runtime)
-        except Exception:
-            pass
-
     acquisition_runtime = None
     try:
         from acquisition.runtime import build_acquisition_runtime_bundle
@@ -750,6 +787,10 @@ def _finalize_runtime(
         # Ensure acquisition uses the same ToolGateway instance
         acquisition_runtime.service.gateway = tool_gateway
         acquisition_runtime.service.manager.gateway = tool_gateway
+        if data_intelligence_runtime is not None:
+            data_intelligence_runtime.service.acquisition_service = (
+                acquisition_runtime.service
+            )
     except Exception:
         acquisition_runtime = None
 
@@ -777,6 +818,7 @@ def _finalize_runtime(
         procurement_runtime=procurement_runtime,
         workflow_runtime=workflow_runtime,
         acquisition_runtime=acquisition_runtime,
+        data_intelligence_runtime=data_intelligence_runtime,
     )
 
 

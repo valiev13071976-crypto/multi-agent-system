@@ -130,14 +130,81 @@ CREATE TABLE IF NOT EXISTS data_intel_transformations (
 
 
 class SqliteDatasetStore:
-    def __init__(self, path: str = ":memory:", conn: sqlite3.Connection | None = None):
-        self._own = conn is None
-        self._conn = conn or sqlite3.connect(path, check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
+    """Durable tenant-scoped dataset store (dedicated path or shared SqliteConnection)."""
+
+    available = True
+
+    def __init__(
+        self,
+        path: str | None = None,
+        *,
+        db_path: str | None = None,
+        shared_connection=None,
+        owns_connection: bool | None = None,
+        conn: sqlite3.Connection | None = None,
+    ):
         self._lock = threading.RLock()
+        self._local = threading.local()
+        self._shared = shared_connection
+        self._legacy_conn = conn
+        resolved = db_path or path
+        if shared_connection is not None:
+            self.path = str(getattr(shared_connection, "path", ".") or ".")
+            self.owns_connection = False if owns_connection is None else bool(owns_connection)
+            self.connection_mode = "shared"
+            self.persistence_backend = "sqlite"
+        elif conn is not None:
+            self.path = ":memory:"
+            self.owns_connection = False if owns_connection is None else bool(owns_connection)
+            self.connection_mode = "injected"
+            self.persistence_backend = "sqlite"
+        elif resolved:
+            from pathlib import Path
+
+            self.path = str(resolved)
+            if self.path != ":memory:":
+                Path(self.path).parent.mkdir(parents=True, exist_ok=True)
+            self.owns_connection = True if owns_connection is None else bool(owns_connection)
+            self.connection_mode = "dedicated"
+            self.persistence_backend = "sqlite"
+        else:
+            raise ValueError("dataset_store_requires_path_or_shared_connection")
+        self._init_schema()
+
+    def _connect(self) -> sqlite3.Connection:
+        if self._shared is not None:
+            return self._shared.connect()
+        if self._legacy_conn is not None:
+            return self._legacy_conn
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn.row_factory = sqlite3.Row
+            self._local.conn = conn
+        return conn
+
+    def _commit(self, conn: sqlite3.Connection) -> None:
+        if self._shared is not None and hasattr(self._shared, "maybe_autocommit"):
+            self._shared.maybe_autocommit()
+            return
+        conn.commit()
+
+    def _init_schema(self) -> None:
         with self._lock:
-            self._conn.executescript(_SCHEMA)
-            self._conn.commit()
+            conn = self._connect()
+            conn.executescript(_SCHEMA)
+            self._commit(conn)
+
+    def close(self) -> None:
+        with self._lock:
+            if not self.owns_connection:
+                return
+            if self._shared is not None:
+                return
+            conn = getattr(self._local, "conn", None)
+            if conn is not None:
+                conn.close()
+                self._local.conn = None
 
     def save_dataset(self, descriptor: DatasetDescriptor, rows_by_table: dict[str, list[dict]]) -> None:
         payload = {
@@ -177,7 +244,8 @@ class SqliteDatasetStore:
             "status": descriptor.status,
         }
         with self._lock:
-            self._conn.execute(
+            conn = self._connect()
+            conn.execute(
                 "INSERT OR REPLACE INTO data_intel_datasets(dataset_id, tenant_id, payload_json, created_at) VALUES (?,?,?,?)",
                 (
                     descriptor.dataset_id,
@@ -186,12 +254,12 @@ class SqliteDatasetStore:
                     descriptor.created_at.isoformat(),
                 ),
             )
-            self._conn.execute(
+            conn.execute(
                 "DELETE FROM data_intel_rows WHERE dataset_id=?", (descriptor.dataset_id,)
             )
             for table_id, rows in (rows_by_table or {}).items():
                 for i, row in enumerate(rows):
-                    self._conn.execute(
+                    conn.execute(
                         "INSERT INTO data_intel_rows(dataset_id, tenant_id, table_id, row_index, payload_json) VALUES (?,?,?,?,?)",
                         (
                             descriptor.dataset_id,
@@ -201,7 +269,7 @@ class SqliteDatasetStore:
                             json.dumps(row, ensure_ascii=False, default=str),
                         ),
                     )
-            self._conn.commit()
+            self._commit(conn)
 
     def get_dataset(self, dataset_id: str, *, tenant_id: str) -> DatasetDescriptor | None:
         from data_intel.contracts import ColumnDescriptor, TableDescriptor
@@ -209,7 +277,8 @@ class SqliteDatasetStore:
 
         tid = normalize_tenant_id(tenant_id)
         with self._lock:
-            row = self._conn.execute(
+            conn = self._connect()
+            row = conn.execute(
                 "SELECT payload_json, tenant_id FROM data_intel_datasets WHERE dataset_id=?",
                 (dataset_id,),
             ).fetchone()
@@ -268,13 +337,14 @@ class SqliteDatasetStore:
             raise DataIntelError(DATASET_ACCESS_DENIED)
         tid = normalize_tenant_id(tenant_id)
         with self._lock:
+            conn = self._connect()
             if table_id:
-                cur = self._conn.execute(
+                cur = conn.execute(
                     "SELECT payload_json FROM data_intel_rows WHERE dataset_id=? AND tenant_id=? AND table_id=? ORDER BY row_index",
                     (dataset_id, tid, table_id),
                 )
             else:
-                cur = self._conn.execute(
+                cur = conn.execute(
                     "SELECT payload_json FROM data_intel_rows WHERE dataset_id=? AND tenant_id=? ORDER BY table_id, row_index",
                     (dataset_id, tid),
                 )
@@ -290,27 +360,30 @@ class SqliteDatasetStore:
             "created_at": tx.created_at.isoformat(),
         }
         with self._lock:
-            self._conn.execute(
+            conn = self._connect()
+            conn.execute(
                 "INSERT INTO data_intel_transformations(tenant_id, payload_json, created_at) VALUES (?,?,?)",
                 (normalize_tenant_id(tenant_id), json.dumps(payload), tx.created_at.isoformat()),
             )
-            self._conn.commit()
+            self._commit(conn)
 
     def save_blob(self, dataset_id: str, name: str, data: bytes, *, tenant_id: str) -> None:
         if self.get_dataset(dataset_id, tenant_id=tenant_id) is None:
             raise DataIntelError(DATASET_ACCESS_DENIED)
         with self._lock:
-            self._conn.execute(
+            conn = self._connect()
+            conn.execute(
                 "INSERT OR REPLACE INTO data_intel_blobs(dataset_id, tenant_id, name, data) VALUES (?,?,?,?)",
                 (dataset_id, normalize_tenant_id(tenant_id), name, data),
             )
-            self._conn.commit()
+            self._commit(conn)
 
     def get_blob(self, dataset_id: str, name: str, *, tenant_id: str) -> bytes | None:
         if self.get_dataset(dataset_id, tenant_id=tenant_id) is None:
             return None
         with self._lock:
-            row = self._conn.execute(
+            conn = self._connect()
+            row = conn.execute(
                 "SELECT data FROM data_intel_blobs WHERE dataset_id=? AND name=? AND tenant_id=?",
                 (dataset_id, name, normalize_tenant_id(tenant_id)),
             ).fetchone()
@@ -318,7 +391,8 @@ class SqliteDatasetStore:
 
     def save_partial(self, dataset_id: str, batch_index: int, payload: dict, *, tenant_id: str) -> None:
         with self._lock:
-            self._conn.execute(
+            conn = self._connect()
+            conn.execute(
                 "INSERT OR REPLACE INTO data_intel_partials(dataset_id, tenant_id, batch_index, payload_json) VALUES (?,?,?,?)",
                 (
                     dataset_id,
@@ -327,12 +401,13 @@ class SqliteDatasetStore:
                     json.dumps(payload, ensure_ascii=False, default=str),
                 ),
             )
-            self._conn.commit()
+            self._commit(conn)
 
     def list_partials(self, dataset_id: str, *, tenant_id: str) -> dict[int, dict]:
         tid = normalize_tenant_id(tenant_id)
         with self._lock:
-            cur = self._conn.execute(
+            conn = self._connect()
+            cur = conn.execute(
                 "SELECT batch_index, payload_json FROM data_intel_partials WHERE dataset_id=? AND tenant_id=?",
                 (dataset_id, tid),
             )

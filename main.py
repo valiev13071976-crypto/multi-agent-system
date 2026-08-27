@@ -129,12 +129,20 @@ if workflow_runtime is not None:
         )
     except Exception:
         pass
+    try:
+        from data_intel.workflow_def import register_data_intel_workflows
+
+        register_data_intel_workflows(
+            workflow_runtime.definitions, workflow_runtime.platform
+        )
+    except Exception:
+        pass
 
     async def _default_handler(ctx):
         step = ctx["step"]
         return StepResult(ok=True, data={"step_id": step.step_id, "path": "left"})
 
-    # Default handler for demo step_types; document handlers registered by step_id
+    # Default handler for demo step_types; document/data handlers registered by step_id
     workflow_runtime.platform.register_handler(STEP_TYPE_HANDLER, _default_handler)
     workflow_runtime.platform.register_handler(STEP_TYPE_BRANCH, _default_handler)
 
