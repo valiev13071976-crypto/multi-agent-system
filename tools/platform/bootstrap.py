@@ -11,6 +11,10 @@ from tools.platform.descriptors import (
     bitrix_descriptor,
     browser_descriptor,
     calendar_descriptor,
+    cms_descriptor,
+    commerce_order_read_descriptor,
+    commerce_order_validate_descriptor,
+    commerce_reconcile_descriptor,
     crm_descriptor,
     data_aggregate_descriptor,
     data_compare_descriptor,
@@ -29,17 +33,25 @@ from tools.platform.descriptors import (
     document_parse_descriptor,
     document_search_descriptor,
     document_structured_extract_descriptor,
+    edo_prepare_descriptor,
+    edo_status_descriptor,
     email_descriptor,
     filesystem_read_descriptor,
     filesystem_write_descriptor,
+    fiscal_status_descriptor,
     http_request_descriptor,
+    inventory_read_descriptor,
+    inventory_release_descriptor,
+    inventory_reserve_descriptor,
     marketplace_descriptor,
+    marking_status_descriptor,
+    marking_transfer_descriptor,
     mcp_descriptor,
     onec_descriptor,
     sql_query_descriptor,
+    supplier_read_descriptor,
     telegram_descriptor,
     terminal_descriptor,
-    cms_descriptor,
 )
 from tools.platform.documents import DocumentToolAdapter
 from tools.platform.filesystem import FilesystemAdapter
@@ -54,6 +66,7 @@ from tools.platform.scaffold import (
 )
 from tools.registry import ToolRegistry
 from data_intel.tools import DataIntelToolAdapter
+from commerce.tools import CommerceToolAdapter
 
 
 def _workspace_roots(env: dict | None = None) -> tuple[str, ...]:
@@ -79,6 +92,7 @@ def register_platform_tools(
     document_service=None,
     document_intelligence=None,
     data_intelligence=None,
+    commerce_service=None,
     credential_store: IntegrationCredentialStore | None = None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
@@ -92,6 +106,8 @@ def register_platform_tools(
     doc_enabled = document_service is not None or document_intelligence is not None
     data = DataIntelToolAdapter(data_intelligence)
     data_enabled = data_intelligence is not None
+    commerce = CommerceToolAdapter(commerce_service, enabled=commerce_service is not None)
+    commerce_enabled = commerce_service is not None
     terminal_enabled = (env or os.environ).get("TOOL_TERMINAL_ENABLED", "").lower() in {
         "1",
         "true",
@@ -130,6 +146,18 @@ def register_platform_tools(
         (data_reconcile_descriptor(enabled=data_enabled), data),
         (data_aggregate_descriptor(enabled=data_enabled), data),
         (data_generate_excel_descriptor(enabled=data_enabled), data),
+        (commerce_order_read_descriptor(enabled=commerce_enabled), commerce),
+        (commerce_order_validate_descriptor(enabled=commerce_enabled), commerce),
+        (inventory_read_descriptor(enabled=commerce_enabled), commerce),
+        (inventory_reserve_descriptor(enabled=commerce_enabled), commerce),
+        (inventory_release_descriptor(enabled=commerce_enabled), commerce),
+        (supplier_read_descriptor(enabled=commerce_enabled), commerce),
+        (edo_status_descriptor(enabled=commerce_enabled), commerce),
+        (edo_prepare_descriptor(enabled=commerce_enabled), commerce),
+        (marking_status_descriptor(enabled=commerce_enabled), commerce),
+        (marking_transfer_descriptor(enabled=commerce_enabled), commerce),
+        (fiscal_status_descriptor(enabled=commerce_enabled), commerce),
+        (commerce_reconcile_descriptor(enabled=commerce_enabled), commerce),
         (mcp_descriptor(enabled=False), mcp),
         (cms_descriptor(enabled=False), CmsScaffoldAdapter(adapter_id="cms")),
         (bitrix_descriptor(enabled=bitrix_enabled), bitrix),

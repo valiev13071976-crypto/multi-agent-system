@@ -27,6 +27,7 @@ from tools.models import (
     SIDE_EFFECT_WRITE,
     TOOL_TRUST_INTERNAL_SAFE,
     TOOL_TRUST_READ_ONLY_EXTERNAL,
+    TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE,
     TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
     ToolDescriptor,
 )
@@ -65,6 +66,18 @@ TOOL_MARKETPLACE = "marketplace.product"
 TOOL_SQL = "sql.query"
 TOOL_EMAIL = "email.message"
 TOOL_CALENDAR = "calendar.event"
+TOOL_COMMERCE_ORDER_READ = "commerce.order.read"
+TOOL_COMMERCE_ORDER_VALIDATE = "commerce.order.validate"
+TOOL_INVENTORY_READ = "inventory.read"
+TOOL_INVENTORY_RESERVE = "inventory.reserve"
+TOOL_INVENTORY_RELEASE = "inventory.release"
+TOOL_SUPPLIER_READ = "supplier.read"
+TOOL_EDO_STATUS = "edo.status"
+TOOL_EDO_PREPARE = "edo.prepare"
+TOOL_MARKING_STATUS = "marking.status"
+TOOL_MARKING_TRANSFER = "marking.transfer"
+TOOL_FISCAL_STATUS = "fiscal.status"
+TOOL_COMMERCE_RECONCILE = "commerce.reconcile"
 
 
 def _read_desc(
@@ -710,4 +723,188 @@ def calendar_descriptor(*, enabled: bool = False) -> ToolDescriptor:
         side_effect_level=SIDE_EFFECT_WRITE,
         retry_policy=RETRY_WORKFLOW,
         schema_hash=schema_hash_for(("list", "create")),
+    )
+
+
+def _commerce_read_descriptor(tool_id: str, name: str, operations: tuple[str, ...], *, enabled: bool) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=tool_id,
+        name=name,
+        description=f"Commerce Operations: {name}",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_READ_ONLY_EXTERNAL,
+        capabilities_required=(CAP_EXTERNAL_READ,),
+        action_types_supported=(ACTION_READ,),
+        operations=operations,
+        read_only=True,
+        reversible=True,
+        idempotency_required=False,
+        timeout_seconds=20.0,
+        enabled=enabled,
+        network_access=False,
+        category="commerce",
+        adapter_id="commerce",
+        side_effect_level=SIDE_EFFECT_READ,
+        retry_policy=RETRY_NONE,
+        schema_hash=schema_hash_for(operations),
+    )
+
+
+def commerce_order_read_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(
+        TOOL_COMMERCE_ORDER_READ, "Commerce Order Read", ("order_read",), enabled=enabled
+    )
+
+
+def commerce_order_validate_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_COMMERCE_ORDER_VALIDATE,
+        name="Commerce Order Validate",
+        description="Validate canonical commerce order state",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_READ, CAP_EXTERNAL_WRITE),
+        action_types_supported=(ACTION_READ, ACTION_WRITE),
+        operations=("order_validate",),
+        read_only=False,
+        reversible=True,
+        idempotency_required=True,
+        timeout_seconds=20.0,
+        enabled=enabled,
+        network_access=False,
+        category="commerce",
+        adapter_id="commerce",
+        side_effect_level=SIDE_EFFECT_WRITE,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("order_validate",)),
+    )
+
+
+def inventory_read_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(
+        TOOL_INVENTORY_READ, "Inventory Read", ("inventory_read",), enabled=enabled
+    )
+
+
+def inventory_reserve_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_INVENTORY_RESERVE,
+        name="Inventory Reserve",
+        description="Reserve stock via Source of Truth gateway",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("inventory_reserve",),
+        read_only=False,
+        reversible=True,
+        idempotency_required=True,
+        timeout_seconds=30.0,
+        enabled=enabled,
+        network_access=True,
+        category="commerce",
+        adapter_id="commerce",
+        side_effect_level=SIDE_EFFECT_CRITICAL,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("inventory_reserve",)),
+    )
+
+
+def inventory_release_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_INVENTORY_RELEASE,
+        name="Inventory Release",
+        description="Release reservation via Source of Truth gateway",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("inventory_release",),
+        read_only=False,
+        reversible=True,
+        idempotency_required=True,
+        timeout_seconds=30.0,
+        enabled=enabled,
+        network_access=True,
+        category="commerce",
+        adapter_id="commerce",
+        side_effect_level=SIDE_EFFECT_WRITE,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("inventory_release",)),
+    )
+
+
+def supplier_read_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(
+        TOOL_SUPPLIER_READ, "Supplier Read", ("supplier_read",), enabled=enabled
+    )
+
+
+def edo_status_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(TOOL_EDO_STATUS, "EDO Status", ("edo_status",), enabled=enabled)
+
+
+def edo_prepare_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_EDO_PREPARE,
+        name="EDO Prepare",
+        description="Prepare EDO document via domain gateway",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("edo_prepare",),
+        read_only=False,
+        reversible=False,
+        idempotency_required=True,
+        timeout_seconds=45.0,
+        enabled=enabled,
+        network_access=True,
+        category="commerce",
+        adapter_id="commerce",
+        side_effect_level=SIDE_EFFECT_CRITICAL,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("edo_prepare",)),
+    )
+
+
+def marking_status_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(
+        TOOL_MARKING_STATUS, "Marking Status", ("marking_status",), enabled=enabled
+    )
+
+
+def marking_transfer_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_MARKING_TRANSFER,
+        name="Marking Transfer",
+        description="Transfer marking code ownership via MarkingGateway",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("marking_transfer",),
+        read_only=False,
+        reversible=False,
+        idempotency_required=True,
+        timeout_seconds=45.0,
+        enabled=enabled,
+        network_access=True,
+        category="commerce",
+        adapter_id="commerce",
+        side_effect_level=SIDE_EFFECT_CRITICAL,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("marking_transfer",)),
+    )
+
+
+def fiscal_status_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(
+        TOOL_FISCAL_STATUS, "Fiscal Status", ("fiscal_status",), enabled=enabled
+    )
+
+
+def commerce_reconcile_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _commerce_read_descriptor(
+        TOOL_COMMERCE_RECONCILE, "Commerce Reconcile", ("reconcile",), enabled=enabled
     )

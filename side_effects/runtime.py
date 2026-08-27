@@ -154,6 +154,7 @@ class SideEffectRuntime:
     acquisition_runtime: object | None = None
     data_intelligence_runtime: object | None = None
     integration_runtime: object | None = None
+    commerce_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -297,6 +298,8 @@ class SideEffectRuntime:
             meta["acquisition"] = dict(self.acquisition_runtime.health())
         if self.integration_runtime is not None:
             meta["integrations"] = dict(self.integration_runtime.health())
+        if self.commerce_runtime is not None:
+            meta["commerce"] = dict(self.commerce_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -403,6 +406,11 @@ class SideEffectRuntime:
                 self.integration_runtime.close()
             except Exception:
                 pass
+        if self.commerce_runtime is not None and hasattr(self.commerce_runtime, "close"):
+            try:
+                self.commerce_runtime.close()
+            except Exception:
+                pass
 
 
 def build_tool_gateway(
@@ -417,6 +425,7 @@ def build_tool_gateway(
     document_service=None,
     document_intelligence=None,
     data_intelligence=None,
+    commerce_service=None,
     credential_store=None,
     freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
@@ -476,6 +485,7 @@ def build_tool_gateway(
         document_service=document_service,
         document_intelligence=document_intelligence,
         data_intelligence=data_intelligence,
+        commerce_service=commerce_service,
         credential_store=credential_store,
     )
     router = ToolRouter(gateway.registry)
@@ -652,6 +662,34 @@ def _finalize_runtime(
     except Exception:
         integration_runtime = None
 
+    commerce_runtime = None
+    try:
+        from commerce.runtime import build_commerce_runtime
+
+        shared_com = None
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_com = persistence.connection
+        commerce_runtime = build_commerce_runtime(
+            env=env,
+            workflow_runtime=workflow_runtime,
+            shared_connection=shared_com,
+            document_service=document_runtime.service if document_runtime else None,
+            data_intelligence=(
+                data_intelligence_runtime.service if data_intelligence_runtime else None
+            ),
+            hitl_service=hitl,
+            observability=obs,
+        )
+        if commerce_runtime is not None:
+            engine.commerce_service = commerce_runtime.service
+    except Exception:
+        commerce_runtime = None
+
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
         executor=executor,
@@ -670,6 +708,9 @@ def _finalize_runtime(
         ),
         data_intelligence=(
             data_intelligence_runtime.service if data_intelligence_runtime else None
+        ),
+        commerce_service=(
+            commerce_runtime.service if commerce_runtime else None
         ),
         credential_store=(
             integration_runtime.credential_store if integration_runtime else None
@@ -826,6 +867,8 @@ def _finalize_runtime(
             data_intelligence_runtime.service.acquisition_service = (
                 acquisition_runtime.service
             )
+        if commerce_runtime is not None:
+            commerce_runtime.service.acquisition_service = acquisition_runtime.service
     except Exception:
         acquisition_runtime = None
 
@@ -855,6 +898,7 @@ def _finalize_runtime(
         acquisition_runtime=acquisition_runtime,
         data_intelligence_runtime=data_intelligence_runtime,
         integration_runtime=integration_runtime,
+        commerce_runtime=commerce_runtime,
     )
 
 
