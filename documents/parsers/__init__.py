@@ -71,13 +71,17 @@ class DocumentParserRegistry:
         return tuple(self._descriptors.values())
 
 
-def build_default_registry(*, max_file_bytes: int) -> DocumentParserRegistry:
+def build_default_registry(*, max_file_bytes: int, ocr_provider=None) -> DocumentParserRegistry:
     from documents.parsers.csv_parser import CsvDocumentParser
     from documents.parsers.docx_parser import DocxDocumentParser
+    from documents.parsers.image_parser import ImageDocumentParser
+    from documents.parsers.json_parser import JsonDocumentParser
     from documents.parsers.md import MarkdownDocumentParser
     from documents.parsers.pdf import PdfDocumentParser
     from documents.parsers.txt import TxtDocumentParser
+    from documents.parsers.xls import XlsDocumentParser
     from documents.parsers.xlsx import XlsxDocumentParser
+    from documents.parsers.xml_parser import XmlDocumentParser
 
     reg = DocumentParserRegistry()
     for parser, caps in (
@@ -85,8 +89,12 @@ def build_default_registry(*, max_file_bytes: int) -> DocumentParserRegistry:
         (MarkdownDocumentParser(), ("text", "headings")),
         (CsvDocumentParser(), ("table", "csv")),
         (XlsxDocumentParser(), ("workbook", "sheets", "cells", "formulas_as_data")),
+        (XlsDocumentParser(), ("workbook", "sheets", "legacy_xls")),
         (DocxDocumentParser(), ("paragraphs", "tables")),
         (PdfDocumentParser(), ("text_pages", "no_ocr")),
+        (JsonDocumentParser(), ("json",)),
+        (XmlDocumentParser(), ("xml", "safe")),
+        (ImageDocumentParser(ocr_provider=ocr_provider), ("image", "ocr")),
     ):
         reg.register(parser, max_size=max_file_bytes, capabilities=caps)
     reg.freeze()

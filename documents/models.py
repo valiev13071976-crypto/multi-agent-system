@@ -26,9 +26,24 @@ DOC_TXT = "txt"
 DOC_MD = "md"
 DOC_CSV = "csv"
 DOC_XLSX = "xlsx"
+DOC_XLS = "xls"
 DOC_DOCX = "docx"
 DOC_PDF = "pdf"
-DOCUMENT_TYPES = (DOC_TXT, DOC_MD, DOC_CSV, DOC_XLSX, DOC_DOCX, DOC_PDF)
+DOC_JSON = "json"
+DOC_XML = "xml"
+DOC_IMAGE = "image"
+DOCUMENT_TYPES = (
+    DOC_TXT,
+    DOC_MD,
+    DOC_CSV,
+    DOC_XLSX,
+    DOC_XLS,
+    DOC_DOCX,
+    DOC_PDF,
+    DOC_JSON,
+    DOC_XML,
+    DOC_IMAGE,
+)
 
 STATUS_INGESTED = "ingested"
 STATUS_PARSED = "parsed"

@@ -8,6 +8,8 @@ from pathlib import Path
 from documents.access import DocumentAccessPolicy
 from documents.chunker import DocumentChunker
 from documents.errors import DOCUMENT_STORE_UNAVAILABLE, DocumentError
+from documents.intelligence.ocr import build_ocr_provider
+from documents.intelligence.service import DocumentIntelligenceService, build_document_intelligence
 from documents.parsers import build_default_registry
 from documents.retention import DocumentRetentionPolicy
 from documents.service import DocumentService
@@ -76,6 +78,8 @@ class DocumentRuntime:
         validator: DocumentValidator,
         retention: DocumentRetentionPolicy | None = None,
         enabled: bool = True,
+        ocr_provider=None,
+        intelligence: DocumentIntelligenceService | None = None,
     ):
         self.service = service
         self.store = store
@@ -85,6 +89,8 @@ class DocumentRuntime:
         self.validator = validator
         self.retention = retention or DocumentRetentionPolicy()
         self.enabled = bool(enabled)
+        self.ocr_provider = ocr_provider
+        self.intelligence = intelligence
 
     def health(self) -> dict:
         ready = bool(getattr(self.store, "available", True))
@@ -95,6 +101,7 @@ class DocumentRuntime:
             status = "degraded"
         if self.enabled and (not ready or self.service.blocked_reason):
             status = "blocked"
+        ocr = self.ocr_provider
         return {
             "document_status": status,
             "persistence_backend": getattr(self.store, "persistence_backend", "memory"),
@@ -102,6 +109,9 @@ class DocumentRuntime:
             "connection_mode": getattr(self.store, "connection_mode", "memory"),
             "supported_types": sorted(supported),
             "enabled": self.enabled,
+            "ocr_provider": getattr(ocr, "provider_id", "null"),
+            "ocr_available": bool(getattr(ocr, "available", False)),
+            "intelligence_ready": self.intelligence is not None,
         }
 
     def close(self) -> None:
@@ -135,7 +145,10 @@ def build_document_runtime(
         if require_durable:
             store = InMemoryDocumentStore()
             store.available = False
-            registry = build_default_registry(max_file_bytes=cfg["max_file_bytes"])
+            ocr = build_ocr_provider(env)
+            registry = build_default_registry(
+                max_file_bytes=cfg["max_file_bytes"], ocr_provider=ocr
+            )
             service = DocumentService(
                 store,
                 registry=registry,
@@ -147,6 +160,9 @@ def build_document_runtime(
                 enabled=True,
             )
             service.blocked_reason = DOCUMENT_STORE_UNAVAILABLE
+            intelligence = build_document_intelligence(
+                document_service=service, env=env, ocr_provider=ocr
+            )
             return DocumentRuntime(
                 service=service,
                 store=store,
@@ -159,10 +175,13 @@ def build_document_runtime(
                 access=DocumentAccessPolicy(),
                 validator=DocumentValidator(),
                 enabled=True,
+                ocr_provider=ocr,
+                intelligence=intelligence,
             )
         raise
 
-    registry = build_default_registry(max_file_bytes=cfg["max_file_bytes"])
+    ocr = build_ocr_provider(env)
+    registry = build_default_registry(max_file_bytes=cfg["max_file_bytes"], ocr_provider=ocr)
     access = DocumentAccessPolicy()
     chunker = DocumentChunker(
         max_chars=cfg["chunk_max_chars"],
@@ -183,6 +202,9 @@ def build_document_runtime(
         allowed_roots=allowed_roots,
         enabled=True,
     )
+    intelligence = build_document_intelligence(
+        document_service=service, env=env, ocr_provider=ocr
+    )
     return DocumentRuntime(
         service=service,
         store=store,
@@ -192,4 +214,6 @@ def build_document_runtime(
         validator=validator,
         retention=DocumentRetentionPolicy(),
         enabled=True,
+        ocr_provider=ocr,
+        intelligence=intelligence,
     )

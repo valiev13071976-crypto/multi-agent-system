@@ -39,6 +39,13 @@ TOOL_TERMINAL = "terminal.execute"
 TOOL_BROWSER = "browser.navigate"
 TOOL_DOC_PARSE = "document.parse"
 TOOL_DOC_SEARCH = "document.search"
+TOOL_DOC_DETECT = "document.detect"
+TOOL_DOC_EXTRACT = "document.extract"
+TOOL_DOC_OCR = "document.ocr"
+TOOL_DOC_STRUCTURED = "document.structured_extract"
+TOOL_DOC_COMPARE = "document.compare"
+TOOL_DOC_GENERATE = "document.generate"
+TOOL_DOC_CONVERT = "document.convert"
 TOOL_MCP = "mcp.invoke"
 TOOL_CMS = "cms.product"
 TOOL_BITRIX = "bitrix.catalog"
@@ -232,6 +239,104 @@ def document_search_descriptor(*, enabled: bool = True) -> ToolDescriptor:
         operations=("search",),
         enabled=enabled,
         timeout=30.0,
+    )
+
+
+def document_detect_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_DETECT,
+        name="Document Detect",
+        description="Magic/MIME/extension document type detection",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("detect",),
+        enabled=enabled,
+        timeout=15.0,
+    )
+
+
+def document_extract_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_EXTRACT,
+        name="Document Extract",
+        description="Extract document content / metadata",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("extract", "parse", "list_chunks"),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def document_ocr_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_OCR,
+        name="Document OCR",
+        description="OCR for scans/images via OCRProvider",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("ocr",),
+        enabled=enabled,
+        timeout=90.0,
+    )
+
+
+def document_structured_extract_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_STRUCTURED,
+        name="Document Structured Extract",
+        description="Schema-driven structured extraction (contract/invoice/etc)",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("structured_extract",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def document_compare_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_COMPARE,
+        name="Document Compare",
+        description="Compare structured documents / sections",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("compare",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def document_generate_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_GENERATE,
+        name="Document Generate",
+        description="Generate DOCX/PDF/TXT from typed templates (in-memory)",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("generate",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def document_convert_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_DOC_CONVERT,
+        name="Document Convert",
+        description="Safe built-in document conversion (no LibreOffice shell)",
+        category="document",
+        adapter_id="document",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("convert",),
+        enabled=enabled,
+        timeout=60.0,
     )
 
 

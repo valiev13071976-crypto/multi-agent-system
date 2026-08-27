@@ -30,7 +30,22 @@ class PdfDocumentParser:
         try:
             reader = PdfReader(io.BytesIO(data), strict=False)
         except Exception as exc:
-            raise DocumentError(DOCUMENT_PARSE_FAILED) from exc
+            from documents.errors import DOCUMENT_MALFORMED
+
+            raise DocumentError(DOCUMENT_MALFORMED) from exc
+
+        if getattr(reader, "is_encrypted", False):
+            from documents.errors import DOCUMENT_ENCRYPTED
+
+            # Try empty password; still treat unresolved encryption as encrypted
+            try:
+                ok = reader.decrypt("")  # type: ignore[attr-defined]
+                if not ok:
+                    raise DocumentError(DOCUMENT_ENCRYPTED)
+            except DocumentError:
+                raise
+            except Exception as exc:
+                raise DocumentError(DOCUMENT_ENCRYPTED) from exc
 
         page_count = len(reader.pages)
         if page_count > max_pages:

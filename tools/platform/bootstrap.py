@@ -12,8 +12,15 @@ from tools.platform.descriptors import (
     browser_descriptor,
     calendar_descriptor,
     crm_descriptor,
+    document_compare_descriptor,
+    document_convert_descriptor,
+    document_detect_descriptor,
+    document_extract_descriptor,
+    document_generate_descriptor,
+    document_ocr_descriptor,
     document_parse_descriptor,
     document_search_descriptor,
+    document_structured_extract_descriptor,
     email_descriptor,
     filesystem_read_descriptor,
     filesystem_write_descriptor,
@@ -61,6 +68,7 @@ def register_platform_tools(
     *,
     env: dict | None = None,
     document_service=None,
+    document_intelligence=None,
     credential_store: IntegrationCredentialStore | None = None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
@@ -70,7 +78,8 @@ def register_platform_tools(
         allowed_hosts=_allowed_http_hosts(env),
         credential_store=creds,
     )
-    doc = DocumentToolAdapter(document_service)
+    doc = DocumentToolAdapter(document_service, intelligence=document_intelligence)
+    doc_enabled = document_service is not None or document_intelligence is not None
     terminal_enabled = (env or os.environ).get("TOOL_TERMINAL_ENABLED", "").lower() in {
         "1",
         "true",
@@ -92,8 +101,15 @@ def register_platform_tools(
         (http_request_descriptor(enabled=bool(http._allowed_hosts)), http),
         (terminal_descriptor(enabled=terminal_enabled), terminal),
         (browser_descriptor(enabled=False), ScaffoldAdapter(adapter_id="browser")),
-        (document_parse_descriptor(enabled=document_service is not None), doc),
+        (document_parse_descriptor(enabled=doc_enabled), doc),
         (document_search_descriptor(enabled=document_service is not None), doc),
+        (document_detect_descriptor(enabled=doc_enabled), doc),
+        (document_extract_descriptor(enabled=doc_enabled), doc),
+        (document_ocr_descriptor(enabled=doc_enabled), doc),
+        (document_structured_extract_descriptor(enabled=doc_enabled), doc),
+        (document_compare_descriptor(enabled=doc_enabled), doc),
+        (document_generate_descriptor(enabled=doc_enabled), doc),
+        (document_convert_descriptor(enabled=doc_enabled), doc),
         (mcp_descriptor(enabled=False), mcp),
         (cms_descriptor(enabled=False), CmsScaffoldAdapter(adapter_id="cms")),
         (bitrix_descriptor(enabled=bitrix_enabled), bitrix),

@@ -143,6 +143,10 @@ class XlsxDocumentParser:
                         cell_count += 1
                         if cell_count > max_cells:
                             raise DocumentError(DOCUMENT_TOO_MANY_CELLS)
+                        # openpyxl may yield EmptyCell without coordinate for sparse formulas
+                        if not hasattr(cell, "coordinate"):
+                            row_vals.append("")
+                            continue
                         vtype, value, formula, cached = _cell_type_and_value(cell)
                         coord = cell.coordinate
                         potential = bool(

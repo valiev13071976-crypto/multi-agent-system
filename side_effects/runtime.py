@@ -399,6 +399,7 @@ def build_tool_gateway(
     observability: ObservabilityRuntime | None = None,
     env: dict | None = None,
     document_service=None,
+    document_intelligence=None,
     freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
     """Register built-in tools, platform adapters, optionally GitHub write, then freeze."""
@@ -455,6 +456,7 @@ def build_tool_gateway(
         tool_registry,
         env=env,
         document_service=document_service,
+        document_intelligence=document_intelligence,
     )
     router = ToolRouter(gateway.registry)
     for adapter in platform["adapters"].values():
@@ -549,6 +551,8 @@ def _finalize_runtime(
         document_runtime = None
     if document_runtime is not None:
         engine.document_service = document_runtime.service
+        if getattr(document_runtime, "intelligence", None) is not None:
+            engine.document_intelligence = document_runtime.intelligence
 
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
@@ -561,6 +565,11 @@ def _finalize_runtime(
         observability=obs,
         env=env,
         document_service=document_runtime.service if document_runtime else None,
+        document_intelligence=(
+            document_runtime.intelligence
+            if document_runtime and getattr(document_runtime, "intelligence", None)
+            else None
+        ),
     )
     recovery = None
     from recovery.runtime import (
