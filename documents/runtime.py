@@ -9,7 +9,9 @@ from documents.access import DocumentAccessPolicy
 from documents.chunker import DocumentChunker
 from documents.errors import DOCUMENT_STORE_UNAVAILABLE, DocumentError
 from documents.intelligence.ocr import build_ocr_provider
+from documents.intelligence.raster import build_pdf_rasterizer
 from documents.intelligence.service import DocumentIntelligenceService, build_document_intelligence
+from documents.intelligence.large import LargeDocumentPolicy
 from documents.parsers import build_default_registry
 from documents.retention import DocumentRetentionPolicy
 from documents.service import DocumentService
@@ -79,6 +81,7 @@ class DocumentRuntime:
         retention: DocumentRetentionPolicy | None = None,
         enabled: bool = True,
         ocr_provider=None,
+        rasterizer=None,
         intelligence: DocumentIntelligenceService | None = None,
     ):
         self.service = service
@@ -90,6 +93,7 @@ class DocumentRuntime:
         self.retention = retention or DocumentRetentionPolicy()
         self.enabled = bool(enabled)
         self.ocr_provider = ocr_provider
+        self.rasterizer = rasterizer
         self.intelligence = intelligence
 
     def health(self) -> dict:
@@ -102,6 +106,7 @@ class DocumentRuntime:
         if self.enabled and (not ready or self.service.blocked_reason):
             status = "blocked"
         ocr = self.ocr_provider
+        rast = self.rasterizer
         return {
             "document_status": status,
             "persistence_backend": getattr(self.store, "persistence_backend", "memory"),
@@ -111,6 +116,8 @@ class DocumentRuntime:
             "enabled": self.enabled,
             "ocr_provider": getattr(ocr, "provider_id", "null"),
             "ocr_available": bool(getattr(ocr, "available", False)),
+            "rasterizer": getattr(rast, "provider_id", "null"),
+            "rasterizer_available": bool(getattr(rast, "available", False)),
             "intelligence_ready": self.intelligence is not None,
         }
 
@@ -146,8 +153,12 @@ def build_document_runtime(
             store = InMemoryDocumentStore()
             store.available = False
             ocr = build_ocr_provider(env)
+            rast = build_pdf_rasterizer(env)
             registry = build_default_registry(
                 max_file_bytes=cfg["max_file_bytes"], ocr_provider=ocr
+            )
+            intelligence = build_document_intelligence(
+                env=env, ocr_provider=ocr, rasterizer=rast
             )
             service = DocumentService(
                 store,
@@ -158,11 +169,10 @@ def build_document_runtime(
                 limits=cfg,
                 allowed_roots=allowed_roots,
                 enabled=True,
+                intelligence=intelligence,
             )
             service.blocked_reason = DOCUMENT_STORE_UNAVAILABLE
-            intelligence = build_document_intelligence(
-                document_service=service, env=env, ocr_provider=ocr
-            )
+            intelligence.documents = service
             return DocumentRuntime(
                 service=service,
                 store=store,
@@ -176,11 +186,13 @@ def build_document_runtime(
                 validator=DocumentValidator(),
                 enabled=True,
                 ocr_provider=ocr,
+                rasterizer=rast,
                 intelligence=intelligence,
             )
         raise
 
     ocr = build_ocr_provider(env)
+    rast = build_pdf_rasterizer(env)
     registry = build_default_registry(max_file_bytes=cfg["max_file_bytes"], ocr_provider=ocr)
     access = DocumentAccessPolicy()
     chunker = DocumentChunker(
@@ -189,6 +201,9 @@ def build_document_runtime(
         max_chunks=cfg["max_chunks"],
     )
     validator = DocumentValidator()
+    intelligence = build_document_intelligence(
+        env=env, ocr_provider=ocr, rasterizer=rast
+    )
     service = DocumentService(
         store,
         registry=registry,
@@ -201,10 +216,9 @@ def build_document_runtime(
         limits=cfg,
         allowed_roots=allowed_roots,
         enabled=True,
+        intelligence=intelligence,
     )
-    intelligence = build_document_intelligence(
-        document_service=service, env=env, ocr_provider=ocr
-    )
+    intelligence.documents = service
     return DocumentRuntime(
         service=service,
         store=store,
@@ -215,5 +229,16 @@ def build_document_runtime(
         retention=DocumentRetentionPolicy(),
         enabled=True,
         ocr_provider=ocr,
+        rasterizer=rast,
         intelligence=intelligence,
     )
+
+
+def attach_workflow_runtime(document_runtime: DocumentRuntime | None, workflow_runtime) -> None:
+    """Wire WorkflowRuntimeBundle into document intelligence after composition."""
+    if document_runtime is None or workflow_runtime is None:
+        return
+    document_runtime.service.workflow_runtime = workflow_runtime
+    if document_runtime.intelligence is not None:
+        document_runtime.intelligence.workflow_runtime = workflow_runtime
+

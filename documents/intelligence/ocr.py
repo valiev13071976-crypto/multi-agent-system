@@ -35,10 +35,20 @@ class FakeOCRProvider:
         self._confidence = float(confidence)
 
     def recognize(self, data: bytes, *, filename: str = "") -> dict:
-        _ = data, filename
+        _ = data
+        text = self._text
+        # Allow page-tagged filename for multi-page tests: page-3.png
+        if "page-" in (filename or ""):
+            try:
+                part = filename.split("page-", 1)[1]
+                num = "".join(ch for ch in part if ch.isdigit())
+                if num:
+                    text = f"{self._text} [page {num}]"
+            except Exception:
+                pass
         level = CONF_HIGH if self._confidence >= 0.8 else CONF_MEDIUM if self._confidence >= 0.5 else CONF_LOW
         return {
-            "text": self._text,
+            "text": text,
             "provider": self.provider_id,
             "confidence_raw": self._confidence,
             "confidence_level": level,

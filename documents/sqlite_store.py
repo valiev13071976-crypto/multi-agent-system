@@ -94,6 +94,11 @@ CREATE TABLE IF NOT EXISTS document_chunks (
 );
 CREATE INDEX IF NOT EXISTS idx_document_chunks_doc
 ON document_chunks(document_id, ordinal);
+CREATE TABLE IF NOT EXISTS document_blobs (
+    document_id TEXT PRIMARY KEY,
+    content BLOB NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -506,6 +511,37 @@ class SqliteDocumentStore(DocumentStore):
                 task_id=row["task_id"],
                 parser_version=row["parser_version"] or "",
             )
+
+    def put_blob(self, document_id: str, data: bytes) -> None:
+        if not self.available:
+            raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT INTO document_blobs(document_id, content, created_at)
+                VALUES (?,?,?)
+                ON CONFLICT(document_id) DO UPDATE SET content=excluded.content, created_at=excluded.created_at
+                """,
+                (document_id, bytes(data), _dt_to_db(utc_now())),
+            )
+            self._commit(conn)
+
+    def get_blob(self, document_id: str) -> bytes | None:
+        with self._lock:
+            row = self._connect().execute(
+                "SELECT content FROM document_blobs WHERE document_id=?",
+                (document_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return bytes(row["content"])
+
+    def delete_blob(self, document_id: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            conn.execute("DELETE FROM document_blobs WHERE document_id=?", (document_id,))
+            self._commit(conn)
 
     def _row_to_record(self, row) -> DocumentRecord:
         scope = MemoryScope(

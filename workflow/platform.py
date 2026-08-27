@@ -429,7 +429,7 @@ class WorkflowPlatform:
             if step.step_type == STEP_TYPE_BRANCH and step.step_id not in self._handlers:
                 # pure branch marker — success with empty data; results come from deps
                 return StepResult(ok=True, data={})
-            handler = self._handlers.get(step.step_type) or self._handlers.get(step.step_id)
+            handler = self._handlers.get(step.step_id) or self._handlers.get(step.step_type)
             if handler is None:
                 raise WorkflowDefinitionError(
                     "handler_missing",

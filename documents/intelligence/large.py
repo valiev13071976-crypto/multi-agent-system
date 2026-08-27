@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from security.tenant import normalize_tenant_id
+
 
 @dataclass(frozen=True)
 class LargeDocumentPolicy:
     max_sync_bytes: int = 1_500_000
     max_sync_pages: int = 40
     max_sync_text_chars: int = 400_000
+    pages_per_batch: int = 10
 
     def requires_async(
         self,
@@ -25,6 +28,11 @@ class LargeDocumentPolicy:
         if text_chars > self.max_sync_text_chars:
             return True
         return False
+
+
+def large_extract_execution_key(tenant_id: str, document_id: str, *, version: str = "1") -> str:
+    tid = normalize_tenant_id(tenant_id)
+    return f"doc-extract:{tid}:{document_id}:v{version}"
 
 
 def build_large_doc_plan(
@@ -51,7 +59,9 @@ def build_large_doc_plan(
     return {
         "document_id": document_id,
         "tenant_id": tenant_id,
+        "page_count": page_count,
         "batch_count": len(batches),
         "batches": batches,
         "workflow_type": "document.large_extract",
+        "execution_key": large_extract_execution_key(tenant_id, document_id),
     }

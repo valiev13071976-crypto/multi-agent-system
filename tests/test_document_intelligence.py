@@ -31,6 +31,7 @@ from documents.intelligence.generate import generate_docx, generate_pdf, generat
 from documents.intelligence.large import LargeDocumentPolicy, build_large_doc_plan
 from documents.intelligence.linking import link_documents
 from documents.intelligence.ocr import FakeOCRProvider, NullOCRProvider, build_ocr_provider
+from documents.intelligence.raster import FakePdfRasterizer
 from documents.intelligence.service import DocumentIntelligenceService, build_document_intelligence
 from documents.intelligence.validation import validate_structured
 from documents.models import SOURCE_TEST_FIXTURE, DocumentIngestRequest
@@ -113,12 +114,15 @@ class PdfIntelligenceTests(unittest.TestCase):
         w = PdfWriter()
         w.add_blank_page(width=72, height=72)
         w.write(buf)
-        intel = DocumentIntelligenceService(ocr_provider=FakeOCRProvider("Scanned invoice text"))
+        intel = DocumentIntelligenceService(
+            ocr_provider=FakeOCRProvider("Scanned invoice text"),
+            rasterizer=FakePdfRasterizer(),
+        )
         content = intel.extract_pdf_with_ocr_fallback(
             document_id="d1", data=buf.getvalue(), filename="scan.pdf", tenant_id="t1"
         )
         self.assertIn("invoice", content.text.lower())
-        self.assertEqual(content.extraction_method, "ocr")
+        self.assertEqual(content.extraction_method, "pdf_ocr")
 
 
 class DocxSpreadsheetXmlJsonTests(unittest.TestCase):

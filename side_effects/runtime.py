@@ -709,6 +709,18 @@ def _finalize_runtime(
     except Exception:
         workflow_runtime = None
 
+    if workflow_runtime is not None:
+        try:
+            from documents.intelligence.workflow_def import register_document_workflows
+            from documents.runtime import attach_workflow_runtime
+
+            register_document_workflows(
+                workflow_runtime.definitions, workflow_runtime.platform
+            )
+            attach_workflow_runtime(document_runtime, workflow_runtime)
+        except Exception:
+            pass
+
     acquisition_runtime = None
     try:
         from acquisition.runtime import build_acquisition_runtime_bundle

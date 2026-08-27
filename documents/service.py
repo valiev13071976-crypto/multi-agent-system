@@ -25,10 +25,13 @@ from documents.errors import (
     DOCUMENT_SHEET_NOT_FOUND,
     DOCUMENT_STORE_UNAVAILABLE,
     DOCUMENT_TOO_LARGE,
+    LARGE_DOCUMENT_WORKFLOW_UNAVAILABLE,
     DocumentError,
 )
+from documents.intelligence.large import LargeDocumentPolicy
 from documents.models import (
     CellRange,
+    DOC_PDF,
     DocumentChunkRecord,
     DocumentIngestRequest,
     DocumentProvenance,
@@ -84,6 +87,9 @@ class DocumentService:
         limits: dict | None = None,
         allowed_roots: tuple[str, ...] = (),
         enabled: bool = True,
+        intelligence=None,
+        large_policy: LargeDocumentPolicy | None = None,
+        workflow_runtime=None,
     ):
         self.store = store
         self.registry = registry or build_default_registry(
@@ -108,6 +114,13 @@ class DocumentService:
         self.enabled = bool(enabled)
         self.blocked_reason: str | None = None
         self._parsed_cache: dict[str, object] = {}
+        self.intelligence = intelligence
+        self.large_policy = large_policy or LargeDocumentPolicy()
+        self.workflow_runtime = workflow_runtime
+        if self.intelligence is not None and getattr(self.intelligence, "documents", None) is None:
+            self.intelligence.documents = self
+        if self.intelligence is not None and workflow_runtime is not None:
+            self.intelligence.workflow_runtime = workflow_runtime
 
     def ingest(
         self,
@@ -186,6 +199,28 @@ class DocumentService:
         self._metric("document_ingest_total", doc_type, "ingested", request.sensitivity)
         self._metric("document_bytes_total", doc_type, "ingested", request.sensitivity, amount=len(data))
 
+        # Large-document async path — do not sync-extract over threshold
+        page_count = None
+        if doc_type == DOC_PDF:
+            try:
+                if self.intelligence is not None:
+                    page_count = self.intelligence.peek_pdf_pages(data)
+                else:
+                    from documents.intelligence.pdf_ocr import peek_pdf_page_count
+
+                    page_count = peek_pdf_page_count(data)
+            except DocumentError:
+                page_count = None
+        if self.large_policy.requires_async(
+            size_bytes=len(data), page_count=page_count, text_chars=0
+        ):
+            return self._enqueue_large_extract(
+                created,
+                data=data,
+                page_count=page_count or 1,
+                requesting_scope=req_scope,
+            )
+
         # Parse immediately for foundation completeness
         try:
             parsed_record = self._parse_and_persist(created, data)
@@ -202,6 +237,64 @@ class DocumentService:
         if request.promote_to_memory and self.memory_service is not None:
             self._promote_chunks_to_memory(parsed_record.document_id, requesting_scope=req_scope)
         return parsed_record
+
+    def _enqueue_large_extract(
+        self,
+        record: DocumentRecord,
+        *,
+        data: bytes,
+        page_count: int,
+        requesting_scope: MemoryScope,
+    ) -> DocumentRecord:
+        if self.workflow_runtime is None and (
+            self.intelligence is None or self.intelligence.workflow_runtime is None
+        ):
+            raise DocumentError(LARGE_DOCUMENT_WORKFLOW_UNAVAILABLE)
+        self.store.put_blob(record.document_id, data)
+        tenant = getattr(record.scope, "tenant_ref", None) or "legacy-default"
+        intel = self.intelligence
+        if intel is None:
+            raise DocumentError(LARGE_DOCUMENT_WORKFLOW_UNAVAILABLE)
+        plan = intel.plan_large_extraction(
+            document_id=record.document_id,
+            tenant_id=str(tenant),
+            size_bytes=int(record.size_bytes),
+            page_count=page_count,
+            enqueue=True,
+            metadata={
+                "filename": record.filename_safe,
+                "document_type": record.document_type,
+                "media_type": record.media_type,
+                "content_hash": record.content_hash,
+            },
+        )
+        meta = {
+            **dict(record.metadata_safe),
+            "extraction_mode": "async",
+            "workflow_id": plan.get("workflow_id"),
+            "workflow_status": plan.get("status"),
+            "execution_key": plan.get("execution_key"),
+            "page_count": page_count,
+            "batch_count": plan.get("batch_count"),
+        }
+        updated = _clone(
+            record,
+            status=STATUS_INGESTED,
+            page_count=page_count,
+            metadata_safe=meta,
+            updated_at=utc_now(),
+            warnings=("async_extraction_queued",),
+        )
+        saved = self.store.update(updated, expected_version=record.version)
+        self._emit(
+            "document.async_queued",
+            status="queued",
+            metadata={
+                "document_type": record.document_type,
+                "workflow_id": plan.get("workflow_id"),
+            },
+        )
+        return saved
 
     def ingest_trusted_path(
         self,
@@ -345,6 +438,18 @@ class DocumentService:
         return tuple(results[: request.limit])
 
     def _parse_and_persist(self, record: DocumentRecord, data: bytes) -> DocumentRecord:
+        # PDF: use intelligence OCR/raster path when configured
+        if record.document_type == DOC_PDF and self.intelligence is not None:
+            tenant = getattr(record.scope, "tenant_ref", None) or "legacy-default"
+            parsed = self.intelligence.parse_pdf_to_parsed_document(
+                document_id=record.document_id,
+                data=data,
+                filename=record.filename_safe,
+                limits=self.limits,
+                tenant_id=str(tenant),
+            )
+            return self._persist_parsed(record, parsed)
+
         parser = self.registry.get_parser(record.document_type)
         try:
             parsed = parser.parse(
@@ -357,7 +462,9 @@ class DocumentService:
             raise
         except Exception as exc:
             raise DocumentError("document_parse_failed") from exc
+        return self._persist_parsed(record, parsed)
 
+    def _persist_parsed(self, record: DocumentRecord, parsed) -> DocumentRecord:
         self.validator.validate_parsed(parsed, limits=self.limits)
         provenance_payload = {
             "document_id": record.document_id,

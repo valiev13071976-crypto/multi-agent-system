@@ -121,11 +121,20 @@ if workflow_runtime is not None:
     from workflow.definition import StepResult, STEP_TYPE_HANDLER, STEP_TYPE_BRANCH
 
     register_builtin_definitions(workflow_runtime.definitions)
+    try:
+        from documents.intelligence.workflow_def import register_document_workflows
+
+        register_document_workflows(
+            workflow_runtime.definitions, workflow_runtime.platform
+        )
+    except Exception:
+        pass
 
     async def _default_handler(ctx):
         step = ctx["step"]
         return StepResult(ok=True, data={"step_id": step.step_id, "path": "left"})
 
+    # Default handler for demo step_types; document handlers registered by step_id
     workflow_runtime.platform.register_handler(STEP_TYPE_HANDLER, _default_handler)
     workflow_runtime.platform.register_handler(STEP_TYPE_BRANCH, _default_handler)
 

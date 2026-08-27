@@ -48,6 +48,15 @@ class DocumentStore:
     def get_provenance(self, document_id: str) -> DocumentProvenance | None:
         raise NotImplementedError
 
+    def get_blob(self, document_id: str) -> bytes | None:
+        return None
+
+    def put_blob(self, document_id: str, data: bytes) -> None:
+        return None
+
+    def delete_blob(self, document_id: str) -> None:
+        return None
+
     def close(self) -> None:
         return None
 
@@ -88,6 +97,7 @@ class InMemoryDocumentStore(DocumentStore):
         self._prov: dict[str, DocumentProvenance] = {}
         self._chunks: dict[str, list[DocumentChunkRecord]] = {}
         self._tags: dict[str, tuple[str, ...]] = {}
+        self._blobs: dict[str, bytes] = {}
         self.available = True
         self.connection_mode = "memory"
         self.persistence_backend = "memory"
@@ -182,3 +192,15 @@ class InMemoryDocumentStore(DocumentStore):
     def get_provenance(self, document_id: str):
         with self._lock:
             return self._prov.get(document_id)
+
+    def put_blob(self, document_id: str, data: bytes) -> None:
+        with self._lock:
+            self._blobs[document_id] = bytes(data)
+
+    def get_blob(self, document_id: str) -> bytes | None:
+        with self._lock:
+            return self._blobs.get(document_id)
+
+    def delete_blob(self, document_id: str) -> None:
+        with self._lock:
+            self._blobs.pop(document_id, None)

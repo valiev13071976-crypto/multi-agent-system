@@ -8,7 +8,6 @@ from dataclasses import replace
 from documents.errors import (
     DOCUMENT_ACCESS_DENIED,
     DOCUMENT_REQUIRES_OCR,
-    DOCUMENT_TOO_LARGE,
     OCR_UNAVAILABLE,
     DocumentError,
 )
@@ -26,10 +25,16 @@ from documents.intelligence.contracts import (
 from documents.intelligence.convert import convert_document
 from documents.intelligence.extraction import extract_structured
 from documents.intelligence.generate import generate_docx, generate_pdf, generate_txt
-from documents.intelligence.large import LargeDocumentPolicy, build_large_doc_plan
+from documents.intelligence.large import LargeDocumentPolicy, build_large_doc_plan, large_extract_execution_key
 from documents.intelligence.linking import link_documents
 from documents.intelligence.ocr import NullOCRProvider, build_ocr_provider
-from documents.models import DOC_IMAGE, DOC_PDF, ParsedDocument, content_hash_bytes
+from documents.intelligence.pdf_ocr import (
+    build_pdf_document_content,
+    content_to_parsed_document,
+    peek_pdf_page_count,
+)
+from documents.intelligence.raster import NullPdfRasterizer, build_pdf_rasterizer
+from documents.models import DOC_PDF, ParsedDocument
 from documents.type_detect import resolve_document_type
 from memory.models import MemoryScope
 from security.tenant import normalize_tenant_id, tenants_match
@@ -41,11 +46,15 @@ class DocumentIntelligenceService:
         document_service=None,
         *,
         ocr_provider=None,
+        rasterizer=None,
         large_policy: LargeDocumentPolicy | None = None,
+        workflow_runtime=None,
     ):
         self.documents = document_service
         self.ocr = ocr_provider if ocr_provider is not None else NullOCRProvider()
+        self.rasterizer = rasterizer if rasterizer is not None else NullPdfRasterizer()
         self.large_policy = large_policy or LargeDocumentPolicy()
+        self.workflow_runtime = workflow_runtime
         self._structured_cache: dict[tuple[str, str], StructuredDocument] = {}
         self._content_cache: dict[tuple[str, str], DocumentContent] = {}
 
@@ -163,29 +172,39 @@ class DocumentIntelligenceService:
         limits: dict | None = None,
         tenant_id: str = "legacy-default",
     ) -> DocumentContent:
-        """Text PDF via parser; scanned → OCR when available."""
-        from documents.parsers.pdf import PdfDocumentParser
+        """Text PDF + rasterize scanned pages + OCR; never OCR raw PDF bytes."""
+        _ = tenant_id
+        content = build_pdf_document_content(
+            document_id=document_id,
+            data=data,
+            filename=filename,
+            ocr_provider=self.ocr,
+            rasterizer=self.rasterizer,
+            limits=limits,
+        )
+        self._content_cache[(normalize_tenant_id(tenant_id), document_id)] = content
+        return content
 
-        limits = limits or {}
-        try:
-            parsed = PdfDocumentParser().parse(
-                document_id=document_id, data=data, filename=filename, limits=limits
-            )
-            return content_from_parsed(parsed, extraction_method="pdf_text")
-        except DocumentError as exc:
-            if exc.reason != DOCUMENT_REQUIRES_OCR:
-                raise
-            if not getattr(self.ocr, "available", False):
-                raise
-            # Page-level OCR using pypdf images is limited; treat whole PDF bytes via provider if images
-            # For foundation: OCR unavailable for raw PDF bytes without rasterization → try provider
-            try:
-                return self.ocr_document(
-                    document_id, tenant_id=tenant_id, data=data, filename=filename
-                )
-            except DocumentError:
-                # Explicit: scanned PDF needs raster OCR backend
-                raise DocumentError(OCR_UNAVAILABLE)
+    def parse_pdf_to_parsed_document(
+        self,
+        *,
+        document_id: str,
+        data: bytes,
+        filename: str,
+        limits: dict | None = None,
+        tenant_id: str = "legacy-default",
+    ) -> ParsedDocument:
+        content = self.extract_pdf_with_ocr_fallback(
+            document_id=document_id,
+            data=data,
+            filename=filename,
+            limits=limits,
+            tenant_id=tenant_id,
+        )
+        return content_to_parsed_document(content)
+
+    def peek_pdf_pages(self, data: bytes) -> int:
+        return peek_pdf_page_count(data)
 
     def structured_extract(
         self,
@@ -272,6 +291,8 @@ class DocumentIntelligenceService:
         size_bytes: int = 0,
         page_count: int = 0,
         text_chars: int = 0,
+        enqueue: bool = False,
+        metadata: dict | None = None,
     ) -> dict:
         async_needed = self.large_policy.requires_async(
             size_bytes=size_bytes, page_count=page_count or None, text_chars=text_chars
@@ -282,14 +303,68 @@ class DocumentIntelligenceService:
                 "tenant_id": tenant_id,
                 "async": False,
                 "batches": [],
+                "status": "sync",
             }
         plan = build_large_doc_plan(
             document_id=document_id,
             tenant_id=tenant_id,
             page_count=max(1, page_count),
+            batch_size=self.large_policy.pages_per_batch,
         )
         plan["async"] = True
+        plan["execution_key"] = large_extract_execution_key(tenant_id, document_id)
+        plan["status"] = "planned"
+        if enqueue:
+            plan.update(self.enqueue_large_extraction(plan, metadata=metadata))
         return plan
+
+    def enqueue_large_extraction(self, plan: dict, *, metadata: dict | None = None) -> dict:
+        from documents.errors import LARGE_DOCUMENT_WORKFLOW_UNAVAILABLE
+
+        if self.workflow_runtime is None:
+            raise DocumentError(LARGE_DOCUMENT_WORKFLOW_UNAVAILABLE)
+        tenant_id = str(plan.get("tenant_id") or "legacy-default")
+        document_id = str(plan.get("document_id") or "")
+        tenant = normalize_tenant_id(tenant_id)
+        execution_key = str(
+            plan.get("execution_key")
+            or large_extract_execution_key(tenant_id, document_id)
+        )
+        existing = self.workflow_runtime.state_manager.find_by_execution_key(
+            execution_key, tenant_id=tenant
+        )
+        if existing is not None:
+            enq = self.workflow_runtime.enqueue_existing(existing.workflow_id, idempotent=True)
+            return {
+                "status": enq.get("status") or existing.status,
+                "workflow_id": existing.workflow_id,
+                "execution_key": execution_key,
+                "idempotent": True,
+                "queue_task_id": enq.get("queue_task_id"),
+            }
+        meta = {
+            "document_id": document_id,
+            "tenant_id": tenant,
+            "page_count": int(plan.get("page_count") or 1),
+            "batch_count": int(plan.get("batch_count") or 0),
+            "batches": list(plan.get("batches") or ()),
+            **dict(metadata or {}),
+        }
+        created = self.workflow_runtime.create_workflow(
+            "document.large_extract",
+            "1",
+            execution_key=execution_key,
+            metadata=meta,
+            tenant_id=tenant,
+        )
+        enq = self.workflow_runtime.enqueue_existing(created["workflow_id"])
+        return {
+            "status": enq.get("status") or "queued",
+            "workflow_id": created["workflow_id"],
+            "execution_key": execution_key,
+            "idempotent": False,
+            "queue_task_id": enq.get("queue_task_id"),
+        }
 
     def to_acquisition_artifact_text(self, structured: StructuredDocument) -> tuple[str, str, dict]:
         """Bridge helper — CSV-like text for Acquisition price/supplier parsers."""
@@ -310,7 +385,6 @@ class DocumentIntelligenceService:
                     )
                 )
             return "\n".join(lines), "text/csv", {"record_hint": "supplier_item"}
-        # Generic JSON dump of structured fields
         import json
 
         payload = {
@@ -330,6 +404,16 @@ def build_document_intelligence(
     document_service=None,
     env: dict | None = None,
     ocr_provider=None,
+    rasterizer=None,
+    workflow_runtime=None,
+    large_policy: LargeDocumentPolicy | None = None,
 ) -> DocumentIntelligenceService:
     ocr = ocr_provider if ocr_provider is not None else build_ocr_provider(env)
-    return DocumentIntelligenceService(document_service, ocr_provider=ocr)
+    rast = rasterizer if rasterizer is not None else build_pdf_rasterizer(env)
+    return DocumentIntelligenceService(
+        document_service,
+        ocr_provider=ocr,
+        rasterizer=rast,
+        large_policy=large_policy,
+        workflow_runtime=workflow_runtime,
+    )
