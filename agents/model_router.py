@@ -178,10 +178,11 @@ class ModelRouter:
     providers from ``auto`` only.
     """
 
-    def __init__(self, registry: ProviderRegistry, health_tracker=None):
+    def __init__(self, registry: ProviderRegistry, health_tracker=None, runtime_stats=None):
         self.registry = registry
         self.observability = None
         self.health_tracker = health_tracker
+        self.runtime_stats = runtime_stats
 
     def _model_id(self, provider_id: str) -> str:
         try:
@@ -256,6 +257,23 @@ class ModelRouter:
             if snap is not None:
                 health_state = snap.state
                 health_reason = snap.reason_code
+        runtime_sample_count = None
+        runtime_success_rate = None
+        runtime_latency_avg_ms = None
+        runtime_cost_avg = None
+        runtime_stats_state = None
+        if mode == MODE_AUTO and selected_provider and self.runtime_stats is not None:
+            try:
+                rt = self.runtime_stats.snapshot(
+                    selected_provider, selected_model or ""
+                )
+                runtime_sample_count = rt.sample_count
+                runtime_success_rate = rt.success_rate
+                runtime_latency_avg_ms = rt.latency_avg_ms
+                runtime_cost_avg = rt.cost_avg
+                runtime_stats_state = rt.state
+            except Exception:
+                runtime_stats_state = None
         return build_factor_snapshot(
             mode=mode,
             category=category,
@@ -270,6 +288,11 @@ class ModelRouter:
             max_affordable_cost=max_affordable,
             health_state=health_state,
             health_reason=health_reason,
+            runtime_sample_count=runtime_sample_count,
+            runtime_success_rate=runtime_success_rate,
+            runtime_latency_avg_ms=runtime_latency_avg_ms,
+            runtime_cost_avg=runtime_cost_avg,
+            runtime_stats_state=runtime_stats_state,
             extra={"role_id": role_id},
         )
 
@@ -1019,6 +1042,42 @@ class ModelRouter:
             factor_snapshot=failure_snapshot,
         )
 
+    def _runtime_tiebreak_enabled(self) -> bool:
+        aggregator = self.runtime_stats
+        if aggregator is None:
+            return False
+        policy = getattr(aggregator, "policy", None)
+        return bool(getattr(policy, "tiebreak_enabled", False))
+
+    def _runtime_tie_key(self, provider_id: str, policy: str) -> tuple:
+        """Opt-in soft key among already-eligible candidates. Neutral by default."""
+
+        if not self._runtime_tiebreak_enabled() or self.runtime_stats is None:
+            return (0,)
+        try:
+            snap = self.runtime_stats.snapshot(provider_id, self._model_id(provider_id))
+        except Exception:
+            return (0,)
+        if not getattr(snap, "usable", False):
+            # Insufficient/unknown must not penalize vs peers.
+            return (0,)
+        if policy == POLICY_LATENCY:
+            latency = snap.latency_avg_ms
+            return (0 if latency is not None else 1, latency if latency is not None else 0.0)
+        if policy == POLICY_COST:
+            cost = snap.cost_avg
+            # Unknown actual cost is never treated as zero/cheap.
+            if cost is None:
+                return (1, 0.0)
+            return (0, float(cost))
+        if policy == POLICY_QUALITY:
+            rate = snap.success_rate if snap.success_rate is not None else 0.0
+            return (-rate,)
+        # priority / balanced soft preference: success then latency
+        rate = snap.success_rate if snap.success_rate is not None else 0.0
+        latency = snap.latency_avg_ms if snap.latency_avg_ms is not None else float("inf")
+        return (-rate, latency)
+
     def _rank_providers(self, candidates: tuple[str, ...]) -> str:
         policy = self.registry.auto_routing_policy
         order_index = {
@@ -1029,43 +1088,57 @@ class ModelRouter:
         def tie_break(provider_id: str) -> int:
             return order_index.get(provider_id, len(order_index))
 
+        def with_runtime(static_key):
+            return lambda provider_id: (
+                static_key(provider_id),
+                self._runtime_tie_key(provider_id, policy),
+                tie_break(provider_id),
+            )
+
         if policy == POLICY_PRIORITY:
-            return min(candidates, key=tie_break)
+            return min(
+                candidates,
+                key=with_runtime(lambda _provider_id: (0,)),
+            )
 
         if policy == POLICY_QUALITY:
             return min(
                 candidates,
-                key=lambda provider_id: (
-                    -QUALITY_RANK[self.registry.profile(provider_id).quality_class],
-                    tie_break(provider_id),
+                key=with_runtime(
+                    lambda provider_id: (
+                        -QUALITY_RANK[self.registry.profile(provider_id).quality_class],
+                    )
                 ),
             )
 
         if policy == POLICY_COST:
             return min(
                 candidates,
-                key=lambda provider_id: (
-                    -COST_RANK[self.registry.profile(provider_id).cost_class],
-                    tie_break(provider_id),
+                key=with_runtime(
+                    lambda provider_id: (
+                        -COST_RANK[self.registry.profile(provider_id).cost_class],
+                    )
                 ),
             )
 
         if policy == POLICY_LATENCY:
             return min(
                 candidates,
-                key=lambda provider_id: (
-                    -LATENCY_RANK[self.registry.profile(provider_id).latency_class],
-                    tie_break(provider_id),
+                key=with_runtime(
+                    lambda provider_id: (
+                        -LATENCY_RANK[self.registry.profile(provider_id).latency_class],
+                    )
                 ),
             )
 
         if policy == POLICY_BALANCED:
             return min(
                 candidates,
-                key=lambda provider_id: (
-                    -balanced_score(self.registry.profile(provider_id)),
-                    tie_break(provider_id),
+                key=with_runtime(
+                    lambda provider_id: (
+                        -balanced_score(self.registry.profile(provider_id)),
+                    )
                 ),
             )
 
-        return min(candidates, key=tie_break)
+        return min(candidates, key=with_runtime(lambda _provider_id: (0,)))

@@ -29,6 +29,10 @@ from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier
 from agents.routing_requirements import derive_task_requirements
 from agents.routing_health import ProviderHealthTracker, load_routing_health_policy
+from agents.routing_runtime_stats import (
+    ProviderRuntimeStatsAggregator,
+    load_runtime_stats_policy,
+)
 from config.pricing import (
     load_budget_guard_enabled,
     load_budget_limits,
@@ -100,7 +104,13 @@ class RouterV2:
             if health_policy.enabled
             else None
         )
-        self.model_router = ModelRouter(registry, health_tracker=self.health_tracker)
+        runtime_policy = load_runtime_stats_policy()
+        self.runtime_stats = ProviderRuntimeStatsAggregator(policy=runtime_policy)
+        self.model_router = ModelRouter(
+            registry,
+            health_tracker=self.health_tracker,
+            runtime_stats=self.runtime_stats,
+        )
 
         self.finops = FinOpsService(
             prices=load_price_quotes(),
@@ -130,6 +140,7 @@ class RouterV2:
             budget_guard=self.budget_guard,
         )
         expert_manager.health_tracker = self.health_tracker
+        expert_manager.runtime_stats = self.runtime_stats
 
         self.tool_gateway = ToolGateway(NullSearchProvider())
 

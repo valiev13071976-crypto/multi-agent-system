@@ -1,4 +1,5 @@
 import asyncio
+import time
 import uuid
 from datetime import datetime, timezone
 
@@ -51,6 +52,7 @@ class ExpertManager:
         self.finops = finops
         self.budget_guard = budget_guard
         self.health_tracker = None
+        self.runtime_stats = None
         self.observability = None
         self.last_errors = {}
         self.last_provider_results = {}
@@ -75,6 +77,7 @@ class ExpertManager:
         success: bool,
         error_code: str | None = None,
         exception_type: str | None = None,
+        duration_ms: int | None = None,
     ) -> None:
         obs = self.observability
         if obs is not None:
@@ -90,7 +93,37 @@ class ExpertManager:
                 status="ok" if success else "failed",
                 error_code=error_code,
                 exception_type=exception_type,
+                duration_ms=duration_ms,
             )
+
+    def _record_runtime_outcome(
+        self,
+        *,
+        provider_id: str,
+        model_id: str,
+        result,
+        latency_ms: float | None,
+        cost=None,
+    ) -> None:
+        aggregator = self.runtime_stats
+        if aggregator is None:
+            return
+        if isinstance(result, BaseException):
+            from agents.routing_health import is_qualifying_provider_failure
+
+            if is_qualifying_provider_failure(result):
+                aggregator.record_failure(
+                    provider_id,
+                    model_id,
+                    latency_ms=latency_ms,
+                )
+            return
+        aggregator.record_success(
+            provider_id,
+            model_id,
+            latency_ms=latency_ms,
+            cost=cost,
+        )
 
     def _record_health_outcome(
         self,
@@ -98,32 +131,37 @@ class ExpertManager:
         provider_id: str,
         model_id: str,
         result,
+        latency_ms: float | None = None,
     ) -> None:
         tracker = self.health_tracker
-        if tracker is None:
-            return
         if isinstance(result, BaseException):
             from agents.routing_health import is_qualifying_provider_failure
 
             if is_qualifying_provider_failure(result):
-                tracker.record_failure(
-                    provider_id,
-                    model_id,
-                    error_class=type(result).__name__,
-                )
+                if tracker is not None:
+                    tracker.record_failure(
+                        provider_id,
+                        model_id,
+                        error_class=type(result).__name__,
+                    )
                 self._emit_provider_outcome(
                     provider_id=provider_id,
                     model_id=model_id,
                     success=False,
                     error_code="provider_failure",
                     exception_type=type(result).__name__,
+                    duration_ms=(
+                        int(latency_ms) if latency_ms is not None else None
+                    ),
                 )
             return
-        tracker.record_success(provider_id, model_id)
+        if tracker is not None:
+            tracker.record_success(provider_id, model_id)
         self._emit_provider_outcome(
             provider_id=provider_id,
             model_id=model_id,
             success=True,
+            duration_ms=int(latency_ms) if latency_ms is not None else None,
         )
 
     def _normalize_result(self, provider_id, agent, result) -> ProviderResult:
@@ -162,6 +200,16 @@ class ExpertManager:
             task_id=self.last_task_id,
         )
         return record
+
+    async def _run_provider_timed(self, provider_id, agent, prompt: str):
+        started = time.perf_counter()
+        try:
+            result = await agent.run(prompt)
+        except BaseException as exc:
+            elapsed_ms = (time.perf_counter() - started) * 1000.0
+            return provider_id, exc, elapsed_ms
+        elapsed_ms = (time.perf_counter() - started) * 1000.0
+        return provider_id, result, elapsed_ms
 
     async def run(self, prompt: str, selected=None, task_id=None, agent_id=None):
 
@@ -240,25 +288,37 @@ class ExpertManager:
             if not decision.allowed:
                 raise FinOpsBudgetDeniedError(decision.reason)
 
-        results = await asyncio.gather(
-            *[agent.run(prompt) for _, agent in available],
-            return_exceptions=True,
+        timed = await asyncio.gather(
+            *[
+                self._run_provider_timed(provider_id, agent, prompt)
+                for provider_id, agent in available
+            ]
         )
         self.provider_calls = sum(
-            1 for result in results if not isinstance(result, BaseException)
+            1 for _pid, result, _ms in timed if not isinstance(result, BaseException)
         )
 
         experts = {}
+        by_id = {provider_id: agent for provider_id, agent in available}
 
-        for (provider_id, agent), result in zip(available, results):
+        for provider_id, result, latency_ms in timed:
+            agent = by_id[provider_id]
             reservation = self.last_reservations.get(provider_id)
             model_id = getattr(agent, "model", "") or ""
             self._record_health_outcome(
                 provider_id=provider_id,
                 model_id=model_id,
                 result=result,
+                latency_ms=latency_ms,
             )
             if isinstance(result, BaseException):
+                self._record_runtime_outcome(
+                    provider_id=provider_id,
+                    model_id=model_id,
+                    result=result,
+                    latency_ms=latency_ms,
+                    cost=None,
+                )
                 self.last_errors[provider_id] = {
                     "type": type(result).__name__,
                     "message": redact(str(result)),
@@ -279,9 +339,16 @@ class ExpertManager:
             self.last_provider_results[provider_id] = normalized
             experts[provider_id] = normalized.text
             record = self._record_usage(normalized)
+            actual_cost = record.estimated_cost if record is not None else None
+            self._record_runtime_outcome(
+                provider_id=provider_id,
+                model_id=model_id,
+                result=result,
+                latency_ms=latency_ms,
+                cost=actual_cost,
+            )
             if reservation is not None and guard is not None:
-                actual = record.estimated_cost if record is not None else None
-                if actual is None:
+                if actual_cost is None:
                     guard.reconcile(
                         reservation.reservation_id,
                         actual_cost=None,
@@ -290,7 +357,7 @@ class ExpertManager:
                 else:
                     guard.reconcile(
                         reservation.reservation_id,
-                        actual_cost=actual,
+                        actual_cost=actual_cost,
                         usage_record_key=(
                             f"{record.task_id}:{record.provider_id}:"
                             f"{record.timestamp.isoformat()}"

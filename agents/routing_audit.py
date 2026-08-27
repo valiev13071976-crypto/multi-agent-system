@@ -78,6 +78,11 @@ class RoutingFactorSnapshot:
     mode: str | None = None
     health_state: str | None = None
     health_reason: str | None = None
+    runtime_sample_count: int | None = None
+    runtime_success_rate: float | None = None
+    runtime_latency_avg_ms: float | None = None
+    runtime_cost_avg: str | None = None
+    runtime_stats_state: str | None = None
     extra: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -112,6 +117,11 @@ class RoutingFactorSnapshot:
             "mode": self.mode,
             "health_state": self.health_state,
             "health_reason": self.health_reason,
+            "runtime_sample_count": self.runtime_sample_count,
+            "runtime_success_rate": self.runtime_success_rate,
+            "runtime_latency_avg_ms": self.runtime_latency_avg_ms,
+            "runtime_cost_avg": self.runtime_cost_avg,
+            "runtime_stats_state": self.runtime_stats_state,
             "extra": dict(self.extra),
         }
 
@@ -140,6 +150,11 @@ def build_factor_snapshot(
     max_affordable_cost=None,
     health_state: str | None = None,
     health_reason: str | None = None,
+    runtime_sample_count: int | None = None,
+    runtime_success_rate: float | None = None,
+    runtime_latency_avg_ms: float | None = None,
+    runtime_cost_avg=None,
+    runtime_stats_state: str | None = None,
     extra: Mapping[str, object] | None = None,
 ) -> RoutingFactorSnapshot:
     caps = ()
@@ -168,6 +183,11 @@ def build_factor_snapshot(
         mode=mode,
         health_state=health_state,
         health_reason=health_reason,
+        runtime_sample_count=runtime_sample_count,
+        runtime_success_rate=runtime_success_rate,
+        runtime_latency_avg_ms=runtime_latency_avg_ms,
+        runtime_cost_avg=_cost_str(runtime_cost_avg),
+        runtime_stats_state=runtime_stats_state,
         extra=dict(extra or {}),
     )
 
