@@ -34,6 +34,9 @@ WORKFLOW_RETRYABLE = frozenset(
         "transient_network_error",
         "QueueTimeoutError",
         "step_timeout",
+        "ocr_failed",
+        "extraction_failed",
+        "pdf_rasterization_unavailable",
     }
 )
 

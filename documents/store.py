@@ -57,6 +57,15 @@ class DocumentStore:
     def delete_blob(self, document_id: str) -> None:
         return None
 
+    def save_extract_partial(self, document_id: str, batch_index: int, payload: dict) -> None:
+        return None
+
+    def list_extract_partials(self, document_id: str) -> dict[int, dict]:
+        return {}
+
+    def clear_extract_partials(self, document_id: str) -> None:
+        return None
+
     def close(self) -> None:
         return None
 
@@ -98,6 +107,7 @@ class InMemoryDocumentStore(DocumentStore):
         self._chunks: dict[str, list[DocumentChunkRecord]] = {}
         self._tags: dict[str, tuple[str, ...]] = {}
         self._blobs: dict[str, bytes] = {}
+        self._partials: dict[str, dict[int, dict]] = {}
         self.available = True
         self.connection_mode = "memory"
         self.persistence_backend = "memory"
@@ -204,3 +214,16 @@ class InMemoryDocumentStore(DocumentStore):
     def delete_blob(self, document_id: str) -> None:
         with self._lock:
             self._blobs.pop(document_id, None)
+
+    def save_extract_partial(self, document_id: str, batch_index: int, payload: dict) -> None:
+        with self._lock:
+            bucket = self._partials.setdefault(document_id, {})
+            bucket[int(batch_index)] = dict(payload)
+
+    def list_extract_partials(self, document_id: str) -> dict[int, dict]:
+        with self._lock:
+            return {int(k): dict(v) for k, v in self._partials.get(document_id, {}).items()}
+
+    def clear_extract_partials(self, document_id: str) -> None:
+        with self._lock:
+            self._partials.pop(document_id, None)

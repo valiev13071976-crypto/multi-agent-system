@@ -48,15 +48,30 @@ def peek_pdf_page_count(data: bytes) -> int:
     return len(reader.pages)
 
 
-def extract_pdf_pages_text(data: bytes, *, max_pages: int, max_text: int) -> tuple[dict[int, str], int]:
-    """Return ({page_num: text}, page_count). Empty string means OCR needed."""
+def extract_pdf_pages_text(
+    data: bytes,
+    *,
+    max_pages: int,
+    max_text: int,
+    page_start: int | None = None,
+    page_end: int | None = None,
+) -> tuple[dict[int, str], int]:
+    """Return ({page_num: text}, total_page_count). Empty string means OCR needed.
+
+    When page_start/page_end set (1-based inclusive), only those pages are extracted.
+    """
     reader = _open_pdf_reader(data)
     page_count = len(reader.pages)
-    if page_count > max_pages:
+    if page_count > max_pages and page_start is None:
         raise DocumentError(DOCUMENT_TOO_MANY_PAGES)
+    start = int(page_start or 1)
+    end = int(page_end or page_count)
+    if start < 1 or end < start or end > page_count:
+        raise DocumentError(DOCUMENT_MALFORMED)
     pages: dict[int, str] = {}
     total = 0
-    for i, page in enumerate(reader.pages):
+    for i in range(start - 1, end):
+        page = reader.pages[i]
         try:
             text = (page.extract_text() or "").strip()
         except Exception:
@@ -77,25 +92,32 @@ def build_pdf_document_content(
     ocr_provider,
     rasterizer,
     limits: dict | None = None,
+    page_start: int | None = None,
+    page_end: int | None = None,
 ) -> DocumentContent:
     """
     Text PDF pages keep text layer; empty pages → rasterize → OCR.
     Never sends raw PDF bytes to image-only OCR.
+    Optional page_start/page_end bounds the work to a page slice.
     """
     limits = limits or {}
     max_pages = int(limits.get("max_pages", 200))
     max_text = int(limits.get("max_text_bytes", 1_000_000))
-    page_texts, page_count = extract_pdf_pages_text(data, max_pages=max_pages, max_text=max_text)
+    page_texts, page_count = extract_pdf_pages_text(
+        data,
+        max_pages=max_pages,
+        max_text=max_text,
+        page_start=page_start,
+        page_end=page_end,
+    )
+    range_start = int(page_start or 1)
+    range_end = int(page_end or page_count)
 
     ocr_needed = [p for p, t in page_texts.items() if not t]
     text_pages = [p for p, t in page_texts.items() if t]
     warnings: list[str] = []
     methods = set()
     confidences = []
-
-    if not ocr_needed and not text_pages and page_count > 0:
-        # all empty already captured in ocr_needed
-        pass
 
     if ocr_needed:
         if ocr_provider is None or not getattr(ocr_provider, "available", False):
@@ -104,10 +126,10 @@ def build_pdf_document_content(
             raise DocumentError(OCR_UNAVAILABLE)
         if rasterizer is None or not getattr(rasterizer, "available", False):
             if not text_pages:
-                # Fully scanned and cannot rasterize
                 raise DocumentError(PDF_RASTERIZATION_UNAVAILABLE)
             raise DocumentError(PDF_RASTERIZATION_UNAVAILABLE)
         try:
+            # Only rasterize pages in this batch that need OCR
             rasters = rasterizer.rasterize(data, pages=tuple(ocr_needed))
         except DocumentError:
             raise
@@ -137,13 +159,13 @@ def build_pdf_document_content(
     if text_pages:
         methods.add("pdf_text")
 
-    if page_count > 0 and not any(page_texts.values()):
+    if page_texts and not any(page_texts.values()):
         raise DocumentError(DOCUMENT_REQUIRES_OCR)
 
     pages_meta = []
     sections = []
     ordered_parts = []
-    for p in range(1, page_count + 1):
+    for p in range(range_start, range_end + 1):
         text = page_texts.get(p) or ""
         method = "ocr" if p in ocr_needed else "pdf_text"
         loc = f"pdf:page:{p}" if method == "pdf_text" else f"pdf:ocr:page:{p}"
@@ -183,9 +205,12 @@ def build_pdf_document_content(
         metadata={
             "filename": filename,
             "page_count": page_count,
+            "page_start": range_start,
+            "page_end": range_end,
             "ocr_pages": list(ocr_needed),
             "text_pages": list(text_pages),
             "methods": sorted(methods),
+            "bounded": True,
         },
         extraction_method=extraction_method,
         confidence=conf,

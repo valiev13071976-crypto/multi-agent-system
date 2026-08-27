@@ -376,8 +376,32 @@ class WorkflowPlatform:
                 error_class=result.error_class,
             )
 
+        result_data = dict(result.data or {})
+        # Bounded multi-slice step: persist progress and re-run until continue_step clears
+        if result_data.get("continue_step"):
+            progress = dict(result_data)
+            progress.pop("continue_step", None)
+            meta = {
+                "result": progress,
+                "result_ref": result.result_ref,
+                "progress": progress,
+            }
+            self.state_manager.defer_step(workflow_id, step_id, metadata=meta)
+            self.state_manager.checkpoint(workflow_id)
+            self._obs(
+                "workflow.step.continued",
+                workflow_id,
+                status="running",
+                metadata={
+                    "step_id": step_id,
+                    "batch_index": progress.get("batch_index"),
+                    "batches_remaining": progress.get("batches_remaining"),
+                },
+            )
+            return "continue_step"
+
         meta = {
-            "result": dict(result.data),
+            "result": result_data,
             "result_ref": result.result_ref,
         }
         self.state_manager.complete_step(workflow_id, step_id, metadata=meta)

@@ -99,6 +99,13 @@ CREATE TABLE IF NOT EXISTS document_blobs (
     content BLOB NOT NULL,
     created_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS document_extract_partials (
+    document_id TEXT NOT NULL,
+    batch_index INTEGER NOT NULL,
+    payload_json TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    PRIMARY KEY (document_id, batch_index)
+);
 """
 
 
@@ -541,6 +548,54 @@ class SqliteDocumentStore(DocumentStore):
         with self._lock:
             conn = self._connect()
             conn.execute("DELETE FROM document_blobs WHERE document_id=?", (document_id,))
+            self._commit(conn)
+
+    def save_extract_partial(self, document_id: str, batch_index: int, payload: dict) -> None:
+        if not self.available:
+            raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT INTO document_extract_partials(document_id, batch_index, payload_json, created_at)
+                VALUES (?,?,?,?)
+                ON CONFLICT(document_id, batch_index) DO UPDATE SET
+                    payload_json=excluded.payload_json,
+                    created_at=excluded.created_at
+                """,
+                (
+                    document_id,
+                    int(batch_index),
+                    _json_dumps(dict(payload)),
+                    _dt_to_db(utc_now()),
+                ),
+            )
+            self._commit(conn)
+
+    def list_extract_partials(self, document_id: str) -> dict[int, dict]:
+        with self._lock:
+            rows = self._connect().execute(
+                """
+                SELECT batch_index, payload_json FROM document_extract_partials
+                WHERE document_id=? ORDER BY batch_index
+                """,
+                (document_id,),
+            ).fetchall()
+            out = {}
+            for row in rows:
+                try:
+                    out[int(row["batch_index"])] = json.loads(row["payload_json"] or "{}")
+                except Exception:
+                    out[int(row["batch_index"])] = {}
+            return out
+
+    def clear_extract_partials(self, document_id: str) -> None:
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "DELETE FROM document_extract_partials WHERE document_id=?",
+                (document_id,),
+            )
             self._commit(conn)
 
     def _row_to_record(self, row) -> DocumentRecord:

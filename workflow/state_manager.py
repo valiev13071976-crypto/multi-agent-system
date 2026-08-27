@@ -303,6 +303,31 @@ class StateManager:
         self._store.save(state)
         return state
 
+    def defer_step(self, workflow_id: str, name: str, *, metadata=None) -> WorkflowState:
+        """Keep step pending after a bounded slice — progress in metadata, no attempt bump."""
+        state = self.get(workflow_id)
+        record = state.step(name)
+        if record is None:
+            raise WorkflowTransitionError(state.status, name)
+        now = utc_now()
+        meta = dict(record.metadata)
+        meta.update(metadata or {})
+        record = replace(
+            record,
+            status=STEP_PENDING,
+            completed_at=None,
+            error_code=None,
+            metadata=meta,
+        )
+        state = replace(
+            state,
+            steps=self._replace_step(state.steps, record),
+            updated_at=now,
+            version=state.version + 1,
+        )
+        self._store.save(state)
+        return state
+
     def complete_step(self, workflow_id: str, name: str, metadata=None) -> WorkflowState:
         state = self.get(workflow_id)
         record = state.step(name)

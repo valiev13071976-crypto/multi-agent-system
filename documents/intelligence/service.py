@@ -310,6 +310,9 @@ class DocumentIntelligenceService:
             tenant_id=tenant_id,
             page_count=max(1, page_count),
             batch_size=self.large_policy.pages_per_batch,
+            document_type=str((metadata or {}).get("document_type") or "pdf"),
+            text_chars=text_chars,
+            max_text_chars_per_batch=self.large_policy.max_text_chars_per_batch,
         )
         plan["async"] = True
         plan["execution_key"] = large_extract_execution_key(tenant_id, document_id)

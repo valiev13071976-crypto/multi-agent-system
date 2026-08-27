@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from task_queue.errors import QueueDuplicateExecutionError
-from task_queue.models import ACTIVE_STATUSES, PRIORITY_NORMAL
+from task_queue.models import PRIORITY_NORMAL
 from task_queue.queue import TaskQueue
 from task_queue.worker import ExecutionContextRegistry, TaskWorker, WorkerConfig
 from security.tenant import normalize_tenant_id, scope_execution_key, workflow_tenant_id
@@ -290,7 +290,13 @@ class WorkflowRuntimeBundle:
         exec_key = state.execution_key
         tenant = workflow_tenant_id(state)
         scoped_key = scope_execution_key(tenant, exec_key)
-        self.registry.register(scoped_key, self._make_handler(workflow_id))
+        meta = metadata or {
+            "workflow_type": state.workflow_type or "",
+            "version": state.definition_version or "",
+            "tenant_id": tenant,
+        }
+        handler = self._make_handler(workflow_id)
+        self.registry.register(scoped_key, handler)
         self._obs_queue(workflow_id, "workflow.queued")
         try:
             task = self.queue.enqueue(
@@ -299,24 +305,29 @@ class WorkflowRuntimeBundle:
                 execution_key=scoped_key,
                 priority=priority,
                 timeout_seconds=timeout_seconds,
-                metadata=metadata
-                or {
-                    "workflow_type": state.workflow_type or "",
-                    "version": state.definition_version or "",
-                    "tenant_id": tenant,
-                },
+                metadata=meta,
             )
         except QueueDuplicateExecutionError:
-            existing = self.queue.store.find_by_execution_key(scoped_key)
-            terminal = [t for t in existing if t.status not in ACTIVE_STATUSES]
-            qid = terminal[0].queue_task_id if terminal else None
+            # Prior queue task is terminal, but workflow still needs work
+            # (retry_wait wake / continue after ack). Mint a unique wake key.
+            wake_key = f"{scoped_key}#wake-{uuid.uuid4().hex}"
+            self.registry.register(wake_key, handler)
+            task = self.queue.enqueue(
+                workflow_id=workflow_id,
+                task_id=state.task_id,
+                execution_key=wake_key,
+                priority=priority,
+                timeout_seconds=timeout_seconds,
+                metadata={**dict(meta), "wake_of": scoped_key},
+            )
             return {
                 "workflow_id": state.workflow_id,
                 "task_id": state.task_id,
-                "status": state.status,
+                "status": self.state_manager.get(workflow_id).status,
                 "execution_key": exec_key,
-                "queue_task_id": qid,
-                "idempotent": True,
+                "queue_task_id": task.queue_task_id,
+                "idempotent": False,
+                "wake": True,
             }
         return {
             "workflow_id": state.workflow_id,
@@ -441,7 +452,22 @@ class WorkflowRuntimeBundle:
             state = platform.state_manager.get(workflow_id)
             if state.status == STATUS_QUEUED:
                 platform.state_manager.start(workflow_id)
-            return await platform.advance(workflow_id)
+            last = None
+            # One DAG/batch step per advance call — each extract slice stays bounded.
+            # Drain until terminal/blocked so demos still finish in one worker tick.
+            for _ in range(200):
+                state = platform.state_manager.get(workflow_id)
+                if state.status in TERMINAL_STATUSES:
+                    break
+                if state.status in {STATUS_WAITING_APPROVAL, STATUS_RETRY_WAIT}:
+                    break
+                last = await platform.advance(workflow_id, max_steps=1)
+                if not list(last.get("executed") or ()):
+                    break
+            return last or {
+                "workflow_id": workflow_id,
+                "status": platform.state_manager.get(workflow_id).status,
+            }
 
         return _handler
 
