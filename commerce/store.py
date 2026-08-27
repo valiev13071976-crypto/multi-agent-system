@@ -64,10 +64,17 @@ CREATE TABLE IF NOT EXISTS commerce_reconcile (
     tenant_id TEXT NOT NULL,
     finding_id TEXT NOT NULL,
     severity TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT '',
+    run_id TEXT NOT NULL DEFAULT '',
+    workflow_id TEXT NOT NULL DEFAULT '',
+    order_id TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL,
+    checked_at TEXT NOT NULL,
     created_at TEXT NOT NULL,
     PRIMARY KEY (tenant_id, finding_id)
 );
+CREATE INDEX IF NOT EXISTS idx_commerce_reconcile_tenant
+ON commerce_reconcile(tenant_id, checked_at);
 CREATE TABLE IF NOT EXISTS commerce_rules_used (
     tenant_id TEXT NOT NULL,
     order_id TEXT NOT NULL,
@@ -121,7 +128,131 @@ class CommerceStore:
         with self._lock:
             conn = self._connect()
             conn.executescript(_DDL)
+            self._ensure_reconcile_columns(conn)
             self._commit(conn)
+
+    def _ensure_reconcile_columns(self, conn) -> None:
+        existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(commerce_reconcile)").fetchall()
+        }
+        for name, col_type, default in (
+            ("status", "TEXT", "''"),
+            ("run_id", "TEXT", "''"),
+            ("workflow_id", "TEXT", "''"),
+            ("order_id", "TEXT", "''"),
+            ("checked_at", "TEXT", "''"),
+        ):
+            if name in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE commerce_reconcile ADD COLUMN {name} {col_type} NOT NULL DEFAULT {default}"
+            )
+
+    def list_tenant_ids(self) -> list[str]:
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT DISTINCT tenant_id FROM commerce_orders ORDER BY tenant_id"
+            ).fetchall()
+            return [str(r["tenant_id"]) for r in rows]
+
+    def list_order_ids(self, tenant_id: str) -> list[str]:
+        tenant = normalize_tenant_id(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT order_id FROM commerce_orders WHERE tenant_id=? ORDER BY updated_at DESC",
+                (tenant,),
+            ).fetchall()
+            return [str(r["order_id"]) for r in rows]
+
+    def save_reconcile_finding(
+        self,
+        tenant_id: str,
+        finding_id: str,
+        severity: str,
+        payload: dict,
+        *,
+        status: str = "",
+        run_id: str = "",
+        workflow_id: str = "",
+        order_id: str = "",
+        checked_at: str | None = None,
+    ) -> None:
+        tenant = normalize_tenant_id(tenant_id)
+        stamp = checked_at or _utc().isoformat()
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                "INSERT OR REPLACE INTO commerce_reconcile("
+                "tenant_id, finding_id, severity, status, run_id, workflow_id, order_id, "
+                "payload_json, checked_at, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    tenant,
+                    finding_id,
+                    severity,
+                    status or severity,
+                    run_id,
+                    workflow_id,
+                    order_id,
+                    _j(payload),
+                    stamp,
+                    stamp,
+                ),
+            )
+            self._commit(conn)
+
+    def get_reconcile_finding(self, tenant_id: str, finding_id: str) -> dict | None:
+        tenant = normalize_tenant_id(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM commerce_reconcile WHERE tenant_id=? AND finding_id=?",
+                (tenant, finding_id),
+            ).fetchone()
+            if row is None:
+                return None
+            data = json.loads(row["payload_json"])
+            data.update(
+                {
+                    "finding_id": row["finding_id"],
+                    "severity": row["severity"],
+                    "status": row["status"] or row["severity"],
+                    "run_id": row["run_id"],
+                    "workflow_id": row["workflow_id"],
+                    "order_id": row["order_id"],
+                    "checked_at": row["checked_at"],
+                }
+            )
+            return data
+
+    def list_reconcile(self, tenant_id: str) -> list[dict]:
+        tenant = normalize_tenant_id(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                "SELECT finding_id, severity, status, run_id, workflow_id, order_id, "
+                "payload_json, checked_at FROM commerce_reconcile WHERE tenant_id=? "
+                "ORDER BY checked_at DESC",
+                (tenant,),
+            ).fetchall()
+            out = []
+            for r in rows:
+                item = json.loads(r["payload_json"])
+                item.update(
+                    {
+                        "finding_id": r["finding_id"],
+                        "severity": r["severity"],
+                        "status": r["status"] or r["severity"],
+                        "run_id": r["run_id"],
+                        "workflow_id": r["workflow_id"],
+                        "order_id": r["order_id"],
+                        "checked_at": r["checked_at"],
+                    }
+                )
+                out.append(item)
+            return out
 
     def save_order(self, tenant_id: str, order_id: str, payload: dict, state: str) -> None:
         tenant = normalize_tenant_id(tenant_id)
@@ -268,30 +399,6 @@ class CommerceStore:
                     "details": json.loads(r["details_json"]),
                     "created_at": r["created_at"],
                 }
-                for r in rows
-            ]
-
-    def save_reconcile_finding(self, tenant_id: str, finding_id: str, severity: str, payload: dict) -> None:
-        tenant = normalize_tenant_id(tenant_id)
-        with self._lock:
-            conn = self._connect()
-            conn.execute(
-                "INSERT OR REPLACE INTO commerce_reconcile(tenant_id, finding_id, severity, payload_json, created_at) "
-                "VALUES (?,?,?,?,?)",
-                (tenant, finding_id, severity, _j(payload), _utc().isoformat()),
-            )
-            self._commit(conn)
-
-    def list_reconcile(self, tenant_id: str) -> list[dict]:
-        tenant = normalize_tenant_id(tenant_id)
-        with self._lock:
-            conn = self._connect()
-            rows = conn.execute(
-                "SELECT finding_id, severity, payload_json FROM commerce_reconcile WHERE tenant_id=?",
-                (tenant,),
-            ).fetchall()
-            return [
-                {"finding_id": r["finding_id"], "severity": r["severity"], **json.loads(r["payload_json"])}
                 for r in rows
             ]
 

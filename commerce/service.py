@@ -61,6 +61,7 @@ from commerce.states import (
     ORDER_SHIPMENT,
     ORDER_VALIDATED,
     assert_transition,
+    can_transition,
 )
 from commerce.store import CommerceStore
 from security.tenant import normalize_tenant_id
@@ -697,6 +698,7 @@ class CommerceService:
             order_id=order_id,
             details={"rule_version": decision.rule_version, "refs": list(refs.keys())},
         )
+        self.enqueue_reconcile(tenant_id, order_id=order_id, reason="b2c_completed")
         return CommerceOperationResult(
             operation_id=op_id,
             workflow_id=order_id,
@@ -756,6 +758,7 @@ class CommerceService:
         order = self._transition(self._get_order(tenant_id, order_id), ORDER_SHIPMENT)
         order = self._transition(order, ORDER_COMPLETED)
         self.store.audit(tenant_id, "b2b_own_use_completed", order_id=order_id, details={"rule_version": decision.rule_version})
+        self.enqueue_reconcile(tenant_id, order_id=order_id, reason="b2b_own_use_completed")
         return CommerceOperationResult(
             operation_id=key, workflow_id=order_id, status="completed", external_refs=refs
         )
@@ -850,6 +853,7 @@ class CommerceService:
             order_id=order_id,
             details={"rule_version": decision.rule_version, "edo": sent.external_id, "withdrawn": False},
         )
+        self.enqueue_reconcile(tenant_id, order_id=order_id, reason="b2b_resale_completed")
         return CommerceOperationResult(
             operation_id=op_id, workflow_id=order_id, status="completed", external_refs=refs
         )
@@ -862,6 +866,7 @@ class CommerceService:
         state = order.fulfillment_state
         if state in {ORDER_NEW, ORDER_VALIDATED, ORDER_PAYMENT_PENDING}:
             order = self._transition(order, ORDER_CANCELLED)
+            self.enqueue_reconcile(tenant_id, order_id=order_id, reason="cancelled")
             return CommerceOperationResult(operation_id=f"cancel-{order_id}", workflow_id=order_id, status="cancelled")
         if state == ORDER_RESERVED:
             order = self._transition(order, ORDER_CANCEL_PENDING)
@@ -873,13 +878,16 @@ class CommerceService:
                     idempotency_key=f"cancel-rel:{order_id}:{ln.product_ref}",
                 )
             order = self._transition(self._get_order(tenant_id, order_id), ORDER_CANCELLED)
+            self.enqueue_reconcile(tenant_id, order_id=order_id, reason="cancelled_after_reserve")
             return CommerceOperationResult(operation_id=f"cancel-{order_id}", workflow_id=order_id, status="cancelled")
         if state in {ORDER_FISCALIZATION, ORDER_MARKING, ORDER_SHIPMENT, ORDER_COMPLETED}:
             order = self._transition(order, ORDER_RETURN_PENDING)
+            self.enqueue_reconcile(tenant_id, order_id=order_id, reason="cancel_to_return")
             return CommerceOperationResult(
                 operation_id=f"cancel-{order_id}", workflow_id=order_id, status=ORDER_RETURN_PENDING
             )
         order = self._transition(order, ORDER_CANCEL_PENDING)
+        self.enqueue_reconcile(tenant_id, order_id=order_id, reason="cancel_pending")
         return CommerceOperationResult(
             operation_id=f"cancel-{order_id}", workflow_id=order_id, status=ORDER_CANCEL_PENDING
         )
@@ -940,12 +948,152 @@ class CommerceService:
         self.store.audit(
             tenant_id, "return_completed", order_id=order_id, details={"refs": list(refs.keys())}
         )
+        self.enqueue_reconcile(tenant_id, order_id=order_id, reason="return_completed")
         return CommerceOperationResult(
             operation_id=op_id, workflow_id=order_id, status="completed", external_refs=refs
         )
 
     # ---- reconciliation ----
-    def reconcile_order(self, tenant_id: str, order_id: str) -> dict:
+    def enqueue_reconcile(
+        self,
+        tenant_id: str,
+        *,
+        order_id: str = "",
+        reason: str = "event",
+        idempotency_key: str | None = None,
+    ) -> dict:
+        """Enqueue background commerce.reconcile — never runs legal writes inline."""
+        tenant = normalize_tenant_id(tenant_id)
+        wr = self.workflow_runtime
+        key = idempotency_key or (
+            f"commerce-reconcile-event:{tenant}:{order_id or 'tenant'}:{reason}"
+        )
+        if wr is None:
+            # Tests without workflow: run sync tenant/order reconcile
+            if order_id:
+                result = self.reconcile_order(tenant, order_id, workflow_id="", run_id=key)
+            else:
+                result = self.reconcile_tenant(tenant, workflow_id="", run_id=key)
+            return {"status": "inline", "result": result, "execution_key": key}
+        existing = wr.state_manager.find_by_execution_key(key, tenant_id=tenant)
+        if existing is not None:
+            return {
+                "workflow_id": existing.workflow_id,
+                "execution_key": key,
+                "idempotent": True,
+                "status": existing.status,
+            }
+        meta = {
+            "tenant_id": tenant,
+            "order_id": order_id,
+            "reason": reason,
+            "trigger": "event",
+        }
+        created = wr.create_workflow(
+            "commerce.reconcile",
+            "1",
+            task_id=f"reconcile-{uuid.uuid4().hex[:8]}",
+            execution_key=key,
+            metadata=meta,
+            tenant_id=tenant,
+        )
+        enqueued = wr.enqueue_existing(
+            created["workflow_id"],
+            metadata={"workflow_type": "commerce.reconcile", "version": "1"},
+        )
+        return {**enqueued, "execution_key": key, "idempotent": False}
+
+    def _request_reconcile_hitl(
+        self,
+        *,
+        tenant_id: str,
+        order_id: str,
+        finding_id: str,
+        evidence: list,
+        workflow_id: str = "",
+    ) -> str | None:
+        """HUMAN_REVIEW → existing HITL path. Never auto-correct legal state."""
+        if self.hitl is None:
+            self.store.audit(
+                tenant_id,
+                "reconcile_human_review",
+                order_id=order_id,
+                details={"finding_id": finding_id, "hitl": False},
+            )
+            return None
+        try:
+            from autonomy.models import (
+                ACTION_WRITE,
+                DECISION_REQUIRE_APPROVAL,
+                RISK_HIGH,
+                AutonomyDecision,
+                ProposedAction,
+                utc_now,
+            )
+
+            wf_id = workflow_id or f"commerce-reconcile:{order_id or tenant_id}"
+            action = ProposedAction(
+                action_id=f"reconcile-{finding_id}",
+                workflow_id=wf_id,
+                task_id=finding_id,
+                action_type=ACTION_WRITE,
+                tool_id="commerce.reconcile",
+                operation="human_review",
+                resource=f"tenant:{tenant_id}:order:{order_id or '*'}",
+                risk_class=RISK_HIGH,
+                requested_capabilities=(),
+                tool_trust_level="PRIVILEGED",
+                metadata={
+                    "finding_id": finding_id,
+                    "evidence_count": len(evidence),
+                    "auto_correct": False,
+                },
+            )
+            decision = AutonomyDecision(
+                decision_id=f"dec-{finding_id}",
+                action_id=action.action_id,
+                decision=DECISION_REQUIRE_APPROVAL,
+                risk_class=RISK_HIGH,
+                reason_code="commerce_reconcile_human_review",
+                required_approval=True,
+                capabilities_checked=(),
+                idempotency_required=False,
+                idempotency_satisfied=True,
+                tool_trust_level="PRIVILEGED",
+                timestamp=utc_now(),
+                metadata={"finding_id": finding_id, "auto_correct": False},
+            )
+            record = self.hitl.request_approval(
+                action, decision, requested_by="commerce.reconcile"
+            )
+            self.store.audit(
+                tenant_id,
+                "reconcile_human_review",
+                order_id=order_id,
+                details={
+                    "finding_id": finding_id,
+                    "approval_id": getattr(record, "approval_id", ""),
+                    "hitl": True,
+                },
+            )
+            return getattr(record, "approval_id", None)
+        except Exception:
+            self.store.audit(
+                tenant_id,
+                "reconcile_human_review",
+                order_id=order_id,
+                details={"finding_id": finding_id, "hitl_error": True},
+            )
+            return None
+
+    def reconcile_order(
+        self,
+        tenant_id: str,
+        order_id: str,
+        *,
+        workflow_id: str = "",
+        run_id: str = "",
+    ) -> dict:
         order = self._get_order(tenant_id, order_id)
         findings = []
         # shipped but marking incomplete
@@ -954,44 +1102,178 @@ class CommerceService:
                 for code in ln.marking_code_refs:
                     st = self.marking.read_status(tenant_id=tenant_id, code_ref=code)
                     if order.scenario == "b2b_resale" and st.status != MARKING_TRANSFERRED:
-                        findings.append({"code": "shipped_marking_incomplete", "marking": code, "status": st.status})
+                        findings.append(
+                            {
+                                "code": "shipped_marking_incomplete",
+                                "check_type": "marking",
+                                "marking": code,
+                                "status": st.status,
+                            }
+                        )
                     if order.scenario in {"b2c_fulfillment", "b2b_own_use"} and st.status not in {
                         MARKING_WITHDRAWN,
                         "REINTRODUCED",
                         "AVAILABLE",
                     }:
                         if st.status not in {MARKING_WITHDRAWN}:
-                            findings.append({"code": "marking_incomplete", "marking": code, "status": st.status})
-        # marked/cancelled inconsistency
+                            findings.append(
+                                {
+                                    "code": "marking_incomplete",
+                                    "check_type": "marking",
+                                    "marking": code,
+                                    "status": st.status,
+                                }
+                            )
         if order.fulfillment_state == ORDER_CANCELLED:
             for ln in order.lines:
                 for code in ln.marking_code_refs:
                     st = self.marking.read_status(tenant_id=tenant_id, code_ref=code)
                     if st.status == MARKING_WITHDRAWN:
-                        findings.append({"code": "marked_but_cancelled", "marking": code})
-        # stock mismatch / negative
+                        findings.append(
+                            {
+                                "code": "marked_but_cancelled",
+                                "check_type": "marking_cancel",
+                                "marking": code,
+                            }
+                        )
         for ln in order.lines:
             snap = self.read_inventory(
                 tenant_id=tenant_id, product_ref=ln.product_ref, warehouse=ln.warehouse or "main"
             )
             if snap.available < 0:
-                findings.append({"code": "negative_stock", "product": ln.product_ref})
+                findings.append(
+                    {
+                        "code": "negative_stock",
+                        "check_type": "inventory",
+                        "product": ln.product_ref,
+                    }
+                )
         severity = "OK"
+        status = "OK"
         if findings:
-            severity = "RECONCILIATION_ERROR" if any(
-                f["code"] in {"marked_but_cancelled", "negative_stock"} for f in findings
-            ) else "WARNING"
+            severity = (
+                "RECONCILIATION_ERROR"
+                if any(f["code"] in {"marked_but_cancelled", "negative_stock"} for f in findings)
+                else "WARNING"
+            )
+            status = severity
             if severity == "RECONCILIATION_ERROR":
+                status = "HUMAN_REVIEW"
                 try:
-                    self._transition(order, ORDER_NEEDS_REVIEW if order.fulfillment_state == ORDER_COMPLETED else order.fulfillment_state)
+                    if can_transition("order", order.fulfillment_state, ORDER_NEEDS_REVIEW):
+                        self._transition(order, ORDER_NEEDS_REVIEW)
+                    elif order.fulfillment_state == ORDER_COMPLETED and can_transition(
+                        "order", ORDER_COMPLETED, ORDER_RETURN_PENDING
+                    ):
+                        pass
                 except Exception:
                     pass
+        run = run_id or f"run-{uuid.uuid4().hex[:10]}"
         finding_id = f"rec-{order_id}-{uuid.uuid4().hex[:6]}"
+        approval_id = None
+        if status == "HUMAN_REVIEW":
+            approval_id = self._request_reconcile_hitl(
+                tenant_id=tenant_id,
+                order_id=order_id,
+                finding_id=finding_id,
+                evidence=findings,
+                workflow_id=workflow_id,
+            )
+        # Never auto-correct marking/fiscal/inventory/EDO from findings.
         self.store.save_reconcile_finding(
-            tenant_id, finding_id, severity, {"order_id": order_id, "findings": findings}
+            tenant_id,
+            finding_id,
+            severity,
+            {
+                "findings": findings,
+                "external_refs": dict(order.external_order_refs),
+                "auto_corrected": False,
+                "approval_id": approval_id or "",
+            },
+            status=status,
+            run_id=run,
+            workflow_id=workflow_id,
+            order_id=order_id,
         )
-        self.store.audit(tenant_id, "commerce_reconcile", order_id=order_id, details={"severity": severity})
-        return {"finding_id": finding_id, "severity": severity, "findings": findings}
+        self.store.audit(
+            tenant_id,
+            "commerce_reconcile",
+            order_id=order_id,
+            details={"severity": severity, "status": status, "run_id": run},
+        )
+        return {
+            "finding_id": finding_id,
+            "severity": severity,
+            "status": status,
+            "findings": findings,
+            "run_id": run,
+            "workflow_id": workflow_id,
+            "order_id": order_id,
+            "auto_corrected": False,
+            "approval_id": approval_id,
+        }
+
+    def reconcile_tenant(
+        self,
+        tenant_id: str,
+        *,
+        workflow_id: str = "",
+        run_id: str = "",
+    ) -> dict:
+        """Tenant-scoped batch reconciliation — never cross-tenant."""
+        tenant = normalize_tenant_id(tenant_id)
+        run = run_id or f"run-{uuid.uuid4().hex[:10]}"
+        order_ids = self.store.list_order_ids(tenant)
+        results = []
+        worst = "OK"
+        for oid in order_ids:
+            try:
+                r = self.reconcile_order(
+                    tenant, oid, workflow_id=workflow_id, run_id=run
+                )
+            except Exception as exc:
+                r = {
+                    "order_id": oid,
+                    "severity": "WARNING",
+                    "status": "WARNING",
+                    "error": getattr(exc, "code", "reconcile_error"),
+                }
+            results.append(r)
+            for level in ("OK", "WARNING", "RECONCILIATION_ERROR", "HUMAN_REVIEW"):
+                if r.get("status") == level or r.get("severity") == level:
+                    if ("OK", "WARNING", "RECONCILIATION_ERROR", "HUMAN_REVIEW").index(
+                        level
+                    ) > ("OK", "WARNING", "RECONCILIATION_ERROR", "HUMAN_REVIEW").index(
+                        worst
+                    ):
+                        worst = level
+        summary_id = f"rec-tenant-{uuid.uuid4().hex[:8]}"
+        self.store.save_reconcile_finding(
+            tenant,
+            summary_id,
+            worst if worst != "HUMAN_REVIEW" else "RECONCILIATION_ERROR",
+            {
+                "check_type": "tenant_batch",
+                "order_count": len(order_ids),
+                "result_refs": [r.get("finding_id") for r in results if r.get("finding_id")],
+                "auto_corrected": False,
+            },
+            status=worst,
+            run_id=run,
+            workflow_id=workflow_id,
+            order_id="",
+        )
+        return {
+            "run_id": run,
+            "tenant_id": tenant,
+            "workflow_id": workflow_id,
+            "status": worst,
+            "severity": worst,
+            "order_count": len(order_ids),
+            "results": results,
+            "finding_id": summary_id,
+            "auto_corrected": False,
+        }
 
     def critical_action(
         self,

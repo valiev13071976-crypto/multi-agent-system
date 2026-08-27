@@ -77,14 +77,23 @@ class WorkflowRuntimeBundle:
     async def tick_schedules(self) -> list[str]:
         launched = []
         for due in self.scheduler.due():
-            key = self.scheduler.execution_key_for(due)
+            payload = dict(due.payload or {})
+            # Prefer commerce-specific idempotency key when present
+            if due.workflow_type == "commerce.reconcile":
+                tenant = str(payload.get("tenant_id") or "legacy-default")
+                window = int(due.next_run_at.timestamp())
+                key = f"commerce-reconcile:{tenant}:{window}"
+            else:
+                key = self.scheduler.execution_key_for(due)
+            tenant_id = payload.get("tenant_id")
             try:
                 result = await self.create_and_enqueue(
                     due.workflow_type,
                     due.version,
                     task_id=f"sched-{due.schedule_id}-{due.run_count}",
                     execution_key=key,
-                    metadata={"schedule_id": due.schedule_id, **dict(due.payload)},
+                    metadata={"schedule_id": due.schedule_id, **payload},
+                    tenant_id=str(tenant_id) if tenant_id else None,
                 )
                 self.scheduler.mark_enqueued(due.schedule_id, execution_key=key)
                 launched.append(result["workflow_id"])

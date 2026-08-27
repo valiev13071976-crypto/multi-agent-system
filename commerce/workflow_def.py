@@ -146,8 +146,24 @@ async def commerce_workflow_handler(ctx) -> StepResult:
         return StepResult(ok=True, data={"status": result.status})
 
     if step.step_id == "commerce_reconcile_run":
-        result = svc.reconcile_order(tenant_id, order_id)
-        return StepResult(ok=result.get("severity") == "OK", data=result)
+        workflow_id = getattr(state, "workflow_id", "") or ""
+        order_id = str(meta.get("order_id") or "")
+        run_id = str(
+            getattr(state, "execution_key", None)
+            or meta.get("execution_key")
+            or meta.get("run_id")
+            or workflow_id
+            or ""
+        )
+        if order_id:
+            result = svc.reconcile_order(
+                tenant_id, order_id, workflow_id=workflow_id, run_id=run_id
+            )
+        else:
+            result = svc.reconcile_tenant(
+                tenant_id, workflow_id=workflow_id, run_id=run_id
+            )
+        return StepResult(ok=True, data=result)
 
     return StepResult(ok=True, data={"step_id": step.step_id})
 
