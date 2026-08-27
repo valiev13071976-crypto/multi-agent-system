@@ -65,27 +65,35 @@ class CmsScaffoldAdapter(ScaffoldAdapter):
 
 
 class BitrixAdapter(CmsScaffoldAdapter):
-    """Bitrix HTTP foundation — uses integration config when enabled."""
+    """Bitrix HTTP foundation — uses integration credential bridge when enabled."""
 
-    def __init__(self, *, credential_store=None, enabled: bool = False):
+    def __init__(self, *, credential_store=None, enabled: bool = False, integration_service=None):
         super().__init__(adapter_id="bitrix")
         self._credentials = credential_store
         self._enabled = enabled
+        self._integration_service = integration_service
 
     def health(self) -> str:
         from tools.models import ADAPTER_DEGRADED, ADAPTER_HEALTHY
 
         if not self._enabled:
             return ADAPTER_UNAVAILABLE
-        return ADAPTER_DEGRADED if self._credentials is None else ADAPTER_HEALTHY
+        if self._integration_service is not None or self._credentials is not None:
+            return ADAPTER_HEALTHY
+        return ADAPTER_DEGRADED
 
     async def execute_read(self, request, context) -> dict:
         if request.operation == "product_read":
+            # Credentials presence does not grant permission; scaffold read only.
+            integration_id = str((request.arguments or {}).get("integration_id") or "")
+            if integration_id and self._credentials and request.tenant_id:
+                self._credentials.assert_tenant_access(request.tenant_id, integration_id)
             return {
                 "scaffold": True,
                 "adapter": "bitrix",
                 "operation": request.operation,
                 "provenance": {"integration": "bitrix"},
+                "auth": "server_side_ref_only",
             }
         raise ToolUnavailableError()
 

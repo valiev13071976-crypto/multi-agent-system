@@ -1,4 +1,7 @@
-"""Tenant-scoped integration configuration and credential references."""
+"""Tenant-scoped integration configuration and credential references.
+
+Compatibility layer — production resolution goes through integrations.runtime.
+"""
 
 from __future__ import annotations
 
@@ -51,7 +54,10 @@ class IntegrationConfig:
 
 
 class IntegrationCredentialStore:
-    """In-process tenant-scoped credential resolver. Production uses env/secret store."""
+    """
+    In-process tenant-scoped credential resolver for unit tests / bootstrap fallback.
+    Production compose injects IntegrationCredentialBridge instead.
+    """
 
     def __init__(self):
         self._configs: dict[tuple[str, str], IntegrationConfig] = {}
@@ -61,15 +67,19 @@ class IntegrationCredentialStore:
         key = (config.tenant_id, config.integration_id)
         self._configs[key] = config
         if secret:
-            self._secrets[(config.tenant_id, config.credential_ref or config.integration_id)] = secret
+            self._secrets[(config.tenant_id, config.credential_ref or config.integration_id)] = (
+                secret
+            )
 
     def get_config(self, tenant_id: str, integration_id: str) -> IntegrationConfig | None:
         return self._configs.get((normalize_tenant_id(tenant_id), integration_id))
 
     def resolve_secret(self, ref: IntegrationCredentialRef) -> str | None:
-        if ref.tenant_id != normalize_tenant_id(ref.tenant_id):
+        tenant = normalize_tenant_id(ref.tenant_id)
+        if tenant != ref.tenant_id and normalize_tenant_id(ref.tenant_id) != tenant:
             return None
-        return self._secrets.get((ref.tenant_id, ref.credential_key))
+        # Cross-tenant: ref must match lookup tenant semantics
+        return self._secrets.get((tenant, ref.credential_key))
 
     def assert_tenant_access(self, requester_tenant: str, integration_id: str) -> IntegrationConfig:
         cfg = self.get_config(requester_tenant, integration_id)
