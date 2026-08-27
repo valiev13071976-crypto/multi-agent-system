@@ -68,6 +68,7 @@ from tools.models import (
 )
 from tools.observability import ToolMetrics
 from tools.registry import ToolRegistry
+from tools.router import ToolRouter
 from tools.search.http_provider import SearchUnavailableError
 from tools.search.null_provider import NullSearchProvider
 from tools.trust import trust_for_domain
@@ -194,6 +195,7 @@ class ToolGateway:
         register_search: bool = True,
         observability=None,
         obs_context=None,
+        router: ToolRouter | None = None,
     ):
         self._provider = search_provider or NullSearchProvider()
         self._timeout_seconds = float(timeout_seconds)
@@ -205,6 +207,7 @@ class ToolGateway:
         self._total_results = 0
         self.queries: list[str] = []
         self.registry = registry or ToolRegistry()
+        self.router = router or ToolRouter(self.registry)
         self.side_effect_executor = side_effect_executor
         self.gate = gate
         self.hitl = hitl
@@ -380,9 +383,9 @@ class ToolGateway:
         try:
             self._reject_bypass(request)
             args = validate_tool_arguments(dict(request.arguments))
-            descriptor = self.registry.get(request.tool_id)
-            if not descriptor.enabled:
-                raise ToolDisabledError()
+            capability = str(request.capability_context or "").strip() or None
+            route = self.router.route(request, capability=capability)
+            descriptor = route.descriptor
             if request.operation not in descriptor.operations:
                 raise ToolOperationNotAllowedError()
             self._require_capabilities(descriptor, request, capabilities)
@@ -566,16 +569,20 @@ class ToolGateway:
         except asyncio.TimeoutError as exc:
             raise ToolTimeoutError() from exc
         duration = int((utc_now() - started).total_seconds() * 1000)
+        payload = data if isinstance(data, dict) else {"value": data}
+        provenance = dict(payload.get("provenance") or {})
         result = ToolResult(
             request_id=request.request_id,
             tool_id=descriptor.tool_id,
             operation=request.operation,
             status=TOOL_STATUS_SUCCEEDED,
             success=True,
-            data=bound_result_data(data if isinstance(data, dict) else {"value": data}),
+            data=bound_result_data(payload),
             trust_level=descriptor.trust_level,
             side_effect=False,
             duration_ms=duration,
+            adapter_id=getattr(adapter, "adapter_id", descriptor.adapter_id),
+            provenance=provenance,
         )
         self.audit.record(
             EVENT_TOOL_READ_COMPLETED,
@@ -583,6 +590,11 @@ class ToolGateway:
             tool_id=descriptor.tool_id,
             operation=request.operation,
             duration_ms=duration,
+            adapter_id=result.adapter_id,
+            trust_level=descriptor.trust_level,
+            side_effect_level=descriptor.side_effect_level,
+            tenant_id=request.tenant_id,
+            user_id=request.user_id,
         )
         return result
 

@@ -34,6 +34,36 @@ TOOL_TRUST_LEVELS = (
     TOOL_TRUST_PRIVILEGED,
 )
 
+# Canonical side-effect levels (maps to trust for policy)
+SIDE_EFFECT_NONE = "none"
+SIDE_EFFECT_READ = "read"
+SIDE_EFFECT_WRITE = "write"
+SIDE_EFFECT_CRITICAL = "critical"
+SIDE_EFFECT_LEVELS = (
+    SIDE_EFFECT_NONE,
+    SIDE_EFFECT_READ,
+    SIDE_EFFECT_WRITE,
+    SIDE_EFFECT_CRITICAL,
+)
+
+# Retry policy tokens — execution defers to Workflow/TaskQueue when transient
+RETRY_NONE = "none"
+RETRY_TRANSIENT = "transient"
+RETRY_WORKFLOW = "workflow"
+RETRY_POLICIES = (RETRY_NONE, RETRY_TRANSIENT, RETRY_WORKFLOW)
+
+# Adapter health states (separate from ModelHealth)
+ADAPTER_HEALTHY = "healthy"
+ADAPTER_DEGRADED = "degraded"
+ADAPTER_UNAVAILABLE = "unavailable"
+ADAPTER_UNKNOWN = "unknown"
+ADAPTER_HEALTH_STATES = (
+    ADAPTER_HEALTHY,
+    ADAPTER_DEGRADED,
+    ADAPTER_UNAVAILABLE,
+    ADAPTER_UNKNOWN,
+)
+
 WRITE_TRUST_LEVELS = frozenset(
     {
         TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
@@ -192,11 +222,21 @@ class ToolDescriptor:
     network_access: bool = False
     resource_prefix: str = ""
     schema_hash: str = ""
+    category: str = ""
+    adapter_id: str = ""
+    side_effect_level: str = SIDE_EFFECT_NONE
+    retry_policy: str = RETRY_NONE
+    input_schema_ref: str = ""
+    output_schema_ref: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.trust_level not in TOOL_TRUST_LEVELS:
             raise ValueError(f"Invalid trust_level: {self.trust_level!r}")
+        if self.side_effect_level not in SIDE_EFFECT_LEVELS:
+            raise ValueError(f"Invalid side_effect_level: {self.side_effect_level!r}")
+        if self.retry_policy not in RETRY_POLICIES:
+            raise ValueError(f"Invalid retry_policy: {self.retry_policy!r}")
         if not str(self.version or "").strip():
             raise ValueError("tool_version_required")
         if not str(self.tool_id or "").strip():
@@ -206,6 +246,8 @@ class ToolDescriptor:
         object.__setattr__(self, "capabilities_required", tuple(self.capabilities_required))
         object.__setattr__(self, "action_types_supported", tuple(self.action_types_supported))
         object.__setattr__(self, "operations", tuple(self.operations))
+        if not self.adapter_id:
+            object.__setattr__(self, "adapter_id", self.tool_id.split(".", 1)[0])
         object.__setattr__(self, "metadata", _meta(self.metadata))
         if self.read_only and self.trust_level in WRITE_TRUST_LEVELS:
             raise ValueError("read_only_trust_mismatch")
@@ -230,6 +272,10 @@ class ToolRequest:
     dry_run: bool = False
     created_at: datetime | None = None
     correlation_id: str = ""
+    tenant_id: str = ""
+    user_id: str = ""
+    step_id: str = ""
+    capability_context: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
@@ -257,12 +303,15 @@ class ToolResult:
     permit_id: str | None = None
     external_reference: str | None = None
     duration_ms: int = 0
+    adapter_id: str = ""
+    provenance: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
         if self.status not in TOOL_STATUSES:
             raise ValueError(f"Invalid tool status: {self.status!r}")
         object.__setattr__(self, "data", _meta(self.data))
+        object.__setattr__(self, "provenance", _meta(self.provenance))
         object.__setattr__(self, "metadata", _meta(self.metadata))
 
 

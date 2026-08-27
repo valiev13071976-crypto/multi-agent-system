@@ -31,6 +31,7 @@ from side_effects.registry import empty_adapter_registry
 from tools.adapters import descriptor_from_side_effect, github_issue_labels_descriptor
 from tools.gateway import ToolGateway
 from tools.registry import ToolRegistry
+from tools.router import ToolRouter
 from observability.runtime import ObservabilityRuntime, build_observability_runtime
 from workflow.engine import WorkflowEngine
 from workflow.state_manager import StateManager
@@ -389,8 +390,10 @@ def build_tool_gateway(
     github_enabled: bool = False,
     observability: ObservabilityRuntime | None = None,
     env: dict | None = None,
+    document_service=None,
+    freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
-    """Register built-in tools, optionally GitHub write tool, then freeze."""
+    """Register built-in tools, platform adapters, optionally GitHub write, then freeze."""
 
     tool_registry = ToolRegistry()
     gateway = ToolGateway(
@@ -438,7 +441,22 @@ def build_tool_gateway(
         gateway._procurement_adapters = adapters  # noqa: SLF001
     except Exception:
         gateway._procurement_adapters = {}
-    tool_registry.freeze()
+    from tools.platform.bootstrap import register_platform_tools
+
+    platform = register_platform_tools(
+        tool_registry,
+        env=env,
+        document_service=document_service,
+    )
+    router = ToolRouter(gateway.registry)
+    for adapter in platform["adapters"].values():
+        adapter_id = getattr(adapter, "adapter_id", "")
+        if adapter_id and hasattr(adapter, "health"):
+            router.set_adapter_health(adapter_id, adapter.health())
+    gateway.router = router
+    gateway._integration_credential_store = platform.get("credential_store")  # noqa: SLF001
+    if freeze:
+        tool_registry.freeze()
     gateway.side_effect_executor = executor
     gateway.gate = gate
     gateway.hitl = hitl
@@ -473,88 +491,6 @@ def _finalize_runtime(
     executor.observability = obs
     if getattr(executor, "reconciliation_service", None) is not None:
         executor.reconciliation_service.observability = obs
-    tool_registry, tool_gateway = build_tool_gateway(
-        side_effect_registry=registry,
-        executor=executor,
-        gate=gate,
-        hitl=hitl,
-        github_enabled=bool(config.enabled and registry.get("github.issue_labels") is not None)
-        if hasattr(registry, "get")
-        else False,
-        observability=obs,
-        env=env,
-    )
-    recovery = None
-    from recovery.runtime import (
-        _fail_closed_orchestrator,
-        build_recovery_orchestrator,
-        recovery_config,
-        run_startup_recovery_materialization,
-    )
-    from recovery.store import RecoveryPersistenceUnavailableError
-
-    try:
-        recovery = build_recovery_orchestrator(
-            env=env,
-            persistence=persistence,
-            reconciliation_service=getattr(executor, "reconciliation_service", None),
-            workflow_engine=engine,
-            gate=gate,
-            hitl=hitl,
-            side_effect_executor=executor,
-            observability=obs,
-            audit=audit,
-        )
-    except RecoveryPersistenceUnavailableError:
-        recovery = _fail_closed_orchestrator(
-            recovery_config(env),
-            reconciliation_service=getattr(executor, "reconciliation_service", None),
-            workflow_engine=engine,
-            gate=gate,
-            hitl=hitl,
-            side_effect_executor=executor,
-            observability=obs,
-            audit=audit,
-        )
-    except Exception:
-        # Non-persistence composition errors: fail closed only for durable sqlite.
-        if (
-            persistence is not None
-            and persistence.backend == "sqlite"
-            and persistence.ready
-            and persistence.connection is not None
-        ):
-            recovery = _fail_closed_orchestrator(
-                recovery_config(env),
-                reconciliation_service=getattr(executor, "reconciliation_service", None),
-                workflow_engine=engine,
-                gate=gate,
-                hitl=hitl,
-                side_effect_executor=executor,
-                observability=obs,
-                audit=audit,
-            )
-        else:
-            recovery = None
-    # Attach recovery when enabled.
-    if recovery is not None:
-        executor.recovery_orchestrator = recovery
-        if (
-            persistence is not None
-            and persistence.last_scan is not None
-            and getattr(recovery.store, "available", True)
-        ):
-            try:
-                run_startup_recovery_materialization(
-                    recovery,
-                    execution_store=persistence.execution_store,
-                    reconciliation_store=persistence.reconciliation_store,
-                    permit_store=persistence.permit_store,
-                    enqueue=True,
-                )
-            except Exception:
-                pass
-
     memory_runtime = None
     from memory.runtime import build_memory_runtime, memory_config
 
@@ -605,6 +541,87 @@ def _finalize_runtime(
         document_runtime = None
     if document_runtime is not None:
         engine.document_service = document_runtime.service
+
+    tool_registry, tool_gateway = build_tool_gateway(
+        side_effect_registry=registry,
+        executor=executor,
+        gate=gate,
+        hitl=hitl,
+        github_enabled=bool(config.enabled and registry.get("github.issue_labels") is not None)
+        if hasattr(registry, "get")
+        else False,
+        observability=obs,
+        env=env,
+        document_service=document_runtime.service if document_runtime else None,
+    )
+    recovery = None
+    from recovery.runtime import (
+        _fail_closed_orchestrator,
+        build_recovery_orchestrator,
+        recovery_config,
+        run_startup_recovery_materialization,
+    )
+    from recovery.store import RecoveryPersistenceUnavailableError
+
+    try:
+        recovery = build_recovery_orchestrator(
+            env=env,
+            persistence=persistence,
+            reconciliation_service=getattr(executor, "reconciliation_service", None),
+            workflow_engine=engine,
+            gate=gate,
+            hitl=hitl,
+            side_effect_executor=executor,
+            observability=obs,
+            audit=audit,
+        )
+    except RecoveryPersistenceUnavailableError:
+        recovery = _fail_closed_orchestrator(
+            recovery_config(env),
+            reconciliation_service=getattr(executor, "reconciliation_service", None),
+            workflow_engine=engine,
+            gate=gate,
+            hitl=hitl,
+            side_effect_executor=executor,
+            observability=obs,
+            audit=audit,
+        )
+    except Exception:
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.ready
+            and persistence.connection is not None
+        ):
+            recovery = _fail_closed_orchestrator(
+                recovery_config(env),
+                reconciliation_service=getattr(executor, "reconciliation_service", None),
+                workflow_engine=engine,
+                gate=gate,
+                hitl=hitl,
+                side_effect_executor=executor,
+                observability=obs,
+                audit=audit,
+            )
+        else:
+            recovery = None
+    if recovery is not None:
+        executor.recovery_orchestrator = recovery
+        if (
+            persistence is not None
+            and persistence.last_scan is not None
+            and getattr(recovery.store, "available", True)
+        ):
+            try:
+                run_startup_recovery_materialization(
+                    recovery,
+                    execution_store=persistence.execution_store,
+                    reconciliation_store=persistence.reconciliation_store,
+                    permit_store=persistence.permit_store,
+                    enqueue=True,
+                )
+            except Exception:
+                pass
 
     knowledge_runtime = None
     from knowledge.runtime import build_knowledge_runtime

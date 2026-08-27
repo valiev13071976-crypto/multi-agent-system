@@ -69,6 +69,47 @@ class ToolRegistry:
     def list_operations(self, tool_id: str) -> tuple[str, ...]:
         return self.get(tool_id).operations
 
+    def unregister(self, tool_id: str) -> None:
+        if self._frozen:
+            raise ToolRegistryFrozenError()
+        self._items.pop(tool_id, None)
+
+    def find_by_capability(self, capability: str) -> tuple[ToolDescriptor, ...]:
+        cap = str(capability or "").strip()
+        if not cap:
+            return ()
+        out = []
+        for row in self._items.values():
+            desc = row.descriptor
+            if not desc.enabled:
+                continue
+            if cap in desc.capabilities_required or cap == desc.category:
+                out.append(desc)
+        return tuple(out)
+
+    def find_by_category(self, category: str) -> tuple[ToolDescriptor, ...]:
+        cat = str(category or "").strip()
+        return tuple(
+            row.descriptor
+            for row in self._items.values()
+            if row.descriptor.enabled and row.descriptor.category == cat
+        )
+
+    def validate_startup(self) -> list[str]:
+        errors: list[str] = []
+        seen_versions: dict[str, set[str]] = {}
+        for row in self._items.values():
+            desc = row.descriptor
+            if not desc.version:
+                errors.append(f"missing_version:{desc.tool_id}")
+            if desc.read_only and desc.trust_level in WRITE_TRUST_LEVELS:
+                errors.append(f"trust_mismatch:{desc.tool_id}")
+            versions = seen_versions.setdefault(desc.tool_id, set())
+            if desc.version in versions:
+                errors.append(f"duplicate_version:{desc.tool_id}:{desc.version}")
+            versions.add(desc.version)
+        return errors
+
     def health(self) -> Mapping[str, object]:
         descriptors = [row.descriptor for row in self._items.values()]
         return MappingProxyType(

@@ -42,6 +42,11 @@ class ToolPolicyDeniedError(ToolError):
         super().__init__(error_code)
 
 
+class ToolPermissionDeniedError(ToolError):
+    def __init__(self, error_code: str = "tool_permission_denied"):
+        super().__init__(error_code)
+
+
 class ToolApprovalRequiredError(ToolError):
     def __init__(self, error_code: str = "tool_approval_required"):
         super().__init__(error_code)
@@ -74,4 +79,39 @@ class ToolRegistryConflictError(ToolError):
 
 class ToolIdempotencyRequiredError(ToolError):
     def __init__(self, error_code: str = "idempotency_key_required"):
+        super().__init__(error_code)
+
+
+class ToolAuthFailedError(ToolError):
+    def __init__(self, error_code: str = "tool_auth_failed"):
+        super().__init__(error_code)
+
+
+class ToolRateLimitedError(ToolError):
+    def __init__(self, error_code: str = "tool_rate_limited"):
+        super().__init__(error_code)
+
+
+class ToolTransientFailureError(ToolError):
+    def __init__(self, error_code: str = "tool_transient_failure"):
+        super().__init__(error_code)
+
+
+class ToolPermanentFailureError(ToolError):
+    def __init__(self, error_code: str = "tool_permanent_failure"):
+        super().__init__(error_code)
+
+
+class ToolConflictError(ToolError):
+    def __init__(self, error_code: str = "tool_conflict"):
+        super().__init__(error_code)
+
+
+class ToolCancelledError(ToolError):
+    def __init__(self, error_code: str = "tool_cancelled"):
+        super().__init__(error_code)
+
+
+class ToolUnavailableError(ToolError):
+    def __init__(self, error_code: str = "tool_unavailable"):
         super().__init__(error_code)
