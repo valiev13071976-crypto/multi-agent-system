@@ -408,6 +408,43 @@ class CommerceService:
             return self._transition(order, ORDER_NEEDS_REVIEW)
         return self._transition(order, ORDER_VALIDATED)
 
+    def update_payment_reference(
+        self,
+        *,
+        tenant_id: str,
+        order_id: str,
+        payment_status: str,
+        payment_refs: list[str] | tuple[str, ...] | None = None,
+        unlock_code: str = "",
+    ) -> CommerceOrder:
+        """Explicit Payments→Commerce contract: safe payment refs only, no payments engine."""
+        order = self._get_order(tenant_id, order_id)
+        refs = list(payment_refs or [])
+        primary = refs[0] if refs else order.payment_state_ref
+        order = replace(
+            order,
+            payment_status=str(payment_status or order.payment_status),
+            payment_state_ref=str(primary or order.payment_state_ref),
+            provenance={
+                **dict(order.provenance),
+                "payment_unlock_code": unlock_code,
+                "payment_refs": refs,
+            },
+            updated_at=_utc(),
+        )
+        self._save(order)
+        self.store.audit(
+            tenant_id,
+            "payment_reference_updated",
+            order_id=order_id,
+            details={
+                "payment_status": order.payment_status,
+                "unlock_code": unlock_code,
+                "refs_count": len(refs),
+            },
+        )
+        return order
+
     # ---- inventory / reservation ----
     def read_inventory(self, *, tenant_id: str, product_ref: str, warehouse: str) -> InventoryPosition:
         return self.inventory.snapshot(tenant_id=tenant_id, product_ref=product_ref, warehouse=warehouse)

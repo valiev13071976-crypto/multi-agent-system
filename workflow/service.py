@@ -83,6 +83,10 @@ class WorkflowRuntimeBundle:
                 tenant = str(payload.get("tenant_id") or "legacy-default")
                 window = int(due.next_run_at.timestamp())
                 key = f"commerce-reconcile:{tenant}:{window}"
+            elif due.workflow_type == "payments.reconcile":
+                tenant = str(payload.get("tenant_id") or "legacy-default")
+                window = int(due.next_run_at.timestamp())
+                key = f"payments-reconcile:{tenant}:{window}"
             else:
                 key = self.scheduler.execution_key_for(due)
             tenant_id = payload.get("tenant_id")

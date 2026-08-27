@@ -78,6 +78,15 @@ TOOL_MARKING_STATUS = "marking.status"
 TOOL_MARKING_TRANSFER = "marking.transfer"
 TOOL_FISCAL_STATUS = "fiscal.status"
 TOOL_COMMERCE_RECONCILE = "commerce.reconcile"
+TOOL_PAYMENTS_READ = "payments.read"
+TOOL_PAYMENTS_STATUS = "payments.status"
+TOOL_PAYMENTS_MATCH = "payments.match"
+TOOL_PAYMENTS_RECONCILE = "payments.reconcile"
+TOOL_PAYMENTS_ALLOCATE = "payments.allocate"
+TOOL_PAYMENTS_PREPARE_REFUND = "payments.prepare_refund"
+TOOL_PAYMENTS_EXECUTE_REFUND = "payments.execute_refund"
+TOOL_BANK_TRANSACTIONS = "bank.transactions"
+TOOL_BANK_STATEMENT_READ = "bank.statement.read"
 
 
 def _read_desc(
@@ -907,4 +916,138 @@ def fiscal_status_descriptor(*, enabled: bool = False) -> ToolDescriptor:
 def commerce_reconcile_descriptor(*, enabled: bool = False) -> ToolDescriptor:
     return _commerce_read_descriptor(
         TOOL_COMMERCE_RECONCILE, "Commerce Reconcile", ("reconcile",), enabled=enabled
+    )
+
+
+def _payments_read_descriptor(
+    tool_id: str, name: str, operations: tuple[str, ...], *, enabled: bool = False
+) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=tool_id,
+        name=name,
+        description=name,
+        category="payments",
+        adapter_id="payments",
+        capabilities=(CAP_EXTERNAL_READ,),
+        operations=operations,
+        enabled=enabled,
+        timeout=20.0,
+        network=False,
+    )
+
+
+def payments_read_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _payments_read_descriptor(
+        TOOL_PAYMENTS_READ, "Payments Read", ("payments_read",), enabled=enabled
+    )
+
+
+def payments_status_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _payments_read_descriptor(
+        TOOL_PAYMENTS_STATUS, "Payments Status", ("payments_status",), enabled=enabled
+    )
+
+
+def payments_match_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _payments_read_descriptor(
+        TOOL_PAYMENTS_MATCH, "Payments Match", ("payments_match",), enabled=enabled
+    )
+
+
+def payments_reconcile_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _payments_read_descriptor(
+        TOOL_PAYMENTS_RECONCILE,
+        "Payments Reconcile",
+        ("payments_reconcile",),
+        enabled=enabled,
+    )
+
+
+def bank_transactions_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _payments_read_descriptor(
+        TOOL_BANK_TRANSACTIONS,
+        "Bank Transactions",
+        ("bank_transactions",),
+        enabled=enabled,
+    )
+
+
+def bank_statement_read_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return _payments_read_descriptor(
+        TOOL_BANK_STATEMENT_READ,
+        "Bank Statement Read",
+        ("bank_statement_read",),
+        enabled=enabled,
+    )
+
+
+def payments_allocate_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_PAYMENTS_ALLOCATE,
+        name="Payments Allocate",
+        description="Allocate payment to order/invoice",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("payments_allocate",),
+        read_only=False,
+        reversible=True,
+        idempotency_required=True,
+        timeout_seconds=30.0,
+        enabled=enabled,
+        network_access=False,
+        category="payments",
+        adapter_id="payments",
+        side_effect_level=SIDE_EFFECT_WRITE,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("payments_allocate",), ("idempotency_key",)),
+    )
+
+
+def payments_prepare_refund_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_PAYMENTS_PREPARE_REFUND,
+        name="Payments Prepare Refund",
+        description="Prepare refund request (does not execute)",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("payments_prepare_refund",),
+        read_only=False,
+        reversible=True,
+        idempotency_required=True,
+        timeout_seconds=30.0,
+        enabled=enabled,
+        network_access=True,
+        category="payments",
+        adapter_id="payments",
+        side_effect_level=SIDE_EFFECT_WRITE,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("payments_prepare_refund",), ("idempotency_key",)),
+    )
+
+
+def payments_execute_refund_descriptor(*, enabled: bool = False) -> ToolDescriptor:
+    return ToolDescriptor(
+        tool_id=TOOL_PAYMENTS_EXECUTE_REFUND,
+        name="Payments Execute Refund",
+        description="Execute refund via PaymentGateway — HITL/capability protected",
+        version="1.0.0",
+        trust_level=TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE,
+        capabilities_required=(CAP_EXTERNAL_WRITE,),
+        action_types_supported=(ACTION_WRITE,),
+        operations=("payments_execute_refund",),
+        read_only=False,
+        reversible=False,
+        idempotency_required=True,
+        timeout_seconds=45.0,
+        enabled=enabled,
+        network_access=True,
+        category="payments",
+        adapter_id="payments",
+        side_effect_level=SIDE_EFFECT_CRITICAL,
+        retry_policy=RETRY_WORKFLOW,
+        schema_hash=schema_hash_for(("payments_execute_refund",), ("idempotency_key",)),
     )

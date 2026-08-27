@@ -155,6 +155,7 @@ class SideEffectRuntime:
     data_intelligence_runtime: object | None = None
     integration_runtime: object | None = None
     commerce_runtime: object | None = None
+    payments_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -300,6 +301,8 @@ class SideEffectRuntime:
             meta["integrations"] = dict(self.integration_runtime.health())
         if self.commerce_runtime is not None:
             meta["commerce"] = dict(self.commerce_runtime.health())
+        if self.payments_runtime is not None:
+            meta["payments"] = dict(self.payments_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -411,6 +414,11 @@ class SideEffectRuntime:
                 self.commerce_runtime.close()
             except Exception:
                 pass
+        if self.payments_runtime is not None and hasattr(self.payments_runtime, "close"):
+            try:
+                self.payments_runtime.close()
+            except Exception:
+                pass
 
 
 def build_tool_gateway(
@@ -426,6 +434,7 @@ def build_tool_gateway(
     document_intelligence=None,
     data_intelligence=None,
     commerce_service=None,
+    payments_service=None,
     credential_store=None,
     freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
@@ -486,6 +495,7 @@ def build_tool_gateway(
         document_intelligence=document_intelligence,
         data_intelligence=data_intelligence,
         commerce_service=commerce_service,
+        payments_service=payments_service,
         credential_store=credential_store,
     )
     router = ToolRouter(gateway.registry)
@@ -690,6 +700,39 @@ def _finalize_runtime(
     except Exception:
         commerce_runtime = None
 
+    payments_runtime = None
+    try:
+        from payments.runtime import build_payments_runtime
+
+        shared_pay = None
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_pay = persistence.connection
+        payments_runtime = build_payments_runtime(
+            env=env,
+            workflow_runtime=workflow_runtime,
+            shared_connection=shared_pay,
+            commerce_service=(
+                commerce_runtime.service if commerce_runtime else None
+            ),
+            hitl_service=hitl,
+            integration_runtime=integration_runtime,
+            data_intelligence=(
+                data_intelligence_runtime.service if data_intelligence_runtime else None
+            ),
+            observability=obs,
+        )
+        if payments_runtime is not None:
+            engine.payments_service = payments_runtime.service
+            if commerce_runtime is not None:
+                payments_runtime.service.commerce_service = commerce_runtime.service
+    except Exception:
+        payments_runtime = None
+
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
         executor=executor,
@@ -711,6 +754,9 @@ def _finalize_runtime(
         ),
         commerce_service=(
             commerce_runtime.service if commerce_runtime else None
+        ),
+        payments_service=(
+            payments_runtime.service if payments_runtime else None
         ),
         credential_store=(
             integration_runtime.credential_store if integration_runtime else None
@@ -899,6 +945,7 @@ def _finalize_runtime(
         data_intelligence_runtime=data_intelligence_runtime,
         integration_runtime=integration_runtime,
         commerce_runtime=commerce_runtime,
+        payments_runtime=payments_runtime,
     )
 
 

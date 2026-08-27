@@ -48,6 +48,15 @@ from tools.platform.descriptors import (
     marking_transfer_descriptor,
     mcp_descriptor,
     onec_descriptor,
+    bank_statement_read_descriptor,
+    bank_transactions_descriptor,
+    payments_allocate_descriptor,
+    payments_execute_refund_descriptor,
+    payments_match_descriptor,
+    payments_prepare_refund_descriptor,
+    payments_read_descriptor,
+    payments_reconcile_descriptor,
+    payments_status_descriptor,
     sql_query_descriptor,
     supplier_read_descriptor,
     telegram_descriptor,
@@ -67,6 +76,7 @@ from tools.platform.scaffold import (
 from tools.registry import ToolRegistry
 from data_intel.tools import DataIntelToolAdapter
 from commerce.tools import CommerceToolAdapter
+from payments.tools import PaymentsToolAdapter
 
 
 def _workspace_roots(env: dict | None = None) -> tuple[str, ...]:
@@ -93,6 +103,7 @@ def register_platform_tools(
     document_intelligence=None,
     data_intelligence=None,
     commerce_service=None,
+    payments_service=None,
     credential_store: IntegrationCredentialStore | None = None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
@@ -108,6 +119,8 @@ def register_platform_tools(
     data_enabled = data_intelligence is not None
     commerce = CommerceToolAdapter(commerce_service, enabled=commerce_service is not None)
     commerce_enabled = commerce_service is not None
+    payments = PaymentsToolAdapter(payments_service, enabled=payments_service is not None)
+    payments_enabled = payments_service is not None
     terminal_enabled = (env or os.environ).get("TOOL_TERMINAL_ENABLED", "").lower() in {
         "1",
         "true",
@@ -158,6 +171,15 @@ def register_platform_tools(
         (marking_transfer_descriptor(enabled=commerce_enabled), commerce),
         (fiscal_status_descriptor(enabled=commerce_enabled), commerce),
         (commerce_reconcile_descriptor(enabled=commerce_enabled), commerce),
+        (payments_read_descriptor(enabled=payments_enabled), payments),
+        (payments_status_descriptor(enabled=payments_enabled), payments),
+        (payments_match_descriptor(enabled=payments_enabled), payments),
+        (payments_reconcile_descriptor(enabled=payments_enabled), payments),
+        (bank_transactions_descriptor(enabled=payments_enabled), payments),
+        (bank_statement_read_descriptor(enabled=payments_enabled), payments),
+        (payments_allocate_descriptor(enabled=payments_enabled), payments),
+        (payments_prepare_refund_descriptor(enabled=payments_enabled), payments),
+        (payments_execute_refund_descriptor(enabled=payments_enabled), payments),
         (mcp_descriptor(enabled=False), mcp),
         (cms_descriptor(enabled=False), CmsScaffoldAdapter(adapter_id="cms")),
         (bitrix_descriptor(enabled=bitrix_enabled), bitrix),
