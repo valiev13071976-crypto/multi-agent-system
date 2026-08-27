@@ -92,12 +92,64 @@ side_effect_runtime = compose_side_effect_runtime(
 if side_effect_runtime.workflow_engine is not None:
     router.workflow_engine = side_effect_runtime.workflow_engine
 
+# Durable DAG platform + TaskQueue (long-running). Analyze stays sync.
+workflow_runtime = getattr(side_effect_runtime, "workflow_runtime", None)
+if workflow_runtime is not None:
+    from workflow.builtins import register_builtin_definitions
+    from workflow.definition import StepResult, STEP_TYPE_HANDLER, STEP_TYPE_BRANCH
+
+    register_builtin_definitions(workflow_runtime.definitions)
+
+    async def _default_handler(ctx):
+        step = ctx["step"]
+        return StepResult(ok=True, data={"step_id": step.step_id, "path": "left"})
+
+    workflow_runtime.platform.register_handler(STEP_TYPE_HANDLER, _default_handler)
+    workflow_runtime.platform.register_handler(STEP_TYPE_BRANCH, _default_handler)
+
+
+class WorkflowCreateRequest(BaseModel):
+    workflow_type: str = Field(..., min_length=1, max_length=200)
+    version: str = Field(default="1", min_length=1, max_length=64)
+    sync: bool = Field(
+        default=False,
+        description="If true, run inline (short workflows). If false, enqueue to TaskQueue.",
+    )
+    metadata: dict = Field(default_factory=dict)
+
+
+class WorkflowStatusResponse(BaseModel):
+    workflow_id: str
+    workflow_type: str = ""
+    version: str = ""
+    status: str
+    ready_steps: list = Field(default_factory=list)
+    current_steps: list = Field(default_factory=list)
+    waiting: bool = False
+    progress: dict = Field(default_factory=dict)
+    steps: list = Field(default_factory=list)
+    error_code: str | None = None
+    next_retry_at: str | None = None
+    deadline_at: str | None = None
+    queue_task_id: str | None = None
+
 
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
-    """Read-only repo probe if GITHUB_WRITE_PROBE_ON_STARTUP=true. No writes."""
+    """Read-only repo probe if GITHUB_WRITE_PROBE_ON_STARTUP=true. No writes.
+
+    Starts background TaskQueue worker for durable workflows when enabled.
+    """
     await side_effect_runtime.start()
-    yield
+    try:
+        yield
+    finally:
+        wr = getattr(side_effect_runtime, "workflow_runtime", None)
+        if wr is not None:
+            try:
+                await wr.stop_background()
+            except Exception:
+                pass
 
 
 app = FastAPI(
@@ -255,6 +307,103 @@ async def analyze(request: AnalyzeRequest):
         raise HTTPException(
             status_code=500,
             detail=redact(str(e)),
+        )
+
+
+@app.post("/api/workflows", response_model=WorkflowStatusResponse)
+async def create_workflow(request: WorkflowCreateRequest):
+    if workflow_runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "workflow_runtime_unavailable"},
+        )
+    try:
+        if request.sync:
+            result = await workflow_runtime.create_and_run_sync(
+                request.workflow_type,
+                request.version,
+                metadata=request.metadata,
+            )
+            return WorkflowStatusResponse(**{
+                k: result.get(k)
+                for k in WorkflowStatusResponse.model_fields
+                if k in result
+            })
+        created = await workflow_runtime.create_and_enqueue(
+            request.workflow_type,
+            request.version,
+            metadata=request.metadata,
+        )
+        status = workflow_runtime.get_status(created["workflow_id"])
+        status["queue_task_id"] = created.get("queue_task_id")
+        return WorkflowStatusResponse(**{
+            k: status.get(k)
+            for k in WorkflowStatusResponse.model_fields
+            if k in status or k == "queue_task_id"
+        })
+    except Exception as exc:
+        code = getattr(exc, "error_code", None) or type(exc).__name__
+        status = 400 if code in {
+            "definition_not_found",
+            "unknown_dependency",
+            "cycle_detected",
+            "empty_definition",
+        } else 500
+        raise HTTPException(
+            status_code=status,
+            detail={"error": redact(str(code)), "message": redact(str(exc))},
+        )
+
+
+@app.get("/api/workflows/{workflow_id}", response_model=WorkflowStatusResponse)
+async def get_workflow(workflow_id: str):
+    if workflow_runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "workflow_runtime_unavailable"},
+        )
+    try:
+        status = workflow_runtime.get_status(workflow_id)
+        return WorkflowStatusResponse(**status)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "workflow_not_found", "message": redact(str(exc))},
+        )
+
+
+@app.post("/api/workflows/{workflow_id}/cancel", response_model=WorkflowStatusResponse)
+async def cancel_workflow(workflow_id: str):
+    if workflow_runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "workflow_runtime_unavailable"},
+        )
+    try:
+        workflow_runtime.cancel(workflow_id)
+        return WorkflowStatusResponse(**workflow_runtime.get_status(workflow_id))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail={"error": "workflow_not_found", "message": redact(str(exc))},
+        )
+
+
+@app.post("/api/workflows/{workflow_id}/resume")
+async def resume_workflow(workflow_id: str):
+    """Re-queue after HITL approval (does not bypass AutonomyGate/HITL)."""
+    if workflow_runtime is None:
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "workflow_runtime_unavailable"},
+        )
+    try:
+        result = await workflow_runtime.resume_after_approval(workflow_id)
+        return result
+    except Exception as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"error": "resume_failed", "message": redact(str(exc))},
         )
 
 

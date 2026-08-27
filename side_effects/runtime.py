@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -148,6 +149,7 @@ class SideEffectRuntime:
     document_runtime: object | None = None
     knowledge_runtime: object | None = None
     procurement_runtime: object | None = None
+    workflow_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -301,8 +303,19 @@ class SideEffectRuntime:
         )
 
     async def start(self):
-        """Optional read-only readiness probe. Idempotent. Never mutates."""
+        """Optional read-only readiness probe. Idempotent. Never mutates.
 
+        Also starts background workflow worker when WORKFLOW_WORKER_ENABLED.
+        """
+
+        if self.workflow_runtime is not None:
+            from workflow.service import workflow_worker_enabled
+
+            if workflow_worker_enabled():
+                try:
+                    await self.workflow_runtime.start_background()
+                except Exception:
+                    pass
         if self._start_completed:
             return self.activation.readiness
         self._start_completed = True
@@ -321,6 +334,17 @@ class SideEffectRuntime:
     def close(self) -> None:
         """Release owned resources. Shared recovery store does not close P7 connection."""
 
+        if self.workflow_runtime is not None:
+            try:
+                loop = None
+                try:
+                    loop = asyncio.get_running_loop()
+                except RuntimeError:
+                    loop = None
+                if loop is not None and loop.is_running():
+                    loop.create_task(self.workflow_runtime.stop_background())
+            except Exception:
+                pass
         orch = self.recovery_orchestrator
         if orch is not None:
             store = getattr(orch, "store", None)
@@ -631,6 +655,27 @@ def _finalize_runtime(
     if procurement_runtime is not None:
         engine.procurement_service = procurement_runtime.service
 
+    workflow_runtime = None
+    try:
+        from workflow.service import build_workflow_runtime
+
+        workflow_runtime = build_workflow_runtime(
+            state_manager=engine.state_manager,
+            workflow_engine=engine,
+            observability=obs,
+            autonomy_gate=gate,
+            hitl_service=hitl,
+        )
+        # Recover interrupted workflows on startup (durable store)
+        try:
+            for wf in engine.state_manager._store.list_all():
+                if wf.status == "running":
+                    workflow_runtime.platform.recover_after_restart(wf.workflow_id)
+        except Exception:
+            pass
+    except Exception:
+        workflow_runtime = None
+
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -653,6 +698,7 @@ def _finalize_runtime(
         document_runtime=document_runtime,
         knowledge_runtime=knowledge_runtime,
         procurement_runtime=procurement_runtime,
+        workflow_runtime=workflow_runtime,
     )
 
 

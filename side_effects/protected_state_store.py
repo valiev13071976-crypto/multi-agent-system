@@ -750,6 +750,16 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
         meta: dict[str, Any] = {
             "steps_json": _steps_to_json(state.steps),
         }
+        if state.workflow_type:
+            meta["workflow_type"] = state.workflow_type
+        if state.definition_version:
+            meta["definition_version"] = state.definition_version
+        if state.metadata:
+            meta["workflow_metadata"] = dict(state.metadata)
+        if state.next_retry_at is not None:
+            meta["next_retry_at"] = _dt_to_db(state.next_retry_at)
+        if state.deadline_at is not None:
+            meta["deadline_at"] = _dt_to_db(state.deadline_at)
         waiting_reason = None
         approval_id = None
         action_id = None
@@ -867,6 +877,9 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             steps = _steps_from_json(steps_raw)
         else:
             steps = ()
+        wf_meta = metadata.get("workflow_metadata")
+        if not isinstance(wf_meta, dict):
+            wf_meta = {}
         return WorkflowState(
             workflow_id=row["workflow_id"],
             task_id=row["task_id"],
@@ -881,4 +894,17 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             version=int(row["version"]),
             steps=steps,
             execution_key=row["execution_key"],
+            workflow_type=(
+                str(metadata["workflow_type"])
+                if metadata.get("workflow_type") is not None
+                else None
+            ),
+            definition_version=(
+                str(metadata["definition_version"])
+                if metadata.get("definition_version") is not None
+                else None
+            ),
+            metadata=wf_meta,
+            next_retry_at=_dt_from_db(metadata.get("next_retry_at")),
+            deadline_at=_dt_from_db(metadata.get("deadline_at")),
         )

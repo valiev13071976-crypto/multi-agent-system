@@ -6,8 +6,10 @@ from typing import Mapping
 
 STATUS_CREATED = "created"
 STATUS_PLANNED = "planned"
+STATUS_QUEUED = "queued"
 STATUS_RUNNING = "running"
 STATUS_WAITING_APPROVAL = "waiting_approval"
+STATUS_RETRY_WAIT = "retry_wait"
 STATUS_VALIDATING = "validating"
 STATUS_COMPLETED = "completed"
 STATUS_FAILED = "failed"
@@ -16,8 +18,10 @@ STATUS_CANCELLED = "cancelled"
 WORKFLOW_STATUSES = (
     STATUS_CREATED,
     STATUS_PLANNED,
+    STATUS_QUEUED,
     STATUS_RUNNING,
     STATUS_WAITING_APPROVAL,
+    STATUS_RETRY_WAIT,
     STATUS_VALIDATING,
     STATUS_COMPLETED,
     STATUS_FAILED,
@@ -62,21 +66,37 @@ ANALYZE_STEPS = (
 
 ALLOWED_TRANSITIONS = {
     STATUS_CREATED: frozenset({STATUS_PLANNED, STATUS_FAILED, STATUS_CANCELLED}),
-    STATUS_PLANNED: frozenset({STATUS_RUNNING, STATUS_FAILED, STATUS_CANCELLED}),
+    STATUS_PLANNED: frozenset(
+        {STATUS_QUEUED, STATUS_RUNNING, STATUS_FAILED, STATUS_CANCELLED}
+    ),
+    STATUS_QUEUED: frozenset(
+        {
+            STATUS_RUNNING,
+            STATUS_WAITING_APPROVAL,
+            STATUS_RETRY_WAIT,
+            STATUS_FAILED,
+            STATUS_CANCELLED,
+        }
+    ),
     STATUS_RUNNING: frozenset(
         {
             STATUS_VALIDATING,
             STATUS_WAITING_APPROVAL,
+            STATUS_RETRY_WAIT,
+            STATUS_QUEUED,
             STATUS_COMPLETED,
             STATUS_FAILED,
             STATUS_CANCELLED,
         }
     ),
+    STATUS_RETRY_WAIT: frozenset(
+        {STATUS_QUEUED, STATUS_RUNNING, STATUS_FAILED, STATUS_CANCELLED}
+    ),
     STATUS_VALIDATING: frozenset(
         {STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED, STATUS_CANCELLED}
     ),
     STATUS_WAITING_APPROVAL: frozenset(
-        {STATUS_RUNNING, STATUS_FAILED, STATUS_CANCELLED}
+        {STATUS_QUEUED, STATUS_RUNNING, STATUS_FAILED, STATUS_CANCELLED}
     ),
     STATUS_COMPLETED: frozenset(),
     STATUS_FAILED: frozenset(),
@@ -124,10 +144,16 @@ class WorkflowState:
     version: int
     steps: tuple[StepRecord, ...]
     execution_key: str
+    workflow_type: str | None = None
+    definition_version: str | None = None
+    metadata: Mapping[str, object] = field(default_factory=dict)
+    next_retry_at: datetime | None = None
+    deadline_at: datetime | None = None
 
     def __post_init__(self):
         if self.status not in WORKFLOW_STATUSES:
             raise ValueError(f"Invalid workflow status: {self.status!r}")
+        object.__setattr__(self, "metadata", _meta(self.metadata))
 
     def step(self, name: str) -> StepRecord | None:
         for item in self.steps:
@@ -143,6 +169,9 @@ class WorkflowState:
             if item.status not in {STEP_COMPLETED, STEP_SKIPPED}:
                 return item.name
         return None
+
+    def running_step_names(self) -> tuple[str, ...]:
+        return tuple(item.name for item in self.steps if item.status == STEP_RUNNING)
 
 
 @dataclass(frozen=True)

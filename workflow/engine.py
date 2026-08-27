@@ -163,6 +163,13 @@ class WorkflowEngine:
             return "completed"
         if state.status == STATUS_FAILED:
             return "failed"
+        if state.status == "retry_wait":
+            if state.next_retry_at is not None:
+                from workflow.models import utc_now
+
+                if state.next_retry_at > utc_now():
+                    return "waiting_approval"  # defer until retry window (reuse defer)
+            return "execute"
         return "execute"
 
     def _gate(self) -> AutonomyGate:
