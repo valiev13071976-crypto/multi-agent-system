@@ -151,6 +151,7 @@ class SideEffectRuntime:
     knowledge_runtime: object | None = None
     procurement_runtime: object | None = None
     workflow_runtime: object | None = None
+    acquisition_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -290,6 +291,8 @@ class SideEffectRuntime:
             meta["knowledge"] = dict(self.knowledge_runtime.health())
         if self.procurement_runtime is not None:
             meta["procurement"] = dict(self.procurement_runtime.health())
+        if self.acquisition_runtime is not None:
+            meta["acquisition"] = dict(self.acquisition_runtime.health())
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -377,6 +380,11 @@ class SideEffectRuntime:
         if self.procurement_runtime is not None and hasattr(self.procurement_runtime, "close"):
             try:
                 self.procurement_runtime.close()
+            except Exception:
+                pass
+        if self.acquisition_runtime is not None and hasattr(self.acquisition_runtime, "close"):
+            try:
+                self.acquisition_runtime.close()
             except Exception:
                 pass
 
@@ -692,6 +700,38 @@ def _finalize_runtime(
     except Exception:
         workflow_runtime = None
 
+    acquisition_runtime = None
+    try:
+        from acquisition.runtime import build_acquisition_runtime_bundle
+
+        shared_acq = None
+        acq_env = dict(env or {})
+        # Prefer durable when side-effect persistence is sqlite (shared DB)
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_acq = persistence.connection
+            acq_env.setdefault("ACQUISITION_USE_SHARED_DB", "true")
+        wf_scheduler = None
+        if workflow_runtime is not None:
+            wf_scheduler = getattr(workflow_runtime, "scheduler", None)
+        acquisition_runtime = build_acquisition_runtime_bundle(
+            tool_gateway=tool_gateway,
+            workflow_scheduler=wf_scheduler,
+            env=acq_env,
+            shared_connection=shared_acq,
+            freeze_sources=False,
+        )
+        engine.acquisition_service = acquisition_runtime.service
+        # Ensure acquisition uses the same ToolGateway instance
+        acquisition_runtime.service.gateway = tool_gateway
+        acquisition_runtime.service.manager.gateway = tool_gateway
+    except Exception:
+        acquisition_runtime = None
+
     return SideEffectRuntime(
         config=config,
         registry=registry,
@@ -715,6 +755,7 @@ def _finalize_runtime(
         knowledge_runtime=knowledge_runtime,
         procurement_runtime=procurement_runtime,
         workflow_runtime=workflow_runtime,
+        acquisition_runtime=acquisition_runtime,
     )
 
 

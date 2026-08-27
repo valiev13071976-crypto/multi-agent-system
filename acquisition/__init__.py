@@ -6,7 +6,7 @@ from acquisition.models import (
     RawArtifact,
     SourceDescriptor,
 )
-from acquisition.runtime import build_acquisition_runtime
+from acquisition.runtime import build_acquisition_runtime, build_acquisition_runtime_bundle
 from acquisition.service import AcquisitionService
 
 __all__ = [
@@ -16,4 +16,5 @@ __all__ = [
     "RawArtifact",
     "SourceDescriptor",
     "build_acquisition_runtime",
+    "build_acquisition_runtime_bundle",
 ]
