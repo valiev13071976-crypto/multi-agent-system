@@ -604,6 +604,19 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
     ):
         self._connection = connection
         self._encryption = encryption
+        self._ensure_execution_key_index()
+
+    def _ensure_execution_key_index(self) -> None:
+        """Best-effort additive index for existing schema v2 databases."""
+        try:
+            conn = self._connection.connect()
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_wf_runtime_execution_key "
+                "ON workflow_runtime_state(execution_key)"
+            )
+            self._connection.maybe_autocommit()
+        except Exception:
+            pass
 
     def create(self, state: WorkflowState) -> None:
         self._upsert(state, insert=True, linkage=None)
@@ -613,6 +626,23 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
         row = conn.execute(
             "SELECT * FROM workflow_runtime_state WHERE workflow_id = ?",
             (workflow_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        return self._from_row(row)
+
+    def find_by_execution_key(self, execution_key: str) -> WorkflowState | None:
+        if not execution_key:
+            return None
+        conn = self._connection.connect()
+        row = conn.execute(
+            """
+            SELECT * FROM workflow_runtime_state
+            WHERE execution_key = ?
+            ORDER BY created_at ASC, workflow_id ASC
+            LIMIT 1
+            """,
+            (execution_key,),
         ).fetchone()
         if row is None:
             return None

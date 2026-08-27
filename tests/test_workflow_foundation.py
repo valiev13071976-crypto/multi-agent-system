@@ -509,10 +509,213 @@ class IdempotencyQueueTests(unittest.IsolatedAsyncioTestCase):
         second = await bundle.create_and_enqueue(
             "demo.linear", "1", task_id="i2", execution_key=key
         )
-        # second enqueue returns existing queue task (dedupe)
+        self.assertEqual(first["workflow_id"], second["workflow_id"])
         self.assertEqual(first["queue_task_id"], second["queue_task_id"])
+        self.assertEqual(
+            len(
+                [
+                    w
+                    for w in bundle.state_manager._store.list_all()
+                    if w.execution_key == key
+                ]
+            ),
+            1,
+        )
         await bundle.worker.run_once()
         self.assertEqual(calls.count("a"), 1)
+
+
+class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_queued_survives_restart_and_completes(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle1 = build_workflow_runtime(state_manager=sm)
+        bundle1.definitions.register(linear_demo_definition())
+        calls = []
+
+        async def handler(ctx):
+            calls.append(ctx["step"].step_id)
+            return StepResult(ok=True, data={})
+
+        bundle1.platform.register_handler(STEP_TYPE_HANDLER, handler)
+        created = await bundle1.create_and_enqueue(
+            "demo.linear", "1", task_id="sr1", execution_key="sr-key-1"
+        )
+        wid = created["workflow_id"]
+        # Complete first step, then leave queued mid-flight
+        bundle1.state_manager.start(wid)
+        await bundle1.platform._run_step(wid, "a")
+        bundle1.state_manager.queue(wid)
+        self.assertEqual(bundle1.state_manager.get(wid).status, STATUS_QUEUED)
+        self.assertEqual(
+            bundle1.state_manager.get(wid).step("a").status, STEP_COMPLETED
+        )
+
+        # Process restart: new empty TaskQueue, same durable store
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        bundle2.definitions.register(linear_demo_definition())
+        bundle2.platform.register_handler(STEP_TYPE_HANDLER, handler)
+        self.assertEqual(len(list(bundle2.queue.store.list_all())), 0)
+
+        report = bundle2.recover_and_reenqueue_persisted()
+        self.assertIn(wid, report["reenqueued"])
+        self.assertEqual(len(list(bundle2.queue.store.list_all())), 1)
+
+        task = await bundle2.worker.run_once()
+        self.assertIsNotNone(task)
+        self.assertEqual(bundle2.state_manager.get(wid).status, STATUS_COMPLETED)
+        self.assertEqual(calls.count("a"), 1)  # not re-run
+        self.assertEqual(calls.count("b"), 1)
+        self.assertEqual(calls.count("c"), 1)
+
+    async def test_due_retry_wait_reenqueued(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle = build_workflow_runtime(state_manager=sm)
+        bundle.definitions.register(linear_demo_definition())
+        bundle.platform.register_handler(
+            STEP_TYPE_HANDLER, lambda ctx: StepResult(ok=True, data={})
+        )
+        created = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="retry-due-1"
+        )
+        wid = created["workflow_id"]
+        bundle.state_manager.mark_retry_wait(
+            wid, next_retry_at=utc_now() - timedelta(seconds=1), error_code="timeout"
+        )
+        # New empty queue
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        bundle2.definitions.register(linear_demo_definition())
+        report = bundle2.recover_and_reenqueue_persisted()
+        self.assertIn(wid, report["reenqueued"])
+
+    async def test_future_retry_wait_not_enqueued(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle = build_workflow_runtime(state_manager=sm)
+        bundle.definitions.register(linear_demo_definition())
+        bundle.platform.register_handler(
+            STEP_TYPE_HANDLER, lambda ctx: StepResult(ok=True, data={})
+        )
+        created = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="retry-future-1"
+        )
+        wid = created["workflow_id"]
+        bundle.state_manager.mark_retry_wait(
+            wid, next_retry_at=utc_now() + timedelta(hours=1), error_code="timeout"
+        )
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        report = bundle2.recover_and_reenqueue_persisted()
+        self.assertNotIn(wid, report["reenqueued"])
+        self.assertTrue(
+            any(s["workflow_id"] == wid and s["reason"] == "retry_not_due" for s in report["skipped"])
+        )
+        self.assertEqual(len(list(bundle2.queue.store.list_all())), 0)
+
+    async def test_waiting_approval_not_enqueued(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle = build_workflow_runtime(state_manager=sm)
+        bundle.definitions.register(linear_demo_definition())
+        created = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="wait-1"
+        )
+        wid = created["workflow_id"]
+        bundle.state_manager.start(wid)
+        bundle.state_manager.start_step(wid, "a")
+        bundle.state_manager.wait_for_approval(wid)
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        report = bundle2.recover_and_reenqueue_persisted()
+        self.assertNotIn(wid, report["reenqueued"])
+        self.assertTrue(
+            any(
+                s["workflow_id"] == wid and s["reason"] == "waiting_approval"
+                for s in report["skipped"]
+            )
+        )
+
+    async def test_terminal_not_enqueued(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle = build_workflow_runtime(state_manager=sm)
+        bundle.definitions.register(linear_demo_definition())
+        created = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="term-1"
+        )
+        wid = created["workflow_id"]
+        bundle.state_manager.fail_workflow(wid, "boom")
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        report = bundle2.recover_and_reenqueue_persisted()
+        self.assertNotIn(wid, report["reenqueued"])
+        self.assertTrue(
+            any(s["workflow_id"] == wid and s["reason"] == "terminal" for s in report["skipped"])
+        )
+
+    async def test_duplicate_startup_recovery_no_double_enqueue(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle = build_workflow_runtime(state_manager=sm)
+        bundle.definitions.register(linear_demo_definition())
+        created = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="dup-startup-1"
+        )
+        # Drain original queue object so only recovery matters
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        r1 = bundle2.recover_and_reenqueue_persisted()
+        r2 = bundle2.recover_and_reenqueue_persisted()
+        self.assertIn(created["workflow_id"], r1["reenqueued"])
+        # Second pass: queue dedupe returns same task — still one queue item
+        self.assertEqual(len(list(bundle2.queue.store.list_all())), 1)
+        # May list in reenqueued again but same queue_task_id
+        tasks = list(bundle2.queue.store.list_all())
+        self.assertEqual(tasks[0].execution_key, "dup-startup-1")
+
+
+class WorkflowIdempotencyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_same_execution_key_one_workflow_one_queue_task(self):
+        bundle = build_workflow_runtime()
+        bundle.definitions.register(linear_demo_definition())
+        bundle.platform.register_handler(
+            STEP_TYPE_HANDLER, lambda ctx: StepResult(ok=True, data={})
+        )
+        a = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="wf-idem-1"
+        )
+        b = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="wf-idem-1"
+        )
+        self.assertEqual(a["workflow_id"], b["workflow_id"])
+        self.assertEqual(a["queue_task_id"], b["queue_task_id"])
+        self.assertEqual(len(list(bundle.state_manager._store.list_all())), 1)
+        self.assertEqual(len(list(bundle.queue.store.list_all())), 1)
+
+    async def test_duplicate_after_restart_same_workflow(self):
+        store = InMemoryWorkflowStateStore()
+        sm = StateManager(store=store, step_names=())
+        bundle = build_workflow_runtime(state_manager=sm)
+        bundle.definitions.register(linear_demo_definition())
+        first = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="wf-idem-restart"
+        )
+        bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
+        bundle2.definitions.register(linear_demo_definition())
+        second = await bundle2.create_and_enqueue(
+            "demo.linear", "1", execution_key="wf-idem-restart"
+        )
+        self.assertEqual(first["workflow_id"], second["workflow_id"])
+        self.assertEqual(len(list(store.list_all())), 1)
+
+    async def test_different_execution_keys_create_different_workflows(self):
+        bundle = build_workflow_runtime()
+        bundle.definitions.register(linear_demo_definition())
+        a = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="wf-a"
+        )
+        b = await bundle.create_and_enqueue(
+            "demo.linear", "1", execution_key="wf-b"
+        )
+        self.assertNotEqual(a["workflow_id"], b["workflow_id"])
+        self.assertEqual(len(list(bundle.state_manager._store.list_all())), 2)
 
 
 class ApiAnalyzeRegression(unittest.TestCase):

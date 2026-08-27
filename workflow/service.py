@@ -7,11 +7,21 @@ import os
 import uuid
 from dataclasses import dataclass, field
 
-from task_queue.models import PRIORITY_NORMAL
+from task_queue.errors import QueueDuplicateExecutionError
+from task_queue.models import ACTIVE_STATUSES, PRIORITY_NORMAL
 from task_queue.queue import TaskQueue
 from task_queue.worker import ExecutionContextRegistry, TaskWorker, WorkerConfig
-from workflow.definition import ScheduleSpec, WorkflowDefinition
-from workflow.models import STATUS_QUEUED, STATUS_RUNNING, utc_now
+from workflow.definition import ScheduleSpec
+from workflow.models import (
+    STATUS_PLANNED,
+    STATUS_QUEUED,
+    STATUS_RETRY_WAIT,
+    STATUS_RUNNING,
+    STATUS_VALIDATING,
+    STATUS_WAITING_APPROVAL,
+    TERMINAL_STATUSES,
+    utc_now,
+)
 from workflow.platform import WorkflowPlatform
 from workflow.registry import DefinitionRegistry
 from workflow.schedule import WorkflowScheduler
@@ -30,16 +40,21 @@ class WorkflowRuntimeBundle:
     _worker_task: asyncio.Task | None = field(default=None, repr=False)
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
     _stop: asyncio.Event | None = field(default=None, repr=False)
+    _startup_recovery_ran: bool = field(default=False, repr=False)
 
     async def start_background(self, *, poll_interval: float = 0.25) -> None:
         if self._worker_task is not None:
             return
+        # Startup: recover + re-enqueue before draining the queue.
+        self.recover_and_reenqueue_persisted()
         self._stop = asyncio.Event()
 
         async def _loop():
             while self._stop is not None and not self._stop.is_set():
                 try:
                     await self.tick_schedules()
+                    # Promote due retry_wait workflows into the queue.
+                    self.reenqueue_due_retries()
                     await self.worker.run_once()
                 except Exception:
                     pass
@@ -73,7 +88,6 @@ class WorkflowRuntimeBundle:
                 self.scheduler.mark_enqueued(due.schedule_id, execution_key=key)
                 launched.append(result["workflow_id"])
             except Exception:
-                # duplicate execution_key or definition missing — skip silently
                 continue
         return launched
 
@@ -129,6 +143,18 @@ class WorkflowRuntimeBundle:
         priority: str = PRIORITY_NORMAL,
         timeout_seconds: float | None = None,
     ) -> dict:
+        # Idempotency BEFORE creating a WorkflowInstance.
+        if execution_key:
+            existing = self.state_manager.find_by_execution_key(execution_key)
+            if existing is not None:
+                return self._return_existing_for_enqueue(
+                    existing.workflow_id,
+                    priority=priority,
+                    timeout_seconds=timeout_seconds,
+                    workflow_type=workflow_type,
+                    version=version,
+                )
+
         created = self.create_workflow(
             workflow_type,
             version,
@@ -137,30 +163,262 @@ class WorkflowRuntimeBundle:
             metadata=metadata,
             sync=False,
         )
-        workflow_id = created["workflow_id"]
-        self.state_manager.queue(workflow_id)
-        self._obs_queue(workflow_id, "workflow.queued")
-        exec_key = created["execution_key"]
-        self.registry.register(exec_key, self._make_handler(workflow_id))
-        task = self.queue.enqueue(
-            workflow_id=workflow_id,
-            task_id=created["task_id"],
-            execution_key=exec_key,
+        # Race window: another creator may have inserted the same key first.
+        if execution_key:
+            winner = self.state_manager.find_by_execution_key(execution_key)
+            if winner is not None and winner.workflow_id != created["workflow_id"]:
+                # Orphan the losing instance by cancelling it; keep the first.
+                try:
+                    if self.state_manager.get(created["workflow_id"]).status not in TERMINAL_STATUSES:
+                        self.state_manager.cancel(created["workflow_id"])
+                except Exception:
+                    pass
+                return self._return_existing_for_enqueue(
+                    winner.workflow_id,
+                    priority=priority,
+                    timeout_seconds=timeout_seconds,
+                    workflow_type=workflow_type,
+                    version=version,
+                )
+        return self.enqueue_existing(
+            created["workflow_id"],
             priority=priority,
             timeout_seconds=timeout_seconds,
             metadata={"workflow_type": workflow_type, "version": version},
         )
+
+    def _return_existing_for_enqueue(
+        self,
+        workflow_id: str,
+        *,
+        priority: str,
+        timeout_seconds: float | None,
+        workflow_type: str,
+        version: str,
+    ) -> dict:
+        state = self.state_manager.get(workflow_id)
+        if state.status in TERMINAL_STATUSES:
+            return {
+                "workflow_id": state.workflow_id,
+                "task_id": state.task_id,
+                "status": state.status,
+                "execution_key": state.execution_key,
+                "queue_task_id": None,
+                "idempotent": True,
+            }
+        if state.status == STATUS_WAITING_APPROVAL:
+            return {
+                "workflow_id": state.workflow_id,
+                "task_id": state.task_id,
+                "status": state.status,
+                "execution_key": state.execution_key,
+                "queue_task_id": None,
+                "idempotent": True,
+            }
+        return self.enqueue_existing(
+            workflow_id,
+            priority=priority,
+            timeout_seconds=timeout_seconds,
+            metadata={"workflow_type": workflow_type, "version": version},
+            idempotent=True,
+        )
+
+    def enqueue_existing(
+        self,
+        workflow_id: str,
+        *,
+        priority: str = PRIORITY_NORMAL,
+        timeout_seconds: float | None = None,
+        metadata=None,
+        idempotent: bool = False,
+    ) -> dict:
+        """Enqueue an existing workflow without creating a new WorkflowInstance."""
+
+        state = self.state_manager.get(workflow_id)
+        if state.status in TERMINAL_STATUSES:
+            return {
+                "workflow_id": state.workflow_id,
+                "task_id": state.task_id,
+                "status": state.status,
+                "execution_key": state.execution_key,
+                "queue_task_id": None,
+                "idempotent": True,
+            }
+        if state.status == STATUS_WAITING_APPROVAL:
+            return {
+                "workflow_id": state.workflow_id,
+                "task_id": state.task_id,
+                "status": state.status,
+                "execution_key": state.execution_key,
+                "queue_task_id": None,
+                "idempotent": True,
+            }
+        if state.status == STATUS_RETRY_WAIT:
+            if state.next_retry_at is not None and state.next_retry_at > utc_now():
+                return {
+                    "workflow_id": state.workflow_id,
+                    "task_id": state.task_id,
+                    "status": state.status,
+                    "execution_key": state.execution_key,
+                    "queue_task_id": None,
+                    "idempotent": True,
+                    "reason": "retry_not_due",
+                }
+            self.state_manager.clear_retry_wait(workflow_id)
+            if self.state_manager.get(workflow_id).status == STATUS_RETRY_WAIT:
+                self.state_manager.queue(workflow_id)
+        elif state.status in {STATUS_PLANNED, STATUS_VALIDATING}:
+            self.state_manager.queue(workflow_id)
+        # STATUS_QUEUED / STATUS_RUNNING: leave status; still enqueue worker work.
+
+        state = self.state_manager.get(workflow_id)
+        exec_key = state.execution_key
+        self.registry.register(exec_key, self._make_handler(workflow_id))
+        self._obs_queue(workflow_id, "workflow.queued")
+        try:
+            task = self.queue.enqueue(
+                workflow_id=workflow_id,
+                task_id=state.task_id,
+                execution_key=exec_key,
+                priority=priority,
+                timeout_seconds=timeout_seconds,
+                metadata=metadata
+                or {
+                    "workflow_type": state.workflow_type or "",
+                    "version": state.definition_version or "",
+                },
+            )
+        except QueueDuplicateExecutionError:
+            existing = self.queue.store.find_by_execution_key(exec_key)
+            terminal = [t for t in existing if t.status not in ACTIVE_STATUSES]
+            qid = terminal[0].queue_task_id if terminal else None
+            return {
+                "workflow_id": state.workflow_id,
+                "task_id": state.task_id,
+                "status": state.status,
+                "execution_key": exec_key,
+                "queue_task_id": qid,
+                "idempotent": True,
+            }
         return {
-            **created,
-            "status": STATUS_QUEUED,
+            "workflow_id": state.workflow_id,
+            "task_id": state.task_id,
+            "status": self.state_manager.get(workflow_id).status,
+            "execution_key": exec_key,
             "queue_task_id": task.queue_task_id,
+            "idempotent": idempotent,
         }
+
+    def recover_and_reenqueue_persisted(self) -> dict:
+        """Production startup recovery for durable workflows + empty TaskQueue.
+
+        Flow:
+          load persisted → recover interrupted running → identify runnable/due
+          → re-enqueue existing → (caller starts worker)
+        """
+
+        recovered: list[str] = []
+        reenqueued: list[str] = []
+        skipped: list[dict] = []
+        try:
+            workflows = list(self.state_manager._store.list_all())
+        except Exception:
+            return {
+                "recovered": recovered,
+                "reenqueued": reenqueued,
+                "skipped": skipped,
+            }
+
+        # Deterministic order
+        workflows.sort(key=lambda w: (w.created_at, w.workflow_id))
+
+        for wf in workflows:
+            wid = wf.workflow_id
+            try:
+                state = self.state_manager.get(wid)
+            except Exception:
+                continue
+
+            if state.status == STATUS_RUNNING:
+                state = self.platform.recover_after_restart(wid)
+                recovered.append(wid)
+
+            state = self.state_manager.get(wid)
+
+            if state.status in TERMINAL_STATUSES:
+                skipped.append({"workflow_id": wid, "reason": "terminal"})
+                continue
+            if state.status == STATUS_WAITING_APPROVAL:
+                skipped.append({"workflow_id": wid, "reason": "waiting_approval"})
+                continue
+            if state.status == STATUS_RETRY_WAIT:
+                if state.next_retry_at is not None and state.next_retry_at > utc_now():
+                    skipped.append({"workflow_id": wid, "reason": "retry_not_due"})
+                    continue
+
+            # runnable: queued / recovered→queued / due retry_wait / planned
+            if state.status in {
+                STATUS_QUEUED,
+                STATUS_PLANNED,
+                STATUS_RETRY_WAIT,
+                STATUS_RUNNING,
+                STATUS_VALIDATING,
+            }:
+                result = self.enqueue_existing(wid)
+                if result.get("queue_task_id"):
+                    reenqueued.append(wid)
+                else:
+                    skipped.append(
+                        {
+                            "workflow_id": wid,
+                            "reason": result.get("reason") or result.get("status"),
+                        }
+                    )
+            else:
+                skipped.append({"workflow_id": wid, "reason": state.status})
+
+        self._startup_recovery_ran = True
+        obs = self.platform.observability
+        if obs is not None:
+            ctx = obs.create_context(workflow_id="", task_id="startup")
+            obs.emit(
+                "workflow.startup_recovery",
+                context=ctx,
+                component="workflow_service",
+                status="recovered",
+                metadata={
+                    "recovered_count": len(recovered),
+                    "reenqueued_count": len(reenqueued),
+                    "skipped_count": len(skipped),
+                },
+            )
+        return {
+            "recovered": recovered,
+            "reenqueued": reenqueued,
+            "skipped": skipped,
+        }
+
+    def reenqueue_due_retries(self) -> list[str]:
+        """Background helper: enqueue retry_wait workflows whose next_retry_at is due."""
+
+        launched = []
+        try:
+            waiting = self.state_manager._store.list_by_status(STATUS_RETRY_WAIT)
+        except Exception:
+            return launched
+        now = utc_now()
+        for wf in waiting:
+            if wf.next_retry_at is not None and wf.next_retry_at > now:
+                continue
+            result = self.enqueue_existing(wf.workflow_id)
+            if result.get("queue_task_id"):
+                launched.append(wf.workflow_id)
+        return launched
 
     def _make_handler(self, workflow_id: str):
         platform = self.platform
 
         async def _handler(ctx):
-            # Recover interrupted running steps if process restarted mid-flight
             platform.recover_after_restart(workflow_id)
             state = platform.state_manager.get(workflow_id)
             if state.status == STATUS_QUEUED:
@@ -183,7 +441,6 @@ class WorkflowRuntimeBundle:
 
     def cancel(self, workflow_id: str) -> dict:
         result = self.platform.cancel(workflow_id)
-        # best-effort cancel queue tasks for this workflow
         try:
             for task in self.queue.store.list_all():  # type: ignore[attr-defined]
                 if task.workflow_id == workflow_id and task.status not in {
@@ -208,6 +465,7 @@ class WorkflowRuntimeBundle:
         state = self.state_manager.get(workflow_id)
         if state.status == STATUS_RUNNING:
             self.state_manager.queue(workflow_id)
+        # Resume uses a distinct queue key so terminal history of original key is OK.
         exec_key = f"{state.execution_key}:resume:{int(utc_now().timestamp())}"
         self.registry.register(exec_key, self._make_handler(workflow_id))
         task = self.queue.enqueue(

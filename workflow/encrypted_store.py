@@ -78,3 +78,8 @@ class EncryptedWorkflowStateStore(WorkflowStateStore):
         if hasattr(self._inner, "list_all"):
             return self._inner.list_all()
         return ()
+
+    def find_by_execution_key(self, execution_key: str):
+        if hasattr(self._inner, "find_by_execution_key"):
+            return self._inner.find_by_execution_key(execution_key)
+        return None

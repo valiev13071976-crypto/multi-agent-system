@@ -127,6 +127,8 @@ CREATE INDEX IF NOT EXISTS idx_wf_runtime_state
     ON workflow_runtime_state(state);
 CREATE INDEX IF NOT EXISTS idx_wf_runtime_task
     ON workflow_runtime_state(task_id);
+CREATE INDEX IF NOT EXISTS idx_wf_runtime_execution_key
+    ON workflow_runtime_state(execution_key);
 
 CREATE TABLE IF NOT EXISTS workflow_checkpoints (
     workflow_id TEXT PRIMARY KEY,

@@ -666,11 +666,10 @@ def _finalize_runtime(
             autonomy_gate=gate,
             hitl_service=hitl,
         )
-        # Recover interrupted workflows on startup (durable store)
+        # Composition-time recovery: re-enqueue persisted runnable workflows into
+        # the fresh in-memory TaskQueue (idempotent if called again at worker start).
         try:
-            for wf in engine.state_manager._store.list_all():
-                if wf.status == "running":
-                    workflow_runtime.platform.recover_after_restart(wf.workflow_id)
+            workflow_runtime.recover_and_reenqueue_persisted()
         except Exception:
             pass
     except Exception:

@@ -86,6 +86,15 @@ class StateManager:
         self._store.create(state)
         return state
 
+    def find_by_execution_key(self, execution_key: str):
+        store = self._store
+        if hasattr(store, "find_by_execution_key"):
+            return store.find_by_execution_key(execution_key)
+        for state in store.list_all():
+            if state.execution_key == execution_key:
+                return state
+        return None
+
     def get(self, workflow_id: str) -> WorkflowState:
         state = self._store.get(workflow_id)
         if state is None:
