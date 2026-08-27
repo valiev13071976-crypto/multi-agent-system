@@ -11,6 +11,7 @@ from task_queue.errors import QueueDuplicateExecutionError
 from task_queue.models import ACTIVE_STATUSES, PRIORITY_NORMAL
 from task_queue.queue import TaskQueue
 from task_queue.worker import ExecutionContextRegistry, TaskWorker, WorkerConfig
+from security.tenant import normalize_tenant_id, scope_execution_key, workflow_tenant_id
 from workflow.definition import ScheduleSpec
 from workflow.models import (
     STATUS_PLANNED,
@@ -100,6 +101,7 @@ class WorkflowRuntimeBundle:
         execution_key: str | None = None,
         metadata=None,
         sync: bool = False,
+        tenant_id: str | None = None,
     ) -> dict:
         definition = self.definitions.get(workflow_type, version)
         task_id = task_id or str(uuid.uuid4())
@@ -108,12 +110,14 @@ class WorkflowRuntimeBundle:
             task_id=task_id,
             execution_key=execution_key,
             metadata=metadata,
+            tenant_id=tenant_id,
         )
         return {
             "workflow_id": state.workflow_id,
             "task_id": state.task_id,
             "status": state.status,
             "execution_key": state.execution_key,
+            "tenant_id": workflow_tenant_id(state),
             "sync": sync,
         }
 
@@ -124,9 +128,15 @@ class WorkflowRuntimeBundle:
         *,
         task_id: str | None = None,
         metadata=None,
+        tenant_id: str | None = None,
     ) -> dict:
         created = self.create_workflow(
-            workflow_type, version, task_id=task_id, metadata=metadata, sync=True
+            workflow_type,
+            version,
+            task_id=task_id,
+            metadata=metadata,
+            sync=True,
+            tenant_id=tenant_id,
         )
         self.state_manager.start(created["workflow_id"])
         result = await self.platform.advance(created["workflow_id"])
@@ -142,10 +152,14 @@ class WorkflowRuntimeBundle:
         metadata=None,
         priority: str = PRIORITY_NORMAL,
         timeout_seconds: float | None = None,
+        tenant_id: str | None = None,
     ) -> dict:
-        # Idempotency BEFORE creating a WorkflowInstance.
+        tenant = normalize_tenant_id(tenant_id)
+        # Idempotency BEFORE creating a WorkflowInstance (tenant-scoped).
         if execution_key:
-            existing = self.state_manager.find_by_execution_key(execution_key)
+            existing = self.state_manager.find_by_execution_key(
+                execution_key, tenant_id=tenant
+            )
             if existing is not None:
                 return self._return_existing_for_enqueue(
                     existing.workflow_id,
@@ -162,12 +176,13 @@ class WorkflowRuntimeBundle:
             execution_key=execution_key,
             metadata=metadata,
             sync=False,
+            tenant_id=tenant,
         )
-        # Race window: another creator may have inserted the same key first.
         if execution_key:
-            winner = self.state_manager.find_by_execution_key(execution_key)
+            winner = self.state_manager.find_by_execution_key(
+                execution_key, tenant_id=tenant
+            )
             if winner is not None and winner.workflow_id != created["workflow_id"]:
-                # Orphan the losing instance by cancelling it; keep the first.
                 try:
                     if self.state_manager.get(created["workflow_id"]).status not in TERMINAL_STATUSES:
                         self.state_manager.cancel(created["workflow_id"])
@@ -273,23 +288,26 @@ class WorkflowRuntimeBundle:
 
         state = self.state_manager.get(workflow_id)
         exec_key = state.execution_key
-        self.registry.register(exec_key, self._make_handler(workflow_id))
+        tenant = workflow_tenant_id(state)
+        scoped_key = scope_execution_key(tenant, exec_key)
+        self.registry.register(scoped_key, self._make_handler(workflow_id))
         self._obs_queue(workflow_id, "workflow.queued")
         try:
             task = self.queue.enqueue(
                 workflow_id=workflow_id,
                 task_id=state.task_id,
-                execution_key=exec_key,
+                execution_key=scoped_key,
                 priority=priority,
                 timeout_seconds=timeout_seconds,
                 metadata=metadata
                 or {
                     "workflow_type": state.workflow_type or "",
                     "version": state.definition_version or "",
+                    "tenant_id": tenant,
                 },
             )
         except QueueDuplicateExecutionError:
-            existing = self.queue.store.find_by_execution_key(exec_key)
+            existing = self.queue.store.find_by_execution_key(scoped_key)
             terminal = [t for t in existing if t.status not in ACTIVE_STATUSES]
             qid = terminal[0].queue_task_id if terminal else None
             return {
@@ -467,12 +485,14 @@ class WorkflowRuntimeBundle:
             self.state_manager.queue(workflow_id)
         # Resume uses a distinct queue key so terminal history of original key is OK.
         exec_key = f"{state.execution_key}:resume:{int(utc_now().timestamp())}"
-        self.registry.register(exec_key, self._make_handler(workflow_id))
+        tenant = workflow_tenant_id(state)
+        scoped_key = scope_execution_key(tenant, exec_key)
+        self.registry.register(scoped_key, self._make_handler(workflow_id))
         task = self.queue.enqueue(
             workflow_id=workflow_id,
             task_id=state.task_id,
-            execution_key=exec_key,
-            metadata={"resume": True},
+            execution_key=scoped_key,
+            metadata={"resume": True, "tenant_id": tenant},
         )
         self._obs_queue(workflow_id, "workflow.resumed_queued")
         return {

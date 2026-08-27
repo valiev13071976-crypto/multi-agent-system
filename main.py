@@ -1,10 +1,12 @@
 import os
+import uuid
 from contextlib import asynccontextmanager
-from typing import Literal
+from typing import Annotated, Literal
 
 from dotenv import load_dotenv
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, Field
 
@@ -28,10 +30,26 @@ from agents.role_registry import (
     InvalidRoleError,
 )
 from agents.context_manager import ContextManager
+from security.api_auth import (
+    configure_security,
+    get_audit_log,
+    get_resource_authorizer,
+    get_security_context,
+)
+from security.errors import ResourceNotFoundError, UnauthorizedError
+from security.identity import RequestSecurityContext
+from security.rbac import (
+    PERM_ANALYZE_EXECUTE,
+    PERM_WORKFLOW_CANCEL,
+    PERM_WORKFLOW_CREATE,
+    PERM_WORKFLOW_READ,
+    PERM_WORKFLOW_RESUME,
+)
 from security.redaction import redact
+from security.config import cors_allow_origins
+from security.request_limits import RequestSizeLimitMiddleware
 from security.secrets import EnvSecretStore
 from side_effects.runtime import compose_side_effect_runtime
-import uuid
 
 load_dotenv()
 
@@ -88,6 +106,7 @@ context_manager = ContextManager()
 side_effect_runtime = compose_side_effect_runtime(
     secrets=EnvSecretStore(), isolate_errors=True
 )
+configure_security()
 # Production auto-wiring: share composed workflow/HITL/persistence with analyze engine.
 if side_effect_runtime.workflow_engine is not None:
     router.workflow_engine = side_effect_runtime.workflow_engine
@@ -165,6 +184,49 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+app.add_middleware(RequestSizeLimitMiddleware)
+
+_origins = cors_allow_origins()
+if _origins:
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=list(_origins),
+        allow_credentials=False,
+        allow_methods=["GET", "POST"],
+        allow_headers=["Authorization", "X-API-Key", "Content-Type"],
+    )
+
+
+def _authorize_workflow(
+    ctx: RequestSecurityContext, workflow_id: str, permission: str
+) -> None:
+    authorizer = get_resource_authorizer()
+    audit = get_audit_log()
+    try:
+        authorizer.require_permission(ctx, permission)
+        state = router.workflow_engine.state_manager.get(workflow_id)
+        authorizer.authorize_workflow_access(ctx, state, permission=permission)
+    except ResourceNotFoundError:
+        audit.record(
+            "authz.denied",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            resource_ref=workflow_id,
+            outcome="denied",
+            reason_code="not_found",
+        )
+        raise HTTPException(status_code=404, detail={"error": "workflow_not_found"})
+    except UnauthorizedError as exc:
+        audit.record(
+            "authz.denied",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            resource_ref=workflow_id,
+            outcome="denied",
+            reason_code=getattr(exc, "error_code", "unauthorized"),
+        )
+        raise HTTPException(status_code=403, detail={"error": "unauthorized"})
+
 
 @app.get(
     "/health",
@@ -183,10 +245,19 @@ async def health():
     "/api/analyze",
     response_model=AnalyzeResponse,
 )
-async def analyze(request: AnalyzeRequest):
+async def analyze(
+    request: AnalyzeRequest,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
 
     try:
-
+        get_resource_authorizer().require_permission(ctx, PERM_ANALYZE_EXECUTE)
+        get_audit_log().record(
+            "analyze.requested",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            outcome="ok",
+        )
         task_id = str(uuid.uuid4())
         result = await router.workflow_engine.execute(
             request.prompt,
@@ -195,6 +266,7 @@ async def analyze(request: AnalyzeRequest):
             context_manager=context_manager,
             run_router=router.run,
             task_id=task_id,
+            tenant_id=ctx.tenant_id,
         )
         router.last_task_id = task_id
         router.last_workflow_id = router.workflow_engine.last_workflow_id
@@ -311,18 +383,23 @@ async def analyze(request: AnalyzeRequest):
 
 
 @app.post("/api/workflows", response_model=WorkflowStatusResponse)
-async def create_workflow(request: WorkflowCreateRequest):
+async def create_workflow(
+    request: WorkflowCreateRequest,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
     if workflow_runtime is None:
         raise HTTPException(
             status_code=503,
             detail={"error": "workflow_runtime_unavailable"},
         )
     try:
+        get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_CREATE)
         if request.sync:
             result = await workflow_runtime.create_and_run_sync(
                 request.workflow_type,
                 request.version,
                 metadata=request.metadata,
+                tenant_id=ctx.tenant_id,
             )
             return WorkflowStatusResponse(**{
                 k: result.get(k)
@@ -333,6 +410,7 @@ async def create_workflow(request: WorkflowCreateRequest):
             request.workflow_type,
             request.version,
             metadata=request.metadata,
+            tenant_id=ctx.tenant_id,
         )
         status = workflow_runtime.get_status(created["workflow_id"])
         status["queue_task_id"] = created.get("queue_task_id")
@@ -356,13 +434,17 @@ async def create_workflow(request: WorkflowCreateRequest):
 
 
 @app.get("/api/workflows/{workflow_id}", response_model=WorkflowStatusResponse)
-async def get_workflow(workflow_id: str):
+async def get_workflow(
+    workflow_id: str,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
     if workflow_runtime is None:
         raise HTTPException(
             status_code=503,
             detail={"error": "workflow_runtime_unavailable"},
         )
     try:
+        _authorize_workflow(ctx, workflow_id, PERM_WORKFLOW_READ)
         status = workflow_runtime.get_status(workflow_id)
         return WorkflowStatusResponse(**status)
     except Exception as exc:
@@ -373,14 +455,25 @@ async def get_workflow(workflow_id: str):
 
 
 @app.post("/api/workflows/{workflow_id}/cancel", response_model=WorkflowStatusResponse)
-async def cancel_workflow(workflow_id: str):
+async def cancel_workflow(
+    workflow_id: str,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
     if workflow_runtime is None:
         raise HTTPException(
             status_code=503,
             detail={"error": "workflow_runtime_unavailable"},
         )
     try:
+        _authorize_workflow(ctx, workflow_id, PERM_WORKFLOW_CANCEL)
         workflow_runtime.cancel(workflow_id)
+        get_audit_log().record(
+            "workflow.cancelled",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            resource_ref=workflow_id,
+            outcome="ok",
+        )
         return WorkflowStatusResponse(**workflow_runtime.get_status(workflow_id))
     except Exception as exc:
         raise HTTPException(
@@ -390,7 +483,10 @@ async def cancel_workflow(workflow_id: str):
 
 
 @app.post("/api/workflows/{workflow_id}/resume")
-async def resume_workflow(workflow_id: str):
+async def resume_workflow(
+    workflow_id: str,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
     """Re-queue after HITL approval (does not bypass AutonomyGate/HITL)."""
     if workflow_runtime is None:
         raise HTTPException(
@@ -398,7 +494,15 @@ async def resume_workflow(workflow_id: str):
             detail={"error": "workflow_runtime_unavailable"},
         )
     try:
+        _authorize_workflow(ctx, workflow_id, PERM_WORKFLOW_RESUME)
         result = await workflow_runtime.resume_after_approval(workflow_id)
+        get_audit_log().record(
+            "workflow.resumed",
+            actor_ref=ctx.actor_ref(),
+            tenant_ref=ctx.tenant_id,
+            resource_ref=workflow_id,
+            outcome="ok",
+        )
         return result
     except Exception as exc:
         raise HTTPException(

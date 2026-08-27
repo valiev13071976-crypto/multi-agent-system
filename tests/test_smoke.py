@@ -84,6 +84,7 @@ PROVIDER_ENV_KEYS = (
     "MOONSHOT_CONTEXT_CLASS",
     "MISTRAL_CONTEXT_CLASS",
     "OPENAI_SUPPORTS_TOOLS",
+    "OPENAI_SUPPORTS_REASONING",
     "ANTHROPIC_SUPPORTS_TOOLS",
     "GEMINI_SUPPORTS_TOOLS",
     "XAI_SUPPORTS_TOOLS",
@@ -159,6 +160,7 @@ HEALTH_PROVIDERS = (
 def _provider_env(**overrides):
     env = {key: "" for key in PROVIDER_ENV_KEYS}
     env.update({key: "" for key in GITHUB_WRITE_ENV_KEYS})
+    env["SECURITY_AUTH_MODE"] = "disabled"
     env.update(overrides)
     return env
 
@@ -213,6 +215,7 @@ class SmokeTests(unittest.TestCase):
         main_mod = load_app(
             OPENAI_API_KEY="fake-key",
             OPENAI_MODEL="fake-model",
+            OPENAI_SUPPORTS_REASONING="true",
         )
         with patch.object(
             main_mod.router.pipeline.expert_manager.openai,

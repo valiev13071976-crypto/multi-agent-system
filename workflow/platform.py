@@ -106,12 +106,19 @@ class WorkflowPlatform:
         metadata=None,
         deadline_at=None,
         workflow_id: str | None = None,
+        tenant_id: str | None = None,
     ):
         validate_definition(definition)
         timeout = definition.timeout_seconds
         deadline = deadline_at
         if deadline is None and timeout:
             deadline = utc_now() + timedelta(seconds=float(timeout))
+        meta = {
+            **dict(metadata or {}),
+            "definition_key": definition.key,
+        }
+        if tenant_id:
+            meta["tenant_id"] = tenant_id
         state = self.state_manager.create(
             task_id=task_id,
             workflow_id=workflow_id,
@@ -119,11 +126,9 @@ class WorkflowPlatform:
             step_names=definition.step_ids(),
             workflow_type=definition.workflow_type,
             definition_version=definition.version,
-            metadata={
-                **dict(metadata or {}),
-                "definition_key": definition.key,
-            },
+            metadata=meta,
             deadline_at=deadline,
+            tenant_id=tenant_id,
         )
         self.state_manager.plan(state.workflow_id)
         self._obs(

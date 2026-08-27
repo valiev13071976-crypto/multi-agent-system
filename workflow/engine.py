@@ -139,8 +139,8 @@ class WorkflowEngine:
             event_type, context=ctx, component="workflow", **kwargs
         )
 
-    def create(self, task_id: str) -> str:
-        state = self.state_manager.create(task_id=task_id)
+    def create(self, task_id: str, *, tenant_id: str | None = None) -> str:
+        state = self.state_manager.create(task_id=task_id, tenant_id=tenant_id)
         self.last_workflow_id = state.workflow_id
         self.last_task_id = task_id
         ctx = self._obs_ctx(state.workflow_id, task_id)
@@ -249,8 +249,9 @@ class WorkflowEngine:
         context_manager,
         run_router,
         task_id: str,
+        tenant_id: str | None = None,
     ):
-        workflow_id = self.create(task_id)
+        workflow_id = self.create(task_id, tenant_id=tenant_id)
         manager = self.state_manager
         manager.plan(workflow_id)
         manager.start(workflow_id)

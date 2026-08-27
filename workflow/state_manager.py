@@ -50,6 +50,7 @@ class StateManager:
         definition_version: str | None = None,
         metadata=None,
         deadline_at=None,
+        tenant_id: str | None = None,
     ) -> WorkflowState:
         now = utc_now()
         wf_id = workflow_id or str(uuid.uuid4())
@@ -77,6 +78,7 @@ class StateManager:
             version=1,
             steps=steps,
             execution_key=execution_key or str(uuid.uuid4()),
+            tenant_id=tenant_id,
             workflow_type=workflow_type,
             definition_version=definition_version,
             metadata=dict(metadata or {}),
@@ -86,12 +88,17 @@ class StateManager:
         self._store.create(state)
         return state
 
-    def find_by_execution_key(self, execution_key: str):
+    def find_by_execution_key(self, execution_key: str, *, tenant_id: str | None = None):
         store = self._store
         if hasattr(store, "find_by_execution_key"):
-            return store.find_by_execution_key(execution_key)
+            return store.find_by_execution_key(execution_key, tenant_id=tenant_id)
+        from security.tenant import normalize_tenant_id
+
+        tenant = normalize_tenant_id(tenant_id)
         for state in store.list_all():
-            if state.execution_key == execution_key:
+            if state.execution_key == execution_key and normalize_tenant_id(
+                state.tenant_id
+            ) == tenant:
                 return state
         return None
 

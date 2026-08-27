@@ -123,8 +123,9 @@ class MemoryScope:
         if not str(self.scope_id or "").strip():
             raise ValueError("scope_id_required")
 
-    def key(self) -> tuple[str, str]:
-        return (self.scope_type, self.scope_id)
+    def key(self) -> tuple[str, str, str]:
+        tenant = str(self.tenant_ref or "").strip() or "_"
+        return (tenant, self.scope_type, self.scope_id)
 
 
 @dataclass(frozen=True)

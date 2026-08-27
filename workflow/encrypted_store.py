@@ -79,7 +79,9 @@ class EncryptedWorkflowStateStore(WorkflowStateStore):
             return self._inner.list_all()
         return ()
 
-    def find_by_execution_key(self, execution_key: str):
+    def find_by_execution_key(self, execution_key: str, *, tenant_id: str | None = None):
         if hasattr(self._inner, "find_by_execution_key"):
-            return self._inner.find_by_execution_key(execution_key)
+            return self._inner.find_by_execution_key(
+                execution_key, tenant_id=tenant_id
+            )
         return None

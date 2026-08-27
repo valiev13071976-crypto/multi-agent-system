@@ -144,6 +144,7 @@ class WorkflowState:
     version: int
     steps: tuple[StepRecord, ...]
     execution_key: str
+    tenant_id: str | None = None
     workflow_type: str | None = None
     definition_version: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)

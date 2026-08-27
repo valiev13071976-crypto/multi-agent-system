@@ -30,6 +30,11 @@ class MemoryAccessPolicy:
     ) -> bool:
         if operation not in MEMORY_OPS:
             return False
+        # Tenant boundary first
+        req_tenant = str(requesting.tenant_ref or "").strip()
+        tgt_tenant = str(target.tenant_ref or "").strip()
+        if req_tenant and tgt_tenant and req_tenant != tgt_tenant:
+            return False
         return requesting.key() == target.key()
 
     def require(

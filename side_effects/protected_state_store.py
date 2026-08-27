@@ -631,22 +631,28 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             return None
         return self._from_row(row)
 
-    def find_by_execution_key(self, execution_key: str) -> WorkflowState | None:
+    def find_by_execution_key(
+        self, execution_key: str, *, tenant_id: str | None = None
+    ) -> WorkflowState | None:
         if not execution_key:
             return None
+        from security.tenant import normalize_tenant_id
+
+        tenant = normalize_tenant_id(tenant_id)
         conn = self._connection.connect()
-        row = conn.execute(
+        rows = conn.execute(
             """
             SELECT * FROM workflow_runtime_state
             WHERE execution_key = ?
             ORDER BY created_at ASC, workflow_id ASC
-            LIMIT 1
             """,
             (execution_key,),
-        ).fetchone()
-        if row is None:
-            return None
-        return self._from_row(row)
+        ).fetchall()
+        for row in rows:
+            state = self._from_row(row)
+            if normalize_tenant_id(state.tenant_id) == tenant:
+                return state
+        return None
 
     def save(self, state: WorkflowState, *, linkage: dict | None = None) -> None:
         self._upsert(state, insert=False, linkage=linkage)
@@ -790,6 +796,8 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             meta["next_retry_at"] = _dt_to_db(state.next_retry_at)
         if state.deadline_at is not None:
             meta["deadline_at"] = _dt_to_db(state.deadline_at)
+        if state.tenant_id:
+            meta["tenant_id"] = str(state.tenant_id)
         waiting_reason = None
         approval_id = None
         action_id = None
@@ -924,6 +932,11 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             version=int(row["version"]),
             steps=steps,
             execution_key=row["execution_key"],
+            tenant_id=(
+                str(metadata["tenant_id"])
+                if metadata.get("tenant_id") is not None
+                else None
+            ),
             workflow_type=(
                 str(metadata["workflow_type"])
                 if metadata.get("workflow_type") is not None

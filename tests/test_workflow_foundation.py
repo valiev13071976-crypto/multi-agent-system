@@ -44,6 +44,8 @@ from workflow.registry import DefinitionRegistry
 from workflow.service import build_workflow_runtime
 from workflow.state_manager import StateManager
 from workflow.store import InMemoryWorkflowStateStore
+from security.config import DEFAULT_LEGACY_TENANT
+from security.tenant import scope_execution_key
 
 
 class DefinitionValidationTests(unittest.TestCase):
@@ -668,7 +670,10 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(list(bundle2.queue.store.list_all())), 1)
         # May list in reenqueued again but same queue_task_id
         tasks = list(bundle2.queue.store.list_all())
-        self.assertEqual(tasks[0].execution_key, "dup-startup-1")
+        self.assertEqual(
+            tasks[0].execution_key,
+            scope_execution_key(DEFAULT_LEGACY_TENANT, "dup-startup-1"),
+        )
 
 
 class WorkflowIdempotencyTests(unittest.IsolatedAsyncioTestCase):
