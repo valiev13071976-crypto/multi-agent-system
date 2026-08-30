@@ -151,7 +151,7 @@ class ScrapePipeline:
             # crude record hint for HTML list pages / JSON arrays
             body = art.content_text or ""
             page_records = body.count("<li") + body.count("<tr")
-            if art.content_type.startswith("application/json"):
+            if ct.startswith("application/json"):
                 page_records = max(page_records, body.count("{"))
             records_hint += page_records
             state = pager.advance(state, body=body, record_count=page_records)

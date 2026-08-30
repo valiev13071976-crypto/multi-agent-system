@@ -153,8 +153,8 @@ class AcquisitionPlanner:
 
         trusted_metadata = {
             "trusted_job_type": trusted_job_type,
-            "workload_class": workload if batch or mode in {MODE_CRAWL, MODE_SCRAPE} else workload,
-            "execution_lane": lane if batch or mode in {MODE_CRAWL, MODE_SCRAPE} else lane,
+            "workload_class": workload,
+            "execution_lane": lane,
             "acquisition_mode": mode,
             "policy_version": POLICY_VERSION,
         }
