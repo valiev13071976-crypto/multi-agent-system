@@ -188,8 +188,10 @@ def derive_task_requirements(
     elif category_key == "trend_analysis":
         complexity = COMPLEXITY_STANDARD
         risk = RISK_MEDIUM
+        # Freshness is current, but do not hard-require CAPABILITY_SEARCH:
+        # ModelProfile has no supports_search, so search is always unresolved
+        # and would 503 every trend_agent / trend_analysis route.
         freshness = FRESHNESS_CURRENT
-        caps.append(CAPABILITY_SEARCH)
     elif category_key == "critique":
         complexity = COMPLEXITY_STANDARD
         risk = RISK_MEDIUM

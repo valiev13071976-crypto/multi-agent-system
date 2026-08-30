@@ -25,10 +25,11 @@ from documents.errors import (
     DOCUMENT_SHEET_NOT_FOUND,
     DOCUMENT_STORE_UNAVAILABLE,
     DOCUMENT_TOO_LARGE,
+    DOCUMENT_OCR_BATCH_REQUIRED,
     LARGE_DOCUMENT_WORKFLOW_UNAVAILABLE,
     DocumentError,
 )
-from documents.intelligence.large import LargeDocumentPolicy
+from documents.intelligence.large import LargeDocumentPolicy, pdf_inline_ocr_requires_batch
 from documents.models import (
     CellRange,
     DOC_PDF,
@@ -220,6 +221,24 @@ class DocumentService:
                 page_count=page_count or 1,
                 requesting_scope=req_scope,
             )
+
+        # Large OCR must not run inline when scanned pages meet canonical threshold.
+        if doc_type == DOC_PDF and self.intelligence is not None:
+            batch_ocr, ocr_page_count = pdf_inline_ocr_requires_batch(
+                data, limits=self.limits
+            )
+            if batch_ocr:
+                if (
+                    self.workflow_runtime is None
+                    and self.intelligence.workflow_runtime is None
+                ):
+                    raise DocumentError(DOCUMENT_OCR_BATCH_REQUIRED)
+                return self._enqueue_large_extract(
+                    created,
+                    data=data,
+                    page_count=ocr_page_count or page_count or 1,
+                    requesting_scope=req_scope,
+                )
 
         # Parse immediately for foundation completeness
         try:

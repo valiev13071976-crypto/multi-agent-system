@@ -589,6 +589,8 @@ class PersistentExecutionPermitStore(ExecutionPermitStore):
             status=row["status"],
             consumed_at=_dt_from_db(row["consumed_at"]),
             version=int(row["version"]),
+            tenant_id=str(metadata.get("tenant_id") or ""),
+            actor_ref=str(metadata.get("actor_ref") or ""),
             metadata=metadata,
         )
 
@@ -619,6 +621,10 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             pass
 
     def create(self, state: WorkflowState) -> None:
+        from security.tenant import require_tenant_id
+
+        # Durable new writes fail-closed on missing tenant.
+        require_tenant_id(state.tenant_id)
         self._upsert(state, insert=True, linkage=None)
 
     def get(self, workflow_id: str) -> WorkflowState | None:
@@ -631,12 +637,46 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             return None
         return self._from_row(row)
 
+    def get_for_tenant(
+        self, workflow_id: str, tenant_id: str
+    ) -> WorkflowState | None:
+        """Tenant-scoped get — cross-tenant id → None (not found)."""
+        from security.tenant import normalize_tenant_id, workflow_tenant_id
+
+        tenant = normalize_tenant_id(tenant_id)
+        conn = self._connection.connect()
+        # Prefer first-class column filter when present.
+        row = conn.execute(
+            """
+            SELECT * FROM workflow_runtime_state
+            WHERE workflow_id = ?
+              AND (
+                (tenant_id IS NOT NULL AND TRIM(tenant_id) != '' AND tenant_id = ?)
+                OR tenant_id IS NULL
+                OR TRIM(COALESCE(tenant_id, '')) = ''
+              )
+            """,
+            (workflow_id, tenant),
+        ).fetchone()
+        if row is None:
+            # Fallback: load by id then compare (covers legacy null column rows).
+            state = self.get(workflow_id)
+            if state is None:
+                return None
+            if workflow_tenant_id(state) != tenant:
+                return None
+            return state
+        state = self._from_row(row)
+        if workflow_tenant_id(state) != tenant:
+            return None
+        return state
+
     def find_by_execution_key(
         self, execution_key: str, *, tenant_id: str | None = None
     ) -> WorkflowState | None:
         if not execution_key:
             return None
-        from security.tenant import normalize_tenant_id
+        from security.tenant import normalize_tenant_id, workflow_tenant_id
 
         tenant = normalize_tenant_id(tenant_id)
         conn = self._connection.connect()
@@ -644,18 +684,60 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             """
             SELECT * FROM workflow_runtime_state
             WHERE execution_key = ?
+              AND (
+                tenant_id = ?
+                OR tenant_id IS NULL
+                OR TRIM(COALESCE(tenant_id, '')) = ''
+              )
             ORDER BY created_at ASC, workflow_id ASC
             """,
-            (execution_key,),
+            (execution_key, tenant),
         ).fetchall()
         for row in rows:
             state = self._from_row(row)
-            if normalize_tenant_id(state.tenant_id) == tenant:
+            if workflow_tenant_id(state) == tenant:
                 return state
         return None
 
     def save(self, state: WorkflowState, *, linkage: dict | None = None) -> None:
         self._upsert(state, insert=False, linkage=linkage)
+
+    def list_by_status(
+        self, status: str, *, tenant_id: str | None = None
+    ) -> tuple[WorkflowState, ...]:
+        conn = self._connection.connect()
+        if tenant_id is None:
+            rows = conn.execute(
+                "SELECT * FROM workflow_runtime_state WHERE state = ?",
+                (status,),
+            ).fetchall()
+            return tuple(self._from_row(row) for row in rows)
+        from security.tenant import normalize_tenant_id, workflow_tenant_id
+
+        tenant = normalize_tenant_id(tenant_id)
+        rows = conn.execute(
+            """
+            SELECT * FROM workflow_runtime_state
+            WHERE state = ?
+              AND (
+                tenant_id = ?
+                OR tenant_id IS NULL
+                OR TRIM(COALESCE(tenant_id, '')) = ''
+              )
+            """,
+            (status, tenant),
+        ).fetchall()
+        return tuple(
+            state
+            for state in (self._from_row(row) for row in rows)
+            if workflow_tenant_id(state) == tenant
+        )
+
+    def list_all(self) -> tuple[WorkflowState, ...]:
+        """Internal/unscoped — recovery/maintenance only. Not for tenant-facing APIs."""
+        conn = self._connection.connect()
+        rows = conn.execute("SELECT * FROM workflow_runtime_state").fetchall()
+        return tuple(self._from_row(row) for row in rows)
 
     def checkpoint(self, checkpoint: Checkpoint) -> None:
         sensitivity = checkpoint.sensitivity or SENSITIVITY_INTERNAL
@@ -760,19 +842,6 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             sensitivity=row["sensitivity"] or SENSITIVITY_INTERNAL,
         )
 
-    def list_by_status(self, status: str) -> tuple[WorkflowState, ...]:
-        conn = self._connection.connect()
-        rows = conn.execute(
-            "SELECT * FROM workflow_runtime_state WHERE state = ?",
-            (status,),
-        ).fetchall()
-        return tuple(self._from_row(row) for row in rows)
-
-    def list_all(self) -> tuple[WorkflowState, ...]:
-        conn = self._connection.connect()
-        rows = conn.execute("SELECT * FROM workflow_runtime_state").fetchall()
-        return tuple(self._from_row(row) for row in rows)
-
     def list_waiting_approval(self) -> tuple[WorkflowState, ...]:
         return self.list_by_status(STATUS_WAITING_APPROVAL)
 
@@ -798,6 +867,12 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             meta["deadline_at"] = _dt_to_db(state.deadline_at)
         if state.tenant_id:
             meta["tenant_id"] = str(state.tenant_id)
+        if state.request_id:
+            meta["request_id"] = str(state.request_id)
+        if state.user_id:
+            meta["user_id"] = str(state.user_id)
+        if state.actor_ref:
+            meta["actor_ref"] = str(state.actor_ref)
         waiting_reason = None
         approval_id = None
         action_id = None
@@ -822,8 +897,9 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
                         workflow_id, task_id, state, current_step, waiting_reason,
                         approval_id, action_id, created_at, updated_at, started_at,
                         completed_at, failed_at, error_code, execution_key, version,
-                        sensitivity, safe_metadata_json, encrypted_payload_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        sensitivity, safe_metadata_json, encrypted_payload_json,
+                        tenant_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         state.workflow_id,
@@ -844,6 +920,7 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
                         SENSITIVITY_INTERNAL,
                         safe_json,
                         encrypted_json,
+                        str(state.tenant_id) if state.tenant_id else None,
                     ),
                 )
             else:
@@ -869,7 +946,8 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
                         approval_id=?, action_id=?, created_at=?, updated_at=?,
                         started_at=?, completed_at=?, failed_at=?, error_code=?,
                         execution_key=?, version=?, sensitivity=?,
-                        safe_metadata_json=?, encrypted_payload_json=?
+                        safe_metadata_json=?, encrypted_payload_json=?,
+                        tenant_id=?
                     WHERE workflow_id=? AND version=?
                     """,
                     (
@@ -890,6 +968,7 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
                         SENSITIVITY_INTERNAL,
                         safe_json,
                         encrypted_json,
+                        str(state.tenant_id) if state.tenant_id else None,
                         state.workflow_id,
                         expected,
                     ),
@@ -918,6 +997,20 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
         wf_meta = metadata.get("workflow_metadata")
         if not isinstance(wf_meta, dict):
             wf_meta = {}
+        # Prefer first-class column; fall back to metadata for dual-read.
+        column_tenant = None
+        try:
+            raw_col = row["tenant_id"]
+            if raw_col is not None and str(raw_col).strip():
+                column_tenant = str(raw_col).strip()
+        except (KeyError, IndexError):
+            column_tenant = None
+        meta_tenant = (
+            str(metadata["tenant_id"])
+            if metadata.get("tenant_id") is not None
+            else None
+        )
+        tenant_id = column_tenant or meta_tenant
         return WorkflowState(
             workflow_id=row["workflow_id"],
             task_id=row["task_id"],
@@ -932,11 +1025,7 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             version=int(row["version"]),
             steps=steps,
             execution_key=row["execution_key"],
-            tenant_id=(
-                str(metadata["tenant_id"])
-                if metadata.get("tenant_id") is not None
-                else None
-            ),
+            tenant_id=tenant_id,
             workflow_type=(
                 str(metadata["workflow_type"])
                 if metadata.get("workflow_type") is not None
@@ -950,4 +1039,19 @@ class PersistentWorkflowRuntimeStore(WorkflowStateStore):
             metadata=wf_meta,
             next_retry_at=_dt_from_db(metadata.get("next_retry_at")),
             deadline_at=_dt_from_db(metadata.get("deadline_at")),
+            request_id=(
+                str(metadata["request_id"])
+                if metadata.get("request_id") is not None
+                else (str(wf_meta.get("request_id")) if wf_meta.get("request_id") else None)
+            ),
+            user_id=(
+                str(metadata["user_id"])
+                if metadata.get("user_id") is not None
+                else (str(wf_meta.get("user_id")) if wf_meta.get("user_id") else None)
+            ),
+            actor_ref=(
+                str(metadata["actor_ref"])
+                if metadata.get("actor_ref") is not None
+                else (str(wf_meta.get("actor_ref")) if wf_meta.get("actor_ref") else None)
+            ),
         )

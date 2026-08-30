@@ -24,7 +24,7 @@ class RecoveryPersistenceFailureTests(unittest.IsolatedAsyncioTestCase):
             orch.require_mutation_allowed()
 
         engine = WorkflowEngine()
-        wf = engine.create("t")
+        wf = engine.create("t", tenant_id="tenant-se")
         engine.state_manager.plan(wf)
         engine.state_manager.start(wf)
         adapter = InMemoryReversibleWriteAdapter(trust_level=TOOL_TRUST_INTERNAL_SAFE)

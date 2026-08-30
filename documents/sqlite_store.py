@@ -106,6 +106,47 @@ CREATE TABLE IF NOT EXISTS document_extract_partials (
     created_at TEXT NOT NULL,
     PRIMARY KEY (document_id, batch_index)
 );
+CREATE TABLE IF NOT EXISTS document_processing_jobs (
+    job_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    version_id TEXT NOT NULL DEFAULT '',
+    tenant_id TEXT NOT NULL,
+    execution_id TEXT NOT NULL DEFAULT '',
+    workflow_id TEXT NOT NULL DEFAULT '',
+    task_id TEXT NOT NULL DEFAULT '',
+    operations_json TEXT NOT NULL DEFAULT '[]',
+    workload_class TEXT NOT NULL DEFAULT 'normal',
+    execution_lane TEXT NOT NULL DEFAULT 'default',
+    profile_version TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    checkpoint_json TEXT NOT NULL DEFAULT '{{}}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    pinned_providers_json TEXT NOT NULL DEFAULT '{{}}',
+    pinned_profiles_json TEXT NOT NULL DEFAULT '{{}}',
+    schema_version TEXT NOT NULL DEFAULT '1.0.0'
+);
+CREATE INDEX IF NOT EXISTS idx_document_processing_jobs_tenant
+ON document_processing_jobs(tenant_id, document_id);
+CREATE TABLE IF NOT EXISTS document_versions (
+    version_id TEXT PRIMARY KEY,
+    document_id TEXT NOT NULL,
+    parent_version_id TEXT NOT NULL DEFAULT '',
+    artifact_id TEXT NOT NULL DEFAULT '',
+    content_hash TEXT NOT NULL DEFAULT '',
+    transformation_reason TEXT NOT NULL DEFAULT '',
+    producing_operation TEXT NOT NULL DEFAULT '',
+    producing_tool_or_model TEXT NOT NULL DEFAULT '',
+    provenance_json TEXT NOT NULL DEFAULT '{{}}',
+    created_at TEXT NOT NULL,
+    schema_version TEXT NOT NULL DEFAULT '1.0.0'
+);
+CREATE INDEX IF NOT EXISTS idx_document_versions_doc
+ON document_versions(document_id);
 """
 
 
@@ -597,6 +638,193 @@ class SqliteDocumentStore(DocumentStore):
                 (document_id,),
             )
             self._commit(conn)
+
+    def save_processing_job(self, job):
+        if not self.available:
+            raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+        from documents.platform_models import DocumentProcessingJob
+
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT INTO document_processing_jobs(
+                    job_id, document_id, version_id, tenant_id, execution_id, workflow_id, task_id,
+                    operations_json, workload_class, execution_lane, profile_version, status, stage,
+                    checkpoint_json, created_at, updated_at, started_at, completed_at,
+                    idempotency_key, pinned_providers_json, pinned_profiles_json, schema_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(job_id) DO UPDATE SET
+                    version_id=excluded.version_id,
+                    status=excluded.status,
+                    stage=excluded.stage,
+                    checkpoint_json=excluded.checkpoint_json,
+                    updated_at=excluded.updated_at,
+                    started_at=excluded.started_at,
+                    completed_at=excluded.completed_at,
+                    workload_class=excluded.workload_class,
+                    execution_lane=excluded.execution_lane,
+                    operations_json=excluded.operations_json,
+                    pinned_providers_json=excluded.pinned_providers_json,
+                    pinned_profiles_json=excluded.pinned_profiles_json
+                """,
+                (
+                    job.job_id,
+                    job.document_id,
+                    job.version_id or "",
+                    job.tenant_id,
+                    job.execution_id or "",
+                    job.workflow_id or "",
+                    job.task_id or "",
+                    json.dumps(list(job.operations)),
+                    job.workload_class,
+                    job.execution_lane,
+                    job.profile_version,
+                    job.status,
+                    job.stage,
+                    _json_dumps(dict(job.checkpoint)),
+                    _dt_to_db(job.created_at),
+                    _dt_to_db(job.updated_at),
+                    _dt_to_db(job.started_at),
+                    _dt_to_db(job.completed_at),
+                    job.idempotency_key or "",
+                    _json_dumps(dict(job.pinned_providers)),
+                    _json_dumps(dict(job.pinned_profiles)),
+                    job.schema_version,
+                ),
+            )
+            self._commit(conn)
+            return job
+
+    def get_processing_job(self, job_id: str, *, tenant_id: str | None = None):
+        with self._lock:
+            if tenant_id is not None:
+                from security.tenant import normalize_tenant_id
+
+                row = self._connect().execute(
+                    "SELECT * FROM document_processing_jobs WHERE job_id=? AND tenant_id=?",
+                    (job_id, normalize_tenant_id(tenant_id)),
+                ).fetchone()
+            else:
+                row = self._connect().execute(
+                    "SELECT * FROM document_processing_jobs WHERE job_id=?",
+                    (job_id,),
+                ).fetchone()
+            return self._job_from_row(row) if row else None
+
+    def list_processing_jobs(self, *, tenant_id: str, document_id: str | None = None):
+        from security.tenant import normalize_tenant_id
+
+        tid = normalize_tenant_id(tenant_id)
+        with self._lock:
+            if document_id:
+                rows = self._connect().execute(
+                    """
+                    SELECT * FROM document_processing_jobs
+                    WHERE tenant_id=? AND document_id=? ORDER BY job_id
+                    """,
+                    (tid, document_id),
+                ).fetchall()
+            else:
+                rows = self._connect().execute(
+                    """
+                    SELECT * FROM document_processing_jobs
+                    WHERE tenant_id=? ORDER BY job_id
+                    """,
+                    (tid,),
+                ).fetchall()
+            return tuple(self._job_from_row(r) for r in rows)
+
+    def save_document_version(self, version):
+        if not self.available:
+            raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT INTO document_versions(
+                    version_id, document_id, parent_version_id, artifact_id, content_hash,
+                    transformation_reason, producing_operation, producing_tool_or_model,
+                    provenance_json, created_at, schema_version
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?)
+                ON CONFLICT(version_id) DO UPDATE SET
+                    artifact_id=excluded.artifact_id,
+                    content_hash=excluded.content_hash,
+                    transformation_reason=excluded.transformation_reason,
+                    producing_operation=excluded.producing_operation,
+                    producing_tool_or_model=excluded.producing_tool_or_model,
+                    provenance_json=excluded.provenance_json
+                """,
+                (
+                    version.version_id,
+                    version.document_id,
+                    version.parent_version_id or "",
+                    version.artifact_id or "",
+                    version.content_hash or "",
+                    version.transformation_reason or "",
+                    version.producing_operation or "",
+                    version.producing_tool_or_model or "",
+                    _json_dumps(dict(version.provenance)),
+                    _dt_to_db(version.created_at),
+                    version.schema_version,
+                ),
+            )
+            self._commit(conn)
+            return version
+
+    def list_document_versions(self, document_id: str, *, tenant_id: str | None = None):
+        _ = tenant_id
+        with self._lock:
+            rows = self._connect().execute(
+                "SELECT * FROM document_versions WHERE document_id=? ORDER BY created_at",
+                (document_id,),
+            ).fetchall()
+            return tuple(self._version_from_row(r) for r in rows)
+
+    def _job_from_row(self, row):
+        from documents.platform_models import DocumentProcessingJob
+
+        return DocumentProcessingJob(
+            job_id=row["job_id"],
+            document_id=row["document_id"],
+            version_id=row["version_id"] or "",
+            tenant_id=row["tenant_id"],
+            execution_id=row["execution_id"] or "",
+            workflow_id=row["workflow_id"] or "",
+            task_id=row["task_id"] or "",
+            operations=tuple(json.loads(row["operations_json"] or "[]")),
+            workload_class=row["workload_class"] or "normal",
+            execution_lane=row["execution_lane"] or "default",
+            profile_version=row["profile_version"] or "",
+            status=row["status"],
+            stage=row["stage"],
+            checkpoint=json.loads(row["checkpoint_json"] or "{}"),
+            created_at=_dt_from_db(row["created_at"]),
+            updated_at=_dt_from_db(row["updated_at"]),
+            started_at=_dt_from_db(row["started_at"]),
+            completed_at=_dt_from_db(row["completed_at"]),
+            idempotency_key=row["idempotency_key"] or "",
+            pinned_providers=json.loads(row["pinned_providers_json"] or "{}"),
+            pinned_profiles=json.loads(row["pinned_profiles_json"] or "{}"),
+            schema_version=row["schema_version"] or "1.0.0",
+        )
+
+    def _version_from_row(self, row):
+        from documents.platform_models import DocumentVersion
+
+        return DocumentVersion(
+            document_id=row["document_id"],
+            version_id=row["version_id"],
+            parent_version_id=row["parent_version_id"] or "",
+            artifact_id=row["artifact_id"] or "",
+            content_hash=row["content_hash"] or "",
+            transformation_reason=row["transformation_reason"] or "",
+            producing_operation=row["producing_operation"] or "",
+            producing_tool_or_model=row["producing_tool_or_model"] or "",
+            provenance=json.loads(row["provenance_json"] or "{}"),
+            created_at=_dt_from_db(row["created_at"]),
+            schema_version=row["schema_version"] or "1.0.0",
+        )
 
     def _row_to_record(self, row) -> DocumentRecord:
         scope = MemoryScope(

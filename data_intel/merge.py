@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import defaultdict
 
 from data_intel.cleaning import clean_text
-from data_intel.errors import MERGE_CONFLICT, DataIntelError
+from data_intel.errors import DATASET_JOIN_EXPLOSION, MERGE_CONFLICT, DataIntelError
 
 
 def _key_tuple(row: dict, keys: list[str]) -> tuple:
@@ -20,6 +20,8 @@ def merge_datasets(
     how: str = "inner",
     left_prefix: str = "l_",
     right_prefix: str = "r_",
+    allow_many_to_many: bool = False,
+    max_output_rows: int = 500_000,
 ) -> dict:
     """Join datasets. how: inner|left|right|full|append."""
     how = (how or "inner").lower()
@@ -52,6 +54,8 @@ def merge_datasets(
             one_to_many.append({"key": list(k), "left": l_index[k], "right": r_index[k]})
             if len(l_index[k]) > 1 and len(r_index[k]) > 1:
                 conflicts.append({"key": list(k), "reason": "many_to_many"})
+                if not allow_many_to_many:
+                    raise DataIntelError(DATASET_JOIN_EXPLOSION)
 
     def combine(lrow, rrow):
         out = {}
@@ -132,6 +136,9 @@ def merge_datasets(
                     unmatched_right.append(j)
     else:
         raise DataIntelError(MERGE_CONFLICT)
+
+    if len(rows) > max_output_rows:
+        raise DataIntelError(DATASET_JOIN_EXPLOSION)
 
     return {
         "rows": rows,

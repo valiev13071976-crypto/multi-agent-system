@@ -32,6 +32,46 @@ class DataIntelToolAdapter:
         op = request.operation
         tenant = self._tenant(request)
         try:
+            if op == "ingest":
+                raw = args.get("content_b64")
+                if not raw:
+                    raise ToolArgumentInvalidError()
+                data = base64.b64decode(raw)
+                row_hint = args.get("row_count")
+                if row_hint is not None:
+                    from data_intel.planner import assert_sync_data_allowed
+
+                    assert_sync_data_allowed(
+                        row_count=int(row_hint),
+                        byte_size=len(data),
+                        operations=("ingest",),
+                    )
+                return self._svc.ingest(
+                    data,
+                    filename=str(args.get("filename") or "data.csv"),
+                    tenant_id=tenant,
+                    source_document_id=str(args.get("source_document_id") or ""),
+                )
+            if op == "duplicates":
+                ds = str(args.get("dataset_id") or "")
+                if not ds:
+                    raise ToolArgumentInvalidError()
+                return {
+                    "groups": self._svc.duplicates(
+                        ds,
+                        tenant_id=tenant,
+                        business_keys=list(args.get("business_keys") or []),
+                    )
+                }
+            if op == "merge":
+                left = list(args.get("left_rows") or [])
+                right = list(args.get("right_rows") or [])
+                return self._svc.merge(
+                    left,
+                    right,
+                    keys=list(args.get("keys") or []),
+                    how=str(args.get("how") or "inner"),
+                )
             if op == "profile":
                 ds = str(args.get("dataset_id") or "")
                 if not ds:

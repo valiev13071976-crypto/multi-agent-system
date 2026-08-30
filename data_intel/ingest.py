@@ -9,7 +9,12 @@ from dataclasses import dataclass
 
 from data_intel.contracts import DatasetDescriptor, TableDescriptor, new_id, utc_now
 from data_intel.cleaning import clean_text
-from data_intel.errors import DATASET_PARSE_FAILED, UNSUPPORTED_SPREADSHEET, DataIntelError
+from data_intel.errors import (
+    DATASET_PARSE_FAILED,
+    DATASET_TYPE_MISMATCH,
+    UNSUPPORTED_SPREADSHEET,
+    DataIntelError,
+)
 from data_intel.structure import detect_tables_in_sheet, extract_table_rows
 
 
@@ -33,17 +38,26 @@ def _checksum(data: bytes) -> str:
 
 def _detect_format(filename: str, data: bytes) -> str:
     name = (filename or "").lower()
-    if name.endswith(".xlsx") or data[:2] == b"PK":
-        if name.endswith(".xls") and not name.endswith(".xlsx"):
-            pass
-        else:
+    magic_xlsx = data[:2] == b"PK"
+    magic_xls = data[:8] == b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1"
+    if name.endswith(".xlsx"):
+        if magic_xlsx:
             return "xlsx"
+        if magic_xls:
+            raise DataIntelError(DATASET_TYPE_MISMATCH)
+        raise DataIntelError(DATASET_TYPE_MISMATCH)
     if name.endswith(".xls"):
+        if magic_xls:
+            return "xls"
+        if magic_xlsx:
+            raise DataIntelError(DATASET_TYPE_MISMATCH)
+        raise DataIntelError(DATASET_TYPE_MISMATCH)
+    if magic_xlsx:
+        return "xlsx"
+    if magic_xls:
         return "xls"
     if name.endswith(".csv") or b"," in data[:200] or b";" in data[:200]:
         return "csv"
-    if name.endswith(".xlsx"):
-        return "xlsx"
     raise DataIntelError(UNSUPPORTED_SPREADSHEET)
 
 
@@ -84,6 +98,14 @@ def load_xlsx_sheets(data: bytes) -> list[SheetGrid]:
         from openpyxl import load_workbook
     except ImportError as exc:
         raise DataIntelError(DATASET_PARSE_FAILED) from exc
+    if data[:2] == b"PK":
+        from documents.errors import DocumentError as DocError
+        from documents.zip_safety import inspect_zip_safety
+
+        try:
+            inspect_zip_safety(data)
+        except DocError as exc:
+            raise DataIntelError(str(exc.reason)) from exc
     try:
         wb = load_workbook(io.BytesIO(data), read_only=True, data_only=False)
     except Exception as exc:

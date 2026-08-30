@@ -1,17 +1,19 @@
-"""Document Intelligence Service — extract/OCR/compare/generate/convert."""
+"""Document Intelligence Service — extract/OCR/compare/generate/convert/pipeline."""
 
 from __future__ import annotations
 
-import io
 from dataclasses import replace
+from typing import Mapping, Sequence
 
 from documents.errors import (
     DOCUMENT_ACCESS_DENIED,
+    DOCUMENT_OCR_BATCH_REQUIRED,
     DOCUMENT_REQUIRES_OCR,
+    GENERATION_FAILED,
     OCR_UNAVAILABLE,
     DocumentError,
 )
-from documents.intelligence.classify import classify_document_text
+from documents.intelligence.classify import classify_document, classify_document_text
 from documents.intelligence.compare import compare_structured, compare_text_sections
 from documents.intelligence.content import content_from_parsed
 from documents.intelligence.contracts import (
@@ -23,21 +25,55 @@ from documents.intelligence.contracts import (
     StructuredDocument,
 )
 from documents.intelligence.convert import convert_document
-from documents.intelligence.extraction import extract_structured
+from documents.intelligence.extraction import extract_structured, extract_structured_with_schema
 from documents.intelligence.generate import generate_docx, generate_pdf, generate_txt
 from documents.intelligence.large import LargeDocumentPolicy, build_large_doc_plan, large_extract_execution_key
 from documents.intelligence.linking import link_documents
 from documents.intelligence.ocr import NullOCRProvider, build_ocr_provider
+from documents.intelligence.ocr_plan import plan_ocr
 from documents.intelligence.pdf_ocr import (
     build_pdf_document_content,
     content_to_parsed_document,
     peek_pdf_page_count,
 )
 from documents.intelligence.raster import NullPdfRasterizer, build_pdf_rasterizer
-from documents.models import DOC_PDF, ParsedDocument
+from documents.intelligence.reconcile import reconcile_documents
+from documents.intelligence.validation import validate_structured
+from documents.models import SOURCE_SYSTEM, DocumentIngestRequest, ParsedDocument
+from documents.observability import get_observer
+from documents.planner import (
+    PlannedDocument,
+    assert_sync_ocr_allowed,
+    plan_document_job,
+    resolve_sync_ocr_page_count,
+)
+from documents.platform_models import (
+    JOB_COMPLETED,
+    JOB_FAILED,
+    JOB_RUNNING,
+    OP_OCR,
+    OCR_REQUIRED,
+    STAGE_CLASSIFY,
+    STAGE_DONE,
+    STAGE_EXTRACT,
+    STAGE_INGEST,
+    STAGE_OCR,
+    STAGE_VALIDATE,
+    ComparisonResult,
+    DocumentProcessingJob,
+    DocumentResult,
+    DocumentTemplate,
+    DocumentVersion,
+    ExtractionSchema,
+    ReconciliationProfile,
+    ReconciliationResult,
+    new_id,
+    utc_now,
+)
 from documents.type_detect import resolve_document_type
 from memory.models import MemoryScope
-from security.tenant import normalize_tenant_id, tenants_match
+from security.encryption import SENSITIVITY_INTERNAL
+from security.tenant import normalize_tenant_id, require_tenant_id, tenants_match
 
 
 class DocumentIntelligenceService:
@@ -49,14 +85,30 @@ class DocumentIntelligenceService:
         rasterizer=None,
         large_policy: LargeDocumentPolicy | None = None,
         workflow_runtime=None,
+        observer=None,
+        store=None,
     ):
         self.documents = document_service
         self.ocr = ocr_provider if ocr_provider is not None else NullOCRProvider()
         self.rasterizer = rasterizer if rasterizer is not None else NullPdfRasterizer()
         self.large_policy = large_policy or LargeDocumentPolicy()
         self.workflow_runtime = workflow_runtime
+        self._observer = observer
+        self._store = store
         self._structured_cache: dict[tuple[str, str], StructuredDocument] = {}
         self._content_cache: dict[tuple[str, str], DocumentContent] = {}
+
+    @property
+    def observer(self):
+        return self._observer or get_observer()
+
+    @property
+    def store(self):
+        if self._store is not None:
+            return self._store
+        if self.documents is not None:
+            return getattr(self.documents, "store", None)
+        return None
 
     def detect_type(self, *, filename: str, data: bytes, media_type: str | None = None) -> tuple[str, str]:
         return resolve_document_type(filename=filename, data=data, declared_media_type=media_type)
@@ -97,6 +149,33 @@ class DocumentIntelligenceService:
             raise DocumentError(DOCUMENT_ACCESS_DENIED)
         return row, sc
 
+    def _save_job(self, job: DocumentProcessingJob) -> DocumentProcessingJob:
+        store = self.store
+        if store is not None and hasattr(store, "save_processing_job"):
+            return store.save_processing_job(job)
+        return job
+
+    def _checkpoint(
+        self,
+        job: DocumentProcessingJob,
+        *,
+        stage: str,
+        status: str | None = None,
+        extra: Mapping[str, object] | None = None,
+    ) -> DocumentProcessingJob:
+        cp = dict(job.checkpoint)
+        cp["stage"] = stage
+        if extra:
+            cp.update(dict(extra))
+        updated = replace(
+            job,
+            stage=stage,
+            status=status or job.status,
+            checkpoint=cp,
+            updated_at=utc_now(),
+        )
+        return self._save_job(updated)
+
     def extract_content(
         self,
         document_id: str,
@@ -109,7 +188,6 @@ class DocumentIntelligenceService:
         if key in self._content_cache and parsed is None:
             return self._content_cache[key]
         if parsed is None:
-            # Rebuild from chunks when full ParsedDocument not available
             row, sc = self._require_doc(document_id, tenant_id=tenant_id, scope=scope)
             chunks = self.documents.list_chunks(document_id, requesting_scope=sc)
             text = "\n\n".join(
@@ -146,6 +224,14 @@ class DocumentIntelligenceService:
     ) -> DocumentContent:
         if data is None:
             raise DocumentError(DOCUMENT_REQUIRES_OCR)
+        page_count = resolve_sync_ocr_page_count(data, filename=filename)
+        if page_count is None:
+            raise DocumentError(DOCUMENT_OCR_BATCH_REQUIRED)
+        assert_sync_ocr_allowed(
+            page_count=page_count,
+            byte_size=len(data),
+            require_known_size=False,
+        )
         result = self.ocr_bytes(data, filename=filename)
         text = str(result.get("text") or "")
         content = DocumentContent(
@@ -214,29 +300,57 @@ class DocumentIntelligenceService:
         content: DocumentContent | None = None,
         document_type: str | None = None,
         filename: str = "",
+        schema: ExtractionSchema | None = None,
     ) -> StructuredDocument:
         content = content or self.extract_content(document_id, tenant_id=tenant_id)
-        structured = extract_structured(
-            content, document_type=document_type, filename=filename
-        )
+        if schema is not None:
+            structured = extract_structured_with_schema(content, schema)
+        else:
+            structured = extract_structured(
+                content, document_type=document_type, filename=filename
+            )
         self._structured_cache[(normalize_tenant_id(tenant_id), document_id)] = structured
         return structured
 
     def classify(self, text: str, *, filename: str = "") -> tuple[str, str, tuple[str, ...]]:
         return classify_document_text(text, filename=filename)
 
+    def classify_result(self, text: str, *, filename: str = ""):
+        return classify_document(text, filename=filename)
+
     def compare(
         self,
         left: StructuredDocument | DocumentContent,
         right: StructuredDocument | DocumentContent,
-    ) -> DocumentComparisonResult:
+        *,
+        enhanced: bool = False,
+        tenant_id: str = "",
+    ) -> DocumentComparisonResult | ComparisonResult:
         if isinstance(left, StructuredDocument) and isinstance(right, StructuredDocument):
-            return compare_structured(left, right)
-        if isinstance(left, DocumentContent) and isinstance(right, DocumentContent):
-            return compare_text_sections(
+            result = compare_structured(left, right)
+        elif isinstance(left, DocumentContent) and isinstance(right, DocumentContent):
+            result = compare_text_sections(
                 left.text, right.text, left_ref=left.document_id, right_ref=right.document_id
             )
-        raise DocumentError("comparison_failed")
+        else:
+            raise DocumentError("comparison_failed")
+        if tenant_id:
+            self.observer.on_compared(tenant_id=tenant_id, unchanged=result.unchanged)
+        if enhanced:
+            return ComparisonResult.from_document_comparison(result)
+        return result
+
+    def reconcile(
+        self,
+        role_map: Mapping[str, StructuredDocument],
+        profile: ReconciliationProfile,
+        *,
+        tenant_id: str = "",
+    ) -> ReconciliationResult:
+        result = reconcile_documents(role_map, profile)
+        if tenant_id:
+            self.observer.on_reconciled(tenant_id=tenant_id, status=result.status)
+        return result
 
     def link(self, left: StructuredDocument, right: StructuredDocument) -> DocumentLinkResult:
         return link_documents(left, right)
@@ -250,21 +364,60 @@ class DocumentIntelligenceService:
         paragraphs: list[str],
         tables: list | None = None,
         headings: list[str] | None = None,
+        template: DocumentTemplate | None = None,
+        fields: dict | None = None,
+        re_ingest: bool = False,
+        scope: MemoryScope | None = None,
     ) -> GeneratedDocument:
+        tid = require_tenant_id(tenant_id)
         fmt = format.lower()
         if fmt == "docx":
-            return generate_docx(
-                tenant_id=tenant_id,
+            generated = generate_docx(
+                tenant_id=tid,
                 title=title,
                 paragraphs=paragraphs,
                 tables=tables,
                 headings=headings,
+                template=template,
+                fields=fields,
             )
-        if fmt == "pdf":
-            return generate_pdf(tenant_id=tenant_id, title=title, paragraphs=paragraphs)
-        if fmt in {"txt", "md"}:
-            return generate_txt(tenant_id=tenant_id, title=title, paragraphs=paragraphs)
-        raise DocumentError("generation_failed")
+        elif fmt == "pdf":
+            generated = generate_pdf(
+                tenant_id=tid,
+                title=title,
+                paragraphs=paragraphs,
+                template=template,
+                fields=fields,
+            )
+        elif fmt in {"txt", "md"}:
+            generated = generate_txt(
+                tenant_id=tid,
+                title=title,
+                paragraphs=paragraphs,
+                template=template,
+                fields=fields,
+            )
+        else:
+            raise DocumentError(GENERATION_FAILED)
+        self.observer.on_generated(tenant_id=tid, format=fmt)
+        if re_ingest and self.documents is not None:
+            sc = scope or self._scope(tid)
+            ingest_req = DocumentIngestRequest(
+                scope=sc,
+                filename=generated.filename,
+                content=generated.content,
+                source_type=SOURCE_SYSTEM,
+                source_id=f"generated:{generated.template_id}",
+                media_type=generated.media_type,
+                sensitivity=SENSITIVITY_INTERNAL,
+            )
+            row = self.documents.ingest(ingest_req)
+            generated = replace(
+                generated,
+                document_id=row.document_id,
+                provenance={**dict(generated.provenance), "re_ingested": True},
+            )
+        return generated
 
     def convert(
         self,
@@ -282,6 +435,218 @@ class DocumentIntelligenceService:
             text=text,
             title=title,
         )
+
+    def plan_workload(
+        self,
+        *,
+        document_id: str,
+        tenant_id: str,
+        operations: Sequence[str],
+        page_count: int | None = None,
+        byte_size: int | None = None,
+        bulk: bool = False,
+        force_interactive_hint: bool = False,
+        **kwargs,
+    ) -> PlannedDocument:
+        return plan_document_job(
+            document_id=document_id,
+            tenant_id=tenant_id,
+            operations=operations,
+            page_count=page_count,
+            byte_size=byte_size,
+            bulk=bulk,
+            force_interactive_hint=force_interactive_hint,
+            **kwargs,
+        )
+
+    def enqueue_metadata(self, planned: PlannedDocument) -> Mapping[str, object]:
+        """Return trusted enqueue metadata for TaskQueue (caller stamps only these)."""
+        return dict(planned.trusted_metadata)
+
+    def process_pipeline(
+        self,
+        *,
+        tenant_id: str,
+        document_id: str | None = None,
+        content: DocumentContent | None = None,
+        text: str | None = None,
+        filename: str = "",
+        schema: ExtractionSchema | None = None,
+        page_stats: Sequence[Mapping[str, object]] | None = None,
+        job: DocumentProcessingJob | None = None,
+        operations: Sequence[str] | None = None,
+    ) -> DocumentResult:
+        """ingest→ocr plan→classify→extract→validate with job checkpoints."""
+        tid = require_tenant_id(tenant_id)
+        ops = tuple(operations or ("ingest", "ocr", "classify", "extract", "validate"))
+        doc_id = document_id or (content.document_id if content else new_id("doc-"))
+
+        page_count: int | None = None
+        byte_size: int | None = None
+        if page_stats:
+            page_count = len(page_stats)
+        elif content is not None and content.pages:
+            page_count = len(content.pages)
+
+        if job is None:
+            planned = plan_document_job(
+                document_id=doc_id,
+                tenant_id=tid,
+                operations=ops,
+                page_count=page_count,
+                byte_size=byte_size,
+            )
+            job = planned.job
+            if planned.enqueue and OP_OCR in ops:
+                raise DocumentError(DOCUMENT_OCR_BATCH_REQUIRED)
+
+        job = replace(job, status=JOB_RUNNING, started_at=job.started_at or utc_now())
+        job = self._checkpoint(job, stage=STAGE_INGEST, status=JOB_RUNNING)
+        self.observer.on_processing_started(job_id=job.job_id, tenant_id=tid, stage=STAGE_INGEST)
+
+        warnings: list[str] = []
+        errors: list[str] = []
+        try:
+            # Resolve content
+            if content is None:
+                if text is not None:
+                    content = DocumentContent(document_id=doc_id, text=text)
+                elif document_id:
+                    content = self.extract_content(document_id, tenant_id=tid)
+                else:
+                    content = DocumentContent(document_id=doc_id, text="")
+
+            self.observer.on_native_extracted(
+                document_id=doc_id,
+                tenant_id=tid,
+                char_count=len(content.text or ""),
+            )
+            job = self._checkpoint(
+                job,
+                stage=STAGE_OCR,
+                extra={"native_chars": len(content.text or "")},
+            )
+
+            ocr_decision = plan_ocr(
+                native_text=content.text,
+                page_stats=page_stats,
+                provider=getattr(self.ocr, "name", "") or "",
+                provider_available=bool(getattr(self.ocr, "available", False)),
+            )
+            self.observer.on_ocr(
+                status=ocr_decision.status,
+                document_id=doc_id,
+                tenant_id=tid,
+                page_count=ocr_decision.page_count,
+            )
+            if ocr_decision.status == OCR_REQUIRED and not getattr(self.ocr, "available", False):
+                warnings.append("ocr_required_but_unavailable")
+
+            job = self._checkpoint(
+                job,
+                stage=STAGE_CLASSIFY,
+                extra={"ocr_status": ocr_decision.status},
+            )
+            classification = classify_document(content.text, filename=filename)
+            self.observer.on_classified(
+                document_id=doc_id, tenant_id=tid, doc_class=classification.doc_class
+            )
+
+            job = self._checkpoint(
+                job,
+                stage=STAGE_EXTRACT,
+                extra={"doc_class": classification.doc_class},
+            )
+            if schema is not None:
+                structured = extract_structured_with_schema(content, schema)
+            else:
+                doc_type = (
+                    classification.doc_class
+                    if classification.doc_class not in {"unknown", ""}
+                    else None
+                )
+                structured = extract_structured(
+                    content, document_type=doc_type, filename=filename
+                )
+            field_count = len(structured.field_evidence)
+            self.observer.on_extracted(
+                document_id=doc_id, tenant_id=tid, field_count=field_count
+            )
+
+            job = self._checkpoint(job, stage=STAGE_VALIDATE)
+            vr = validate_structured(structured)
+            self.observer.on_validated(document_id=doc_id, tenant_id=tid, ok=vr.ok)
+            if not vr.ok:
+                errors.extend(vr.errors)
+            warnings.extend(vr.warnings)
+
+            store = self.store
+            version_id = job.version_id or new_id("ver-")
+            if store is not None and hasattr(store, "save_document_version"):
+                store.save_document_version(
+                    DocumentVersion(
+                        document_id=doc_id,
+                        version_id=version_id,
+                        artifact_id=doc_id,
+                        content_hash="",
+                        transformation_reason="process_pipeline",
+                        producing_operation="extract",
+                        producing_tool_or_model="document_intelligence",
+                    )
+                )
+
+            job = self._checkpoint(
+                job,
+                stage=STAGE_DONE,
+                status=JOB_COMPLETED,
+                extra={"version_id": version_id},
+            )
+            job = replace(job, completed_at=utc_now(), version_id=version_id)
+            self._save_job(job)
+
+            return DocumentResult(
+                document_id=doc_id,
+                version_id=version_id,
+                status=JOB_COMPLETED,
+                text_ref=f"doc:{doc_id}:text",
+                classification={
+                    "doc_class": classification.doc_class,
+                    "status": classification.status,
+                    "confidence": classification.confidence,
+                    "classifier_version": classification.classifier_version,
+                },
+                fields={
+                    **dict(structured.fields),
+                    **dict(structured.identifiers),
+                    **dict(structured.amounts),
+                    **dict(structured.dates),
+                },
+                validation={"ok": vr.ok, "errors": list(vr.errors)},
+                provenance={
+                    "ocr_status": ocr_decision.status,
+                    "job_id": job.job_id,
+                },
+                warnings=tuple(warnings),
+                errors=tuple(errors),
+            )
+        except DocumentError as exc:
+            job = self._checkpoint(
+                job,
+                stage=job.stage,
+                status=JOB_FAILED,
+                extra={"error": exc.reason},
+            )
+            self.observer.on_failed(tenant_id=tid, reason=exc.reason, job_id=job.job_id)
+            raise
+        except Exception as exc:
+            job = self._checkpoint(
+                job,
+                stage=job.stage,
+                status=JOB_FAILED,
+                extra={"error": "pipeline_failed"},
+            )
+            self.observer.on_failed(tenant_id=tid, reason="pipeline_failed", job_id=job.job_id)
+            raise DocumentError("document_parse_failed") from exc
 
     def plan_large_extraction(
         self,
@@ -410,6 +775,7 @@ def build_document_intelligence(
     rasterizer=None,
     workflow_runtime=None,
     large_policy: LargeDocumentPolicy | None = None,
+    observer=None,
 ) -> DocumentIntelligenceService:
     ocr = ocr_provider if ocr_provider is not None else build_ocr_provider(env)
     rast = rasterizer if rasterizer is not None else build_pdf_rasterizer(env)
@@ -419,4 +785,5 @@ def build_document_intelligence(
         rasterizer=rast,
         large_policy=large_policy,
         workflow_runtime=workflow_runtime,
+        observer=observer,
     )

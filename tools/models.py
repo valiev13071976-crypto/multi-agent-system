@@ -34,6 +34,123 @@ TOOL_TRUST_LEVELS = (
     TOOL_TRUST_PRIVILEGED,
 )
 
+# Platform trust aliases (map onto TOOL_TRUST_*)
+TRUSTED_INTERNAL = "TRUSTED_INTERNAL"
+TRUSTED_EXTERNAL = "TRUSTED_EXTERNAL"
+RESTRICTED = "RESTRICTED"
+UNTRUSTED = "UNTRUSTED"
+PLATFORM_TRUST_ALIASES = (
+    TRUSTED_INTERNAL,
+    TRUSTED_EXTERNAL,
+    RESTRICTED,
+    UNTRUSTED,
+)
+PLATFORM_TRUST_TO_TOOL_TRUST = {
+    TRUSTED_INTERNAL: TOOL_TRUST_INTERNAL_SAFE,
+    TRUSTED_EXTERNAL: TOOL_TRUST_READ_ONLY_EXTERNAL,
+    RESTRICTED: TOOL_TRUST_WRITE_EXTERNAL_REVERSIBLE,
+    UNTRUSTED: TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE,
+}
+
+# Per-operation classification
+OP_READ = "read"
+OP_WRITE = "write"
+OP_DESTRUCTIVE = "destructive"
+OP_EXTERNAL_COMMUNICATION = "external_communication"
+OP_PRIVILEGED = "privileged"
+OPERATION_CLASSES = (
+    OP_READ,
+    OP_WRITE,
+    OP_DESTRUCTIVE,
+    OP_EXTERNAL_COMMUNICATION,
+    OP_PRIVILEGED,
+)
+
+# Version lifecycle
+VERSION_ACTIVE = "active"
+VERSION_DEPRECATED = "deprecated"
+VERSION_DISABLED = "disabled"
+VERSION_STATUSES = (VERSION_ACTIVE, VERSION_DEPRECATED, VERSION_DISABLED)
+
+# Workload / sensitivity / cost / approval governance tokens
+WORKLOAD_HINT_INTERACTIVE = "interactive"
+WORKLOAD_HINT_NORMAL = "normal"
+WORKLOAD_HINT_BATCH = "batch"
+WORKLOAD_HINT_BACKGROUND = "background"
+WORKLOAD_HINTS = (
+    WORKLOAD_HINT_INTERACTIVE,
+    WORKLOAD_HINT_NORMAL,
+    WORKLOAD_HINT_BATCH,
+    WORKLOAD_HINT_BACKGROUND,
+)
+
+DATA_SENSITIVITY_PUBLIC = "public"
+DATA_SENSITIVITY_INTERNAL = "internal"
+DATA_SENSITIVITY_CONFIDENTIAL = "confidential"
+DATA_SENSITIVITY_RESTRICTED = "restricted"
+DATA_SENSITIVITY_LEVELS = (
+    DATA_SENSITIVITY_PUBLIC,
+    DATA_SENSITIVITY_INTERNAL,
+    DATA_SENSITIVITY_CONFIDENTIAL,
+    DATA_SENSITIVITY_RESTRICTED,
+)
+
+COST_CLASS_FREE = "free"
+COST_CLASS_LOW = "low"
+COST_CLASS_MEDIUM = "medium"
+COST_CLASS_HIGH = "high"
+COST_CLASSES = (COST_CLASS_FREE, COST_CLASS_LOW, COST_CLASS_MEDIUM, COST_CLASS_HIGH)
+
+APPROVAL_POLICY_NONE = "none"
+APPROVAL_POLICY_REQUIRED = "required"
+APPROVAL_POLICY_POLICY = "policy"
+APPROVAL_POLICIES = (
+    APPROVAL_POLICY_NONE,
+    APPROVAL_POLICY_REQUIRED,
+    APPROVAL_POLICY_POLICY,
+)
+
+TENANT_SCOPE_REQUIRED = "required"
+TENANT_SCOPE_OPTIONAL = "optional"
+TENANT_SCOPE_POLICIES = (TENANT_SCOPE_REQUIRED, TENANT_SCOPE_OPTIONAL)
+
+AUTH_REQUIREMENT_NONE = "none"
+AUTH_REQUIREMENT_SECRET_REF = "secret_ref"
+AUTH_REQUIREMENTS = (AUTH_REQUIREMENT_NONE, AUTH_REQUIREMENT_SECRET_REF)
+
+
+def resolve_platform_trust(platform_trust: str | None, trust_level: str | None = None) -> str:
+    """Map platform trust alias → canonical TOOL_TRUST_* (or pass-through)."""
+    alias = str(platform_trust or "").strip()
+    if alias in PLATFORM_TRUST_TO_TOOL_TRUST:
+        return PLATFORM_TRUST_TO_TOOL_TRUST[alias]
+    level = str(trust_level or "").strip()
+    if level in TOOL_TRUST_LEVELS:
+        return level
+    if alias in TOOL_TRUST_LEVELS:
+        return alias
+    return TOOL_TRUST_READ_ONLY_EXTERNAL
+
+
+def operation_class_for(
+    descriptor: "ToolDescriptor",
+    operation: str,
+    *,
+    default: str | None = None,
+) -> str:
+    """Resolve per-op class from descriptor.operation_class map."""
+    op = str(operation or "").strip()
+    mapping = dict(descriptor.operation_class or {})
+    if op and op in mapping:
+        value = str(mapping[op])
+        if value in OPERATION_CLASSES:
+            return value
+    if default and default in OPERATION_CLASSES:
+        return default
+    if descriptor.read_only:
+        return OP_READ
+    return OP_WRITE
+
 # Canonical side-effect levels (maps to trust for policy)
 SIDE_EFFECT_NONE = "none"
 SIDE_EFFECT_READ = "read"
@@ -229,14 +346,51 @@ class ToolDescriptor:
     input_schema_ref: str = ""
     output_schema_ref: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
+    # Governance extensions (optional; defaults preserve BC)
+    operation_class: Mapping[str, str] = field(default_factory=dict)
+    platform_trust: str = ""
+    workload_class_hint: str = ""
+    data_sensitivity: str = DATA_SENSITIVITY_INTERNAL
+    cost_class: str = ""
+    cost_unknown: bool = True
+    approval_policy: str = APPROVAL_POLICY_NONE
+    tenant_scope_policy: str = TENANT_SCOPE_OPTIONAL
+    auth_requirement: str = AUTH_REQUIREMENT_NONE
+    idempotency_capability: bool = False
+    version_status: str = VERSION_ACTIVE
 
     def __post_init__(self):
-        if self.trust_level not in TOOL_TRUST_LEVELS:
+        alias = str(self.platform_trust or "").strip()
+        raw_trust = str(self.trust_level or "").strip()
+        if alias:
+            if alias not in PLATFORM_TRUST_ALIASES and alias not in TOOL_TRUST_LEVELS:
+                raise ValueError(f"Invalid platform_trust: {self.platform_trust!r}")
+            resolved_trust = resolve_platform_trust(alias, raw_trust)
+        else:
+            if raw_trust not in TOOL_TRUST_LEVELS:
+                raise ValueError(f"Invalid trust_level: {self.trust_level!r}")
+            resolved_trust = raw_trust
+        if resolved_trust not in TOOL_TRUST_LEVELS:
             raise ValueError(f"Invalid trust_level: {self.trust_level!r}")
+        object.__setattr__(self, "trust_level", resolved_trust)
         if self.side_effect_level not in SIDE_EFFECT_LEVELS:
             raise ValueError(f"Invalid side_effect_level: {self.side_effect_level!r}")
         if self.retry_policy not in RETRY_POLICIES:
             raise ValueError(f"Invalid retry_policy: {self.retry_policy!r}")
+        if self.version_status not in VERSION_STATUSES:
+            raise ValueError(f"Invalid version_status: {self.version_status!r}")
+        if self.data_sensitivity not in DATA_SENSITIVITY_LEVELS:
+            raise ValueError(f"Invalid data_sensitivity: {self.data_sensitivity!r}")
+        if self.approval_policy not in APPROVAL_POLICIES:
+            raise ValueError(f"Invalid approval_policy: {self.approval_policy!r}")
+        if self.tenant_scope_policy not in TENANT_SCOPE_POLICIES:
+            raise ValueError(f"Invalid tenant_scope_policy: {self.tenant_scope_policy!r}")
+        if self.auth_requirement not in AUTH_REQUIREMENTS:
+            raise ValueError(f"Invalid auth_requirement: {self.auth_requirement!r}")
+        if self.workload_class_hint and self.workload_class_hint not in WORKLOAD_HINTS:
+            raise ValueError(f"Invalid workload_class_hint: {self.workload_class_hint!r}")
+        if self.cost_class and self.cost_class not in COST_CLASSES:
+            raise ValueError(f"Invalid cost_class: {self.cost_class!r}")
         if not str(self.version or "").strip():
             raise ValueError("tool_version_required")
         if not str(self.tool_id or "").strip():
@@ -249,6 +403,15 @@ class ToolDescriptor:
         if not self.adapter_id:
             object.__setattr__(self, "adapter_id", self.tool_id.split(".", 1)[0])
         object.__setattr__(self, "metadata", _meta(self.metadata))
+        op_map = {
+            str(k): str(v)
+            for k, v in dict(self.operation_class or {}).items()
+            if str(v) in OPERATION_CLASSES
+        }
+        object.__setattr__(self, "operation_class", MappingProxyType(op_map))
+        # idempotency_capability mirrors required when not explicitly set usefully
+        if self.idempotency_required and not self.idempotency_capability:
+            object.__setattr__(self, "idempotency_capability", True)
         if self.read_only and self.trust_level in WRITE_TRUST_LEVELS:
             raise ValueError("read_only_trust_mismatch")
         if (
@@ -256,6 +419,9 @@ class ToolDescriptor:
             and self.trust_level == TOOL_TRUST_READ_ONLY_EXTERNAL
         ):
             raise ValueError("write_tool_cannot_be_read_only_external")
+
+    def operation_class_for(self, operation: str, *, default: str | None = None) -> str:
+        return operation_class_for(self, operation, default=default)
 
 
 @dataclass(frozen=True)
@@ -277,6 +443,13 @@ class ToolRequest:
     step_id: str = ""
     capability_context: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
+    # Trusted context fields — filled from RunEnvelope/context, not user identity override
+    tool_version: str = ""
+    execution_id: str = ""
+    data_scope_ref: str = ""
+    capability_scope_ref: str = ""
+    deadline: datetime | None = None
+    envelope_ref: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "arguments", _meta(self.arguments))
@@ -306,6 +479,11 @@ class ToolResult:
     adapter_id: str = ""
     provenance: Mapping[str, object] = field(default_factory=dict)
     metadata: Mapping[str, object] = field(default_factory=dict)
+    retryable: bool = False
+    reason_code: str = ""
+    artifact_refs: tuple[str, ...] = ()
+    usage: Mapping[str, object] = field(default_factory=dict)
+    audit_ref: str = ""
 
     def __post_init__(self):
         if self.status not in TOOL_STATUSES:
@@ -313,6 +491,8 @@ class ToolResult:
         object.__setattr__(self, "data", _meta(self.data))
         object.__setattr__(self, "provenance", _meta(self.provenance))
         object.__setattr__(self, "metadata", _meta(self.metadata))
+        object.__setattr__(self, "artifact_refs", tuple(self.artifact_refs or ()))
+        object.__setattr__(self, "usage", _meta(self.usage))
 
 
 @dataclass(frozen=True)

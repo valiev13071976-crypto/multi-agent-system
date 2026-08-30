@@ -19,11 +19,13 @@ from data_intel.counterparty import match_counterparties
 from data_intel.duplicates import find_duplicates
 from data_intel.errors import (
     DATASET_ACCESS_DENIED,
+    DATASET_BATCH_REQUIRED,
     DATASET_NOT_FOUND,
     DATASET_TOO_LARGE,
     LARGE_DATASET_WORKFLOW_UNAVAILABLE,
     DataIntelError,
 )
+from data_intel.planner import assert_sync_data_allowed, plan_data_job
 from data_intel.excel_out import (
     generate_comparison_workbook,
     generate_searchable_payments_workbook,
@@ -135,7 +137,9 @@ class DataIntelligenceService:
             size_bytes=len(data),
         )
         workflow_id = None
-        if async_needed and enqueue_large:
+        if async_needed:
+            if not enqueue_large:
+                raise DataIntelError(DATASET_BATCH_REQUIRED)
             workflow_id = self._enqueue_large(desc)
             desc = replace(desc, status="async_processing")
             self.store.save_dataset(desc, rows_by_table)
@@ -203,6 +207,7 @@ class DataIntelligenceService:
                 "data.large_process",
                 "1",
                 execution_key=exec_key,
+                tenant_id=desc.tenant_id,
                 metadata={
                     "dataset_id": desc.dataset_id,
                     "tenant_id": desc.tenant_id,
@@ -221,6 +226,7 @@ class DataIntelligenceService:
                     "data.large_process",
                     "1",
                     execution_key=exec_key,
+                    tenant_id=desc.tenant_id,
                     metadata={
                         "dataset_id": desc.dataset_id,
                         "tenant_id": desc.tenant_id,
@@ -238,6 +244,7 @@ class DataIntelligenceService:
                 "data.large_process",
                 "1",
                 execution_key=exec_key,
+                tenant_id=desc.tenant_id,
                 metadata={
                     "dataset_id": desc.dataset_id,
                     "tenant_id": desc.tenant_id,
@@ -336,6 +343,8 @@ class DataIntelligenceService:
         }
 
     def compare_prices(self, left_rows: list[dict], right_rows: list[dict], **kwargs) -> dict:
+        total = len(left_rows) + len(right_rows)
+        assert_sync_data_allowed(row_count=total, operations=("compare",))
         return compare_price_lists(left_rows, right_rows, **kwargs)
 
     def reconcile(self, kind: str, left_rows: list[dict], right_rows: list[dict], **kwargs) -> dict:
@@ -352,6 +361,8 @@ class DataIntelligenceService:
         return find_duplicates(rows, business_keys=business_keys)
 
     def merge(self, left_rows, right_rows, **kwargs) -> dict:
+        total = len(left_rows) + len(right_rows)
+        assert_sync_data_allowed(row_count=total, operations=("merge",))
         return merge_datasets(left_rows, right_rows, **kwargs)
 
     def aggregate(self, dataset_id: str, *, tenant_id: str, **kwargs) -> list[dict]:
@@ -393,6 +404,7 @@ class DataIntelligenceService:
         if desc is None:
             raise DataIntelError(DATASET_ACCESS_DENIED)
         rows = self.store.get_rows(dataset_id, tenant_id=tenant_id)
+        assert_sync_data_allowed(row_count=len(rows), operations=("generate_xlsx",))
         if kind == "payments":
             data = generate_searchable_payments_workbook(rows)
             name = "report.xlsx"

@@ -39,6 +39,7 @@ def _record(**extra):
         resource_ref="github://octo/hello/issues/1/labels/bug",
         reversible=True,
         version=1,
+        tenant_id="tenant-se",
         metadata={"state_after_present": True},
     )
     fields.update(extra)

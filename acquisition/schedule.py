@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta
 
 from acquisition.models import utc_now
-from security.tenant import normalize_tenant_id
+from security.tenant import require_tenant_id
 from workflow.definition import ScheduleSpec
 from workflow.schedule import ScheduleState, WorkflowScheduler
 
@@ -24,13 +24,14 @@ def build_acquisition_schedule_spec(
     version: str = "1.0.0",
     run_at: datetime | None = None,
 ) -> ScheduleSpec:
+    tenant = require_tenant_id(tenant_id)
     return ScheduleSpec(
         schedule_id=schedule_id,
         workflow_type=WORKFLOW_TYPE_ACQUISITION,
         version=version,
         payload={
             "source_id": source_id,
-            "tenant_id": normalize_tenant_id(tenant_id),
+            "tenant_id": tenant,
             "acquisition_type": acquisition_type,
             "target": target,
         },

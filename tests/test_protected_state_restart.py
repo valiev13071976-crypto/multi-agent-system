@@ -64,7 +64,7 @@ class ProtectedStateRestartTests(unittest.IsolatedAsyncioTestCase):
 
             bundle_a = _bundle(path)
             engine_a, _adapter_a, _exec_a = _engine_with_bundle(bundle_a)
-            workflow_id = engine_a.create("task-p7e")
+            workflow_id = engine_a.create("task-p7e", tenant_id="tenant-test")
             engine_a.state_manager.plan(workflow_id)
             engine_a.state_manager.start(workflow_id)
             action = se_action(
@@ -167,7 +167,7 @@ class ProtectedStateRestartTests(unittest.IsolatedAsyncioTestCase):
             path = str(Path(tmp) / "p7e-rej.sqlite3")
             bundle_a = _bundle(path)
             engine_a, adapter_a, _executor_a = _engine_with_bundle(bundle_a)
-            workflow_id = engine_a.create("task-rej")
+            workflow_id = engine_a.create("task-rej", tenant_id="tenant-test")
             engine_a.state_manager.plan(workflow_id)
             engine_a.state_manager.start(workflow_id)
             action = se_action(

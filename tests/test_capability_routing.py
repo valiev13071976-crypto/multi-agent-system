@@ -342,10 +342,14 @@ class CapabilityRoutingTests(unittest.TestCase):
                 OPENAI_TASK_CATEGORIES="general,seo",
             )
 
-    def test_l_missing_task_categories_supports_only_general(self):
+    def test_l_missing_task_categories_uses_provider_defaults(self):
         main_mod = load_capability_app("openai", auto_order="openai")
         profile = main_mod.router.provider_registry.profile("openai")
-        self.assertEqual(profile.task_categories, ("general",))
+        self.assertEqual(
+            profile.task_categories,
+            ("general", "strategy", "critique"),
+        )
+        self.assertTrue(profile.supports_reasoning)
 
     def test_m_omitted_mode_is_both(self):
         main_mod = load_capability_app(

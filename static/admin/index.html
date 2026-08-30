@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panda Operations</title>
+  <link rel="stylesheet" href="/static/admin/admin.css">
+</head>
+<body>
+  <div class="layout">
+    <nav class="nav" aria-label="Admin navigation">
+      <h1>Panda Ops</h1>
+      <a href="#overview" data-view="overview">Overview</a>
+      <a href="#runs" data-view="runs">Runs</a>
+      <a href="#queues" data-view="queues">Queues</a>
+      <a href="#providers" data-view="routing">Routing</a>
+      <a href="#tools" data-view="tools">Tools</a>
+      <a href="#costs" data-view="costs">Costs</a>
+      <a href="#dlq" data-view="dlq">DLQ</a>
+      <a href="#approvals" data-view="approvals">Approvals</a>
+      <a href="#tenants" data-view="tenants">Tenants</a>
+      <a href="#audit" data-view="audit">Audit</a>
+      <a href="#alerts" data-view="alerts">Alerts</a>
+    </nav>
+    <main class="main">
+      <header class="header">
+        <h2 id="view-title">Overview</h2>
+        <span id="status" role="status" aria-live="polite"></span>
+      </header>
+      <section id="content" class="content" aria-live="polite"></section>
+    </main>
+  </div>
+  <script src="/static/admin/admin.js"></script>
+</body>
+</html>

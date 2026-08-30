@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from agents.router import Router
@@ -30,6 +31,7 @@ from agents.role_registry import (
     InvalidRoleError,
 )
 from agents.context_manager import ContextManager
+from security.tenant import MissingTenantError
 from security.api_auth import (
     PublicRateLimitMiddleware,
     configure_security,
@@ -40,9 +42,12 @@ from security.api_auth import (
 from security.errors import ResourceNotFoundError, UnauthorizedError
 from security.hitl_auth import HitlActionPayload, HitlHttpAuthorizer
 from security.identity import RequestSecurityContext
+from workflow.errors import WorkflowNotFoundError
 from security.rbac import (
+    PERM_ADMIN_METADATA,
     PERM_ANALYZE_EXECUTE,
     PERM_HITL_APPROVE,
+    PERM_OPS_WRITE,
     PERM_WORKFLOW_CANCEL,
     PERM_WORKFLOW_CREATE,
     PERM_WORKFLOW_READ,
@@ -55,6 +60,16 @@ from security.secrets import EnvSecretStore
 from side_effects.runtime import compose_side_effect_runtime
 
 load_dotenv()
+
+# Canonical production storage paths (Stage 1).
+try:
+    from production_foundation.storage import resolve_store_paths
+
+    for key, value in resolve_store_paths().items():
+        if value and not os.environ.get(key):
+            os.environ[key] = value
+except Exception:
+    pass
 
 PUBLIC_URL = "https://multi-agent-system-production-8d0c.up.railway.app"
 
@@ -89,6 +104,20 @@ class HealthResponse(BaseModel):
     providers: dict[str, bool]
 
 
+class ReadyResponse(BaseModel):
+    liveness: str
+    readiness: str
+    role: str
+    draining: bool = False
+    dependencies: list[dict] = []
+    capabilities: dict = {}
+
+
+class DrainResponse(BaseModel):
+    draining: bool
+    readiness: str
+
+
 class AnalyzeResponse(BaseModel):
     summary: str
     best_solution: str
@@ -110,6 +139,79 @@ side_effect_runtime = compose_side_effect_runtime(
     secrets=EnvSecretStore(), isolate_errors=True
 )
 configure_security()
+
+# Fail-fast production runtime config (profiles + capacity/lease invariants).
+try:
+    from config.runtime_config import validate_runtime_config
+
+    _RUNTIME_CONFIG = validate_runtime_config(raise_on_error=True)
+except Exception:
+    # Allow import of main for tooling when env is intentionally incomplete;
+    # HTTP readiness will still surface config errors.
+    from config.runtime_config import validate_runtime_config
+
+    _RUNTIME_CONFIG = validate_runtime_config(raise_on_error=False)
+
+# Shared durable FinOps budget when SQLite persistence is ready (multi-replica safe).
+if (
+    USE_V2
+    and getattr(router, "budget_guard", None) is not None
+    and side_effect_runtime.persistence is not None
+    and side_effect_runtime.persistence.ready
+    and side_effect_runtime.persistence.backend == "sqlite"
+    and side_effect_runtime.persistence.database_path_ref
+):
+    try:
+        from finops.budget_store import SqliteBudgetStore
+
+        db_path = os.environ.get("SIDE_EFFECT_DB_PATH") or os.environ.get(
+            "FINOPS_BUDGET_DB_PATH"
+        )
+        if db_path:
+            budget_store = SqliteBudgetStore(db_path)
+            router.budget_guard.store = budget_store
+            router.budget_guard.ledger.store = budget_store
+            if getattr(router, "pipeline", None) is not None:
+                em = getattr(router.pipeline, "expert_manager", None)
+                if em is not None and getattr(em, "budget_guard", None) is not None:
+                    em.budget_guard.store = budget_store
+                    em.budget_guard.ledger.store = budget_store
+    except Exception:
+        pass
+# Shared provider governor (capacity ≠ health) across API/worker replicas.
+if (
+    USE_V2
+    and side_effect_runtime.persistence is not None
+    and side_effect_runtime.persistence.ready
+    and side_effect_runtime.persistence.backend == "sqlite"
+):
+    try:
+        from providers.governor import (
+            GovernorLimits,
+            ProviderGovernor,
+            SqliteProviderGovernorStore,
+        )
+
+        db_path = os.environ.get("SIDE_EFFECT_DB_PATH") or os.environ.get(
+            "PROVIDER_GOVERNOR_DB_PATH"
+        )
+        if db_path:
+            gov_limits = GovernorLimits.from_env()
+            gov_store = SqliteProviderGovernorStore(db_path, gov_limits)
+            governor = ProviderGovernor(
+                store=gov_store,
+                limits=gov_limits,
+                observability=getattr(side_effect_runtime, "observability", None),
+            )
+            router.provider_governor = governor
+            if getattr(router, "model_router", None) is not None:
+                router.model_router.capacity_governor = governor
+            if getattr(router, "pipeline", None) is not None:
+                em = getattr(router.pipeline, "expert_manager", None)
+                if em is not None:
+                    em.provider_governor = governor
+    except Exception:
+        pass
 # Production auto-wiring: share composed workflow/HITL/persistence with analyze engine.
 if side_effect_runtime.workflow_engine is not None:
     router.workflow_engine = side_effect_runtime.workflow_engine
@@ -145,6 +247,66 @@ if workflow_runtime is not None:
     # Default handler for demo step_types; document/data handlers registered by step_id
     workflow_runtime.platform.register_handler(STEP_TYPE_HANDLER, _default_handler)
     workflow_runtime.platform.register_handler(STEP_TYPE_BRANCH, _default_handler)
+
+from ui_chat.runtime import build_ui_chat_runtime
+from ui_chat.router import configure_ui_chat_router
+from operations_admin.runtime import build_operations_admin_runtime
+from operations_admin.router import configure_operations_admin_router
+from saas_product.runtime import build_saas_product_runtime
+from saas_product.router import configure_saas_product_router
+from saas_product.deployment import assert_production_safe
+from production_foundation.runtime import initialize_production_foundation
+from integrations.production.runtime import build_production_integration_runtime
+from integrations.production.router import configure_production_integration_router
+
+production_integration_runtime = build_production_integration_runtime(
+    health_tracker=getattr(router, "health_tracker", None),
+)
+_production_bundle = production_integration_runtime.bundle
+
+ui_chat_runtime = build_ui_chat_runtime(
+    side_effect_runtime=side_effect_runtime,
+    workflow_engine=getattr(router, "workflow_engine", None),
+    run_router=router,
+    context_manager=context_manager,
+    production_bundle=_production_bundle,
+)
+saas_runtime = build_saas_product_runtime(finops=getattr(router, "finops", None), production_bundle=_production_bundle)
+ops_admin_runtime = build_operations_admin_runtime(
+    side_effect_runtime=side_effect_runtime,
+    router=router,
+    saas_store=saas_runtime.store,
+)
+_persistence = getattr(side_effect_runtime, "persistence", None)
+_pf_connection = getattr(_persistence, "connection", None) if _persistence else None
+_pf_ready = bool(_persistence and _persistence.ready)
+try:
+    production_foundation_runtime = initialize_production_foundation(
+        side_effect_connection=_pf_connection,
+        saas_store=saas_runtime.store,
+        persistence_ready=_pf_ready,
+        fail_closed=False,
+    )
+except Exception:
+    from production_foundation.runtime import build_production_foundation_runtime
+
+    production_foundation_runtime = build_production_foundation_runtime(
+        side_effect_connection=_pf_connection,
+        saas_store=saas_runtime.store,
+        persistence_ready=_pf_ready,
+    )
+ops_admin_runtime.service.production_foundation = production_foundation_runtime.service
+ops_admin_runtime.service.production_integrations = production_integration_runtime
+try:
+    assert_production_safe()
+except RuntimeError:
+    pass
+try:
+    from production_foundation.config import assert_production_startup_safe
+
+    assert_production_startup_safe()
+except Exception:
+    pass
 
 
 class WorkflowCreateRequest(BaseModel):
@@ -192,12 +354,34 @@ async def lifespan(_app: FastAPI):
     try:
         yield
     finally:
+        from config.runtime_health import DRAIN, begin_worker_drain
+
+        DRAIN.begin_drain()
         wr = getattr(side_effect_runtime, "workflow_runtime", None)
         if wr is not None:
             try:
-                await wr.stop_background()
+                await begin_worker_drain(wr, wait_seconds=0.5)
             except Exception:
-                pass
+                try:
+                    await wr.stop_background()
+                except Exception:
+                    pass
+        try:
+            ui_chat_runtime.close()
+        except Exception:
+            pass
+        try:
+            ops_admin_runtime.close()
+        except Exception:
+            pass
+        try:
+            saas_runtime.close()
+        except Exception:
+            pass
+        try:
+            production_foundation_runtime.close()
+        except Exception:
+            pass
 
 
 app = FastAPI(
@@ -215,6 +399,20 @@ app = FastAPI(
 
 app.add_middleware(RequestSizeLimitMiddleware)
 app.add_middleware(PublicRateLimitMiddleware)
+
+app.include_router(configure_ui_chat_router(ui_chat_runtime.service))
+app.include_router(configure_operations_admin_router(ops_admin_runtime.service, ops_admin_runtime.policy))
+app.include_router(configure_saas_product_router(saas_runtime.service))
+_stripe_provider = _production_bundle.billing_provider if getattr(_production_bundle.billing_provider, "name", "") == "stripe" else None
+app.include_router(
+    configure_production_integration_router(
+        b2b_service=getattr(getattr(side_effect_runtime, "b2b_commerce_runtime", None), "service", None),
+        billing_service=saas_runtime.service.billing,
+        stripe_provider=_stripe_provider,
+        telegram_secret=str(os.environ.get("TELEGRAM_WEBHOOK_SECRET") or ""),
+    )
+)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 _hitl_http = HitlHttpAuthorizer(resource_authorizer=get_resource_authorizer())
 
@@ -236,9 +434,14 @@ def _authorize_workflow(
     audit = get_audit_log()
     try:
         authorizer.require_permission(ctx, permission)
-        state = router.workflow_engine.state_manager.get(workflow_id)
+        # Tenant-scoped lookup — cross-tenant id resolves as not found.
+        sm = router.workflow_engine.state_manager
+        if hasattr(sm, "get_for_tenant"):
+            state = sm.get_for_tenant(workflow_id, ctx.tenant_id)
+        else:
+            state = sm.get(workflow_id)
         authorizer.authorize_workflow_access(ctx, state, permission=permission)
-    except ResourceNotFoundError:
+    except (ResourceNotFoundError, WorkflowNotFoundError):
         audit.record(
             "authz.denied",
             actor_ref=ctx.actor_ref(),
@@ -265,12 +468,103 @@ def _authorize_workflow(
     response_model=HealthResponse,
 )
 async def health():
+    """Liveness: process is up. Provider map is informational only (no provider HTTP)."""
 
     return HealthResponse(
         status="ok",
         providers=router.provider_status(),
     )
 
+
+@app.get("/ready", response_model=ReadyResponse)
+async def ready():
+    """Readiness: role can perform its work (bounded dependency checks).
+
+    ``capabilities`` exposes routing health/stats scope (process_local today).
+    Lack of shared cross-worker routing health does not fail liveness or ordinary
+    single-process readiness.
+    """
+
+    from config.runtime_health import evaluate_readiness
+
+    health_tracker = getattr(router, "health_tracker", None)
+    runtime_stats = getattr(router, "runtime_stats", None)
+    snap = evaluate_readiness(
+        side_effect_runtime=side_effect_runtime,
+        runtime_config=_RUNTIME_CONFIG,
+        health_tracker=health_tracker,
+        runtime_stats=runtime_stats,
+    )
+    # Attach optional stores for dependency checks when wired on router.
+    if getattr(router, "budget_guard", None) is not None:
+        side_effect_runtime.budget_store = getattr(router.budget_guard, "store", None)
+    if getattr(router, "provider_governor", None) is not None:
+        side_effect_runtime.provider_governor = router.provider_governor
+        snap = evaluate_readiness(
+            side_effect_runtime=side_effect_runtime,
+            runtime_config=_RUNTIME_CONFIG,
+            health_tracker=health_tracker,
+            runtime_stats=runtime_stats,
+        )
+    body = ReadyResponse(
+        liveness=snap.liveness,
+        readiness=snap.readiness,
+        role=snap.role,
+        draining=snap.draining,
+        dependencies=[
+            {"name": d.name, "status": d.status, "detail": d.detail}
+            for d in snap.dependencies
+        ],
+        capabilities=dict(snap.capabilities or {}),
+    )
+    if snap.readiness == "not_ready":
+        raise HTTPException(status_code=503, detail=body.model_dump())
+    return body
+
+
+@app.get("/metrics/runtime")
+async def runtime_metrics():
+    """Aggregated ops metrics (no prompts; tenant ids anonymized)."""
+
+    from observability.runtime_metrics import collect_operational_metrics
+
+    if getattr(router, "provider_governor", None) is not None:
+        side_effect_runtime.provider_governor = router.provider_governor
+    return collect_operational_metrics(
+        side_effect_runtime=side_effect_runtime,
+        provider_governor=getattr(router, "provider_governor", None),
+        health_tracker=getattr(router, "health_tracker", None),
+        runtime_stats=getattr(router, "runtime_stats", None),
+    )
+
+
+@app.post("/admin/drain", response_model=DrainResponse)
+async def admin_drain(
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+    wait_seconds: float = 0.0,
+):
+    """Begin graceful drain: readiness fails; workers stop new claims."""
+
+    from config.runtime_health import DRAIN, begin_worker_drain, evaluate_readiness
+
+    get_resource_authorizer().require_permission(ctx, PERM_OPS_WRITE)
+    get_audit_log().record(
+        "admin.drain",
+        actor_ref=ctx.actor_ref(),
+        tenant_ref=ctx.tenant_id,
+        outcome="ok",
+    )
+    DRAIN.begin_drain()
+    wr = getattr(side_effect_runtime, "workflow_runtime", None)
+    if wr is not None and wait_seconds > 0:
+        await begin_worker_drain(wr, wait_seconds=min(float(wait_seconds), 30.0))
+    elif wr is not None and hasattr(wr, "stop_new_claims"):
+        wr.stop_new_claims()
+    snap = evaluate_readiness(
+        side_effect_runtime=side_effect_runtime,
+        runtime_config=_RUNTIME_CONFIG,
+    )
+    return DrainResponse(draining=True, readiness=snap.readiness)
 
 
 @app.post(
@@ -299,6 +593,9 @@ async def analyze(
             run_router=router.run,
             task_id=task_id,
             tenant_id=ctx.tenant_id,
+            request_id=ctx.request_id,
+            user_id=ctx.user_id,
+            actor_ref=ctx.actor_ref(),
         )
         router.last_task_id = task_id
         router.last_workflow_id = router.workflow_engine.last_workflow_id
@@ -315,6 +612,15 @@ async def analyze(
 
     except HTTPException:
         raise
+
+    except MissingTenantError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "missing_tenant",
+                "message": "tenant_id is required for new execution.",
+            },
+        )
 
     except InvalidModeError as e:
         raise HTTPException(
@@ -432,6 +738,9 @@ async def create_workflow(
                 request.version,
                 metadata=request.metadata,
                 tenant_id=ctx.tenant_id,
+                request_id=ctx.request_id,
+                user_id=ctx.user_id,
+                actor_ref=ctx.actor_ref(),
             )
             return WorkflowStatusResponse(**{
                 k: result.get(k)
@@ -443,6 +752,9 @@ async def create_workflow(
             request.version,
             metadata=request.metadata,
             tenant_id=ctx.tenant_id,
+            request_id=ctx.request_id,
+            user_id=ctx.user_id,
+            actor_ref=ctx.actor_ref(),
         )
         status = workflow_runtime.get_status(created["workflow_id"])
         status["queue_task_id"] = created.get("queue_task_id")
@@ -451,7 +763,26 @@ async def create_workflow(
             for k in WorkflowStatusResponse.model_fields
             if k in status or k == "queue_task_id"
         })
+    except MissingTenantError:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "missing_tenant",
+                "message": "tenant_id is required for new durable workflow.",
+            },
+        )
     except Exception as exc:
+        from workflow.admission import AdmissionRejectedError
+
+        if isinstance(exc, AdmissionRejectedError):
+            raise HTTPException(
+                status_code=429,
+                detail={
+                    "error": "admission_rejected",
+                    "reason": exc.reason,
+                    "decision": exc.decision,
+                },
+            ) from exc
         code = getattr(exc, "error_code", None) or type(exc).__name__
         status = 400 if code in {
             "definition_not_found",
@@ -637,117 +968,17 @@ async def resume_workflow(
     include_in_schema=False,
 )
 async def home() -> str:
-    return """
-<!doctype html>
-<html lang="ru">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Panda Multi-Agent</title>
-  <style>
-    body {
-      font-family: system-ui, sans-serif;
-      max-width: 920px;
-      margin: 40px auto;
-      padding: 0 18px;
-      background: #f5f5f5;
-    }
+    with open("static/chat/index.html", encoding="utf-8") as fh:
+        return fh.read()
 
-    .card {
-      background: white;
-      border-radius: 18px;
-      padding: 24px;
-      box-shadow: 0 8px 30px rgba(0, 0, 0, .08);
-    }
 
-    textarea {
-      width: 100%;
-      min-height: 180px;
-      box-sizing: border-box;
-      padding: 14px;
-      font: inherit;
-    }
+@app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
+async def admin_ui() -> str:
+    with open("static/admin/index.html", encoding="utf-8") as fh:
+        return fh.read()
 
-    select,
-    button {
-      padding: 12px 16px;
-      margin-top: 12px;
-      font: inherit;
-    }
 
-    button {
-      cursor: pointer;
-    }
-
-    pre {
-      white-space: pre-wrap;
-      background: #111;
-      color: #eee;
-      padding: 16px;
-      border-radius: 12px;
-      min-height: 100px;
-    }
-  </style>
-</head>
-<body>
-  <div class="card">
-    <h1>TEST 123456</h1>
-
-    <p>
-      Отправляет одну задачу OpenAI, Anthropic
-      или обеим моделям параллельно.
-    </p>
-
-    <textarea
-      id="prompt"
-      placeholder="Введите задачу..."
-    ></textarea>
-
-    <div>
-      <select id="mode">
-    <option value="both">OpenAI + Anthropic + Gemini + Grok</option>
-    <option value="openai">Только OpenAI</option>
-    <option value="anthropic">Только Anthropic</option>
-    <option value="gemini">Только Gemini</option>
-    <option value="grok">Только Grok</option>
-</select>
-
-      <button onclick="run()">Запустить анализ</button>
-    </div>
-
-    <h3>Результат</h3>
-
-    <pre id="result">Готово к запросу.</pre>
-  </div>
-
-<script>
-async function run() {
-  const result = document.getElementById("result");
-  const prompt = document.getElementById("prompt").value;
-  const mode = document.getElementById("mode").value;
-
-  result.textContent = "Выполняется...";
-
-  try {
-    const response = await fetch("/api/analyze", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify({
-        prompt: prompt,
-        mode: mode
-      })
-    });
-
-    const data = await response.json();
-
-    result.textContent = JSON.stringify(data, null, 2);
-  } catch (error) {
-    result.textContent = String(error);
-  }
-}
-</script>
-</body>
-</html>
-"""
+@app.get("/product", response_class=HTMLResponse, include_in_schema=False)
+async def product_ui() -> str:
+    with open("static/product/settings.html", encoding="utf-8") as fh:
+        return fh.read()

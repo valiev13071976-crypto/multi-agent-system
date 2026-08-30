@@ -46,17 +46,82 @@ class TerminalScaffoldAdapter(ScaffoldAdapter):
 
 
 class McpScaffoldAdapter(ScaffoldAdapter):
-    def __init__(self):
+    """Legacy scaffold — prefer tools.platform.contracts.McpAdapter."""
+
+    def __init__(
+        self,
+        *,
+        enabled: bool = False,
+        allowed_servers: tuple[str, ...] = (),
+        allowed_tools: tuple[str, ...] = (),
+        server_trust: dict[str, str] | None = None,
+    ):
         super().__init__(adapter_id="mcp")
+        self._enabled = enabled
+        self._allowed_servers = frozenset(s.lower() for s in allowed_servers)
+        self._allowed_tools = frozenset(allowed_tools)
+        self._server_trust = dict(server_trust or {})
+        self._normalized: list[dict] = []
+
+    def health(self) -> str:
+        from tools.models import ADAPTER_DEGRADED, ADAPTER_HEALTHY
+
+        if not self._enabled:
+            return ADAPTER_UNAVAILABLE
+        if not self._allowed_servers:
+            return ADAPTER_DEGRADED
+        return ADAPTER_HEALTHY
+
+    def register_normalized_tools(self, tools: list[dict]) -> list[dict]:
+        out = []
+        for item in tools or []:
+            name = str(item.get("name") or item.get("tool") or "").strip()
+            server = str(item.get("server") or "").strip().lower()
+            if not name or name.startswith("_"):
+                continue
+            if self._allowed_servers and server not in self._allowed_servers:
+                continue
+            if self._allowed_tools and name not in self._allowed_tools:
+                continue
+            out.append(
+                {
+                    "mcp_tool": name,
+                    "server": server,
+                    "trust": self._server_trust.get(server, "untrusted"),
+                    "input_schema": dict(item.get("input_schema") or {}),
+                }
+            )
+        self._normalized = out
+        return out
 
     async def execute_read(self, request, context) -> dict:
         args = dict(request.arguments or {})
-        tool_name = str(args.get("mcp_tool") or "")
+        tool_name = str(args.get("mcp_tool") or args.get("tool") or "")
+        server = str(args.get("server") or "").strip().lower()
         if not tool_name or tool_name.startswith("_"):
             from tools.errors import ToolPolicyDeniedError
 
             raise ToolPolicyDeniedError("untrusted_mcp_tool")
-        raise ToolUnavailableError("mcp_disabled")
+        if self._allowed_servers:
+            if not server or server not in self._allowed_servers:
+                from tools.errors import ToolPolicyDeniedError
+
+                raise ToolPolicyDeniedError("untrusted_mcp_server")
+        if not self._enabled:
+            raise ToolUnavailableError("mcp_disabled")
+        trust = self._server_trust.get(server, "untrusted")
+        if trust in {"untrusted", "UNTRUSTED"} and self._allowed_servers:
+            from tools.errors import ToolPolicyDeniedError
+
+            raise ToolPolicyDeniedError("untrusted_mcp_server")
+        return {
+            "scaffold": True,
+            "adapter": "mcp",
+            "server": server,
+            "mcp_tool": tool_name,
+            "trust": trust,
+            "provenance": {"adapter": "mcp", "contract": True},
+        }
 
 
 class CmsScaffoldAdapter(ScaffoldAdapter):

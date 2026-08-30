@@ -7,6 +7,11 @@ runtime-aware tie-breaking is explicitly enabled.
 
 Persistence limitation: samples live in-process memory only; not shared across
 workers and not durable across restarts.
+
+Operational contract (PATCH-MR-05): ``state_scope`` is ``process_local`` and
+``shared_backing`` is False. Adaptive tie-break remains OFF by default
+(``DEFAULT_RUNTIME_TIEBREAK_ENABLED = False``). See readiness capabilities on
+``/ready`` for the machine-visible scope signal.
 """
 
 from __future__ import annotations
@@ -18,6 +23,8 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Deque
+
+from agents.routing_state_scope import STATE_SCOPE_PROCESS_LOCAL
 
 
 STATS_UNKNOWN = "unknown"
@@ -169,12 +176,26 @@ def _percentile(sorted_values: list[float], pct: float) -> float | None:
 
 
 class ProviderRuntimeStatsAggregator:
-    """Process-local bounded aggregator for routing-safe runtime metrics."""
+    """Process-local bounded aggregator for routing-safe runtime metrics.
+
+    Implements ``ProviderRuntimeStatsStore``. Independent instances do not share
+    samples across workers.
+    """
+
+    STATE_SCOPE = STATE_SCOPE_PROCESS_LOCAL
 
     def __init__(self, policy: RuntimeStatsPolicy | None = None):
         self.policy = policy or RuntimeStatsPolicy()
         self._samples: dict[tuple[str, str], Deque[_RuntimeSample]] = {}
         self._lock = threading.Lock()
+
+    @property
+    def state_scope(self) -> str:
+        return self.STATE_SCOPE
+
+    @property
+    def shared_backing(self) -> bool:
+        return False
 
     def _key(self, provider_id: str, model_id: str = "") -> tuple[str, str]:
         return (str(provider_id or ""), str(model_id or ""))

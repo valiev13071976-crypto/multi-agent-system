@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from documents.errors import DocumentError
+from documents.planner import LARGE_OCR_PAGES
 from security.tenant import normalize_tenant_id
 
 
@@ -30,6 +32,38 @@ class LargeDocumentPolicy:
         if text_chars > self.max_sync_text_chars:
             return True
         return False
+
+
+def pdf_inline_ocr_requires_batch(
+    data: bytes,
+    *,
+    limits: dict | None = None,
+) -> tuple[bool, int | None]:
+    """True when sync PDF ingest must not run inline OCR (pages >= LARGE_OCR_PAGES)."""
+    from documents.intelligence.pdf_ocr import extract_pdf_pages_text, peek_pdf_page_count
+
+    try:
+        page_count = peek_pdf_page_count(data)
+    except DocumentError:
+        return True, None
+
+    if page_count < LARGE_OCR_PAGES:
+        return False, page_count
+
+    lim = dict(limits or {})
+    max_pages = int(lim.get("max_pages", 500))
+    max_text = int(lim.get("max_text_bytes", 5_000_000))
+    try:
+        pages, _ = extract_pdf_pages_text(
+            data, max_pages=max_pages, max_text=max_text
+        )
+    except DocumentError:
+        return True, page_count
+
+    ocr_needed = any(not str(text).strip() for text in pages.values())
+    if ocr_needed:
+        return True, page_count
+    return False, page_count
 
 
 def large_extract_execution_key(tenant_id: str, document_id: str, *, version: str = "1") -> str:

@@ -150,6 +150,10 @@ class WorkflowState:
     metadata: Mapping[str, object] = field(default_factory=dict)
     next_retry_at: datetime | None = None
     deadline_at: datetime | None = None
+    # Correlation / identity (optional; not a second run id)
+    request_id: str | None = None
+    user_id: str | None = None
+    actor_ref: str | None = None
 
     def __post_init__(self):
         if self.status not in WORKFLOW_STATUSES:

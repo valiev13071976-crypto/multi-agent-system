@@ -15,8 +15,10 @@ REJECT_INACTIVE = "inactive"
 REJECT_UNSUPPORTED_CATEGORY = "unsupported_category"
 REJECT_CAPABILITY_MISMATCH = "capability_mismatch"
 REJECT_BUDGET_DENIED = "budget_denied"
+REJECT_BUDGET_SKIP = "budget_skip_model"
 REJECT_UNKNOWN_COST_DENIED = "unknown_cost_denied"
 REJECT_HEALTH_COOLDOWN = "health_cooldown"
+REJECT_CAPACITY_UNAVAILABLE = "capacity_unavailable"
 
 REJECTION_REASON_CODES = frozenset(
     {
@@ -25,8 +27,10 @@ REJECTION_REASON_CODES = frozenset(
         REJECT_UNSUPPORTED_CATEGORY,
         REJECT_CAPABILITY_MISMATCH,
         REJECT_BUDGET_DENIED,
+        REJECT_BUDGET_SKIP,
         REJECT_UNKNOWN_COST_DENIED,
         REJECT_HEALTH_COOLDOWN,
+        REJECT_CAPACITY_UNAVAILABLE,
     }
 )
 

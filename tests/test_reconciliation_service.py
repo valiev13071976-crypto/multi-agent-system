@@ -54,6 +54,7 @@ class ReconciliationServiceTests(unittest.IsolatedAsyncioTestCase):
             started_at=T0 - timedelta(seconds=400),
             completed_at=None,
             outcome=OUTCOME_UNCERTAIN,
+            tenant_id="tenant-se",
             metadata={"adapter_started": True},
         )
         executor.store.create(record)

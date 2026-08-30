@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 
-from security.tenant import normalize_tenant_id
+from security.tenant import require_tenant_id
 from workflow.definition import ScheduleSpec
 from workflow.models import utc_now
 from workflow.schedule import ScheduleState, WorkflowScheduler
@@ -14,7 +14,7 @@ DEFAULT_INTERVAL_SECONDS = 3600.0
 
 
 def commerce_reconcile_execution_key(*, tenant_id: str, schedule_window: int) -> str:
-    tenant = normalize_tenant_id(tenant_id)
+    tenant = require_tenant_id(tenant_id)
     return f"commerce-reconcile:{tenant}:{int(schedule_window)}"
 
 
@@ -26,7 +26,7 @@ def build_commerce_reconcile_schedule_spec(
     run_at: datetime | None = None,
     schedule_id: str | None = None,
 ) -> ScheduleSpec:
-    tenant = normalize_tenant_id(tenant_id)
+    tenant = require_tenant_id(tenant_id)
     sid = schedule_id or f"commerce-reconcile:{tenant}"
     return ScheduleSpec(
         schedule_id=sid,

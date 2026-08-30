@@ -7,6 +7,7 @@ CAP_CATALOG_WRITE = "catalog.write"
 CAP_INVENTORY_READ = "inventory.read"
 CAP_INVENTORY_RESERVE = "inventory.reserve"
 CAP_INVENTORY_ADJUST = "inventory.adjust"
+CAP_STOCK_WRITE = "stock.write"
 CAP_PRICING_PROPOSE = "pricing.propose"
 CAP_PRICING_WRITE = "pricing.write"
 CAP_ORDER_READ = "order.read"
@@ -30,6 +31,7 @@ COMMERCE_CAPABILITIES = (
     CAP_INVENTORY_READ,
     CAP_INVENTORY_RESERVE,
     CAP_INVENTORY_ADJUST,
+    CAP_STOCK_WRITE,
     CAP_PRICING_PROPOSE,
     CAP_PRICING_WRITE,
     CAP_ORDER_READ,

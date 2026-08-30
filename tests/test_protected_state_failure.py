@@ -8,6 +8,7 @@ from unittest import mock
 from autonomy.models import APPROVAL_APPROVED, ApprovalRecord
 from hitl.models import PERMIT_CONSUMED, PERMIT_ISSUED, ExecutionPermit, action_fingerprint
 from side_effects.errors import SideEffectPersistenceUnavailableError
+from side_effects.schema import SCHEMA_VERSION
 from side_effects.persistence import (
     attach_protected_persistence,
     build_side_effect_persistence,
@@ -50,7 +51,7 @@ class ProtectedStateFailureTests(unittest.IsolatedAsyncioTestCase):
                 persistence=bundle,
                 permit_service=engine.hitl_service.permits,
             )
-            workflow_id = engine.create("task-fail")
+            workflow_id = engine.create("task-fail", tenant_id="tenant-test")
             engine.state_manager.plan(workflow_id)
             engine.state_manager.start(workflow_id)
             action = se_action(
@@ -120,7 +121,7 @@ class ProtectedStateFailureTests(unittest.IsolatedAsyncioTestCase):
                 persistence=bundle,
                 permit_service=engine.hitl_service.permits,
             )
-            workflow_id = engine.create("task-crash")
+            workflow_id = engine.create("task-crash", tenant_id="tenant-test")
             engine.state_manager.plan(workflow_id)
             engine.state_manager.start(workflow_id)
             action = se_action(
@@ -243,7 +244,7 @@ class ProtectedStateFailureTests(unittest.IsolatedAsyncioTestCase):
             bundle = build_side_effect_persistence(
                 durable=True, db_path=path, run_recovery_scan=False
             )
-            self.assertEqual(bundle.schema_version, 2)
+            self.assertEqual(bundle.schema_version, SCHEMA_VERSION)
             self.assertTrue(bundle.protected_state_ready)
             old = bundle.execution_store.get("ex-old")
             self.assertIsNotNone(old)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from security.tenant import normalize_tenant_id
+from security.tenant import require_tenant_id
 from workflow.definition import ScheduleSpec
 from workflow.models import utc_now
 from workflow.schedule import ScheduleState, WorkflowScheduler
@@ -14,7 +14,7 @@ DEFAULT_INTERVAL_SECONDS = 3600.0
 
 
 def payments_reconcile_execution_key(*, tenant_id: str, schedule_window: int) -> str:
-    return f"payments-reconcile:{normalize_tenant_id(tenant_id)}:{int(schedule_window)}"
+    return f"payments-reconcile:{require_tenant_id(tenant_id)}:{int(schedule_window)}"
 
 
 def build_payments_reconcile_schedule_spec(
@@ -24,7 +24,7 @@ def build_payments_reconcile_schedule_spec(
     version: str = "1",
     run_at: datetime | None = None,
 ) -> ScheduleSpec:
-    tenant = normalize_tenant_id(tenant_id)
+    tenant = require_tenant_id(tenant_id)
     return ScheduleSpec(
         schedule_id=f"payments-reconcile:{tenant}",
         workflow_type=WORKFLOW_TYPE,

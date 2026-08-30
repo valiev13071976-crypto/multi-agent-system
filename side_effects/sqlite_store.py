@@ -20,6 +20,7 @@ from security.encryption import (
     EncryptionUnavailableError,
 )
 from side_effects.errors import (
+    SideEffectExecutionDeniedError,
     SideEffectPersistenceConflictError,
     SideEffectPersistenceUnavailableError,
 )
@@ -27,6 +28,14 @@ from side_effects.models import ReconciliationRecord, SideEffectExecutionRecord
 from side_effects.schema import (
     DDL,
     DDL_V2,
+    DDL_V3_INDEX,
+    DDL_V4,
+    DDL_V5,
+    DDL_V6_COLUMNS,
+    DDL_V7,
+    DDL_V7_COLUMNS,
+    DDL_V8_COLUMNS,
+    DDL_V8_INDEX,
     EXECUTION_LINKAGE_COLUMNS,
     MAX_ENCRYPTED_PAYLOAD_BYTES,
     MAX_SAFE_METADATA_BYTES,
@@ -155,13 +164,23 @@ class SqliteConnection:
         if str(parent) not in {"", "."}:
             parent.mkdir(parents=True, exist_ok=True)
         try:
-            conn = sqlite3.connect(self.path, check_same_thread=False)
+            conn = sqlite3.connect(self.path, check_same_thread=False, timeout=30.0)
         except sqlite3.Error as exc:
             raise SideEffectPersistenceUnavailableError(
                 "side_effect_persistence_unavailable"
             ) from exc
         conn.row_factory = sqlite3.Row
         conn.execute("PRAGMA foreign_keys=ON")
+        # Multi-process readiness: WAL allows concurrent readers + one writer;
+        # busy_timeout waits on lock instead of failing immediately (ms).
+        try:
+            conn.execute("PRAGMA journal_mode=WAL")
+        except sqlite3.Error:
+            pass
+        try:
+            conn.execute("PRAGMA busy_timeout=5000")
+        except sqlite3.Error:
+            pass
         self._local.conn = conn
         self._maybe_restrict_permissions()
         return conn
@@ -184,6 +203,12 @@ class SqliteConnection:
                 if row is None:
                     conn.executescript(DDL_V2)
                     self._ensure_execution_linkage_columns(conn)
+                    self._migrate_workflow_runtime_tenant_v3(conn)
+                    conn.executescript(DDL_V4)
+                    conn.executescript(DDL_V5)
+                    self._migrate_schedule_claim_v6(conn)
+                    self._migrate_execution_lane_v7(conn)
+                    self._migrate_side_effect_execution_tenant_v8(conn)
                     conn.execute(
                         "INSERT INTO side_effect_schema_meta(id, version) VALUES (1, ?)",
                         (SCHEMA_VERSION,),
@@ -199,9 +224,15 @@ class SqliteConnection:
                     raise SideEffectPersistenceUnavailableError(
                         "side_effect_schema_version_unsupported"
                     )
-                # Additive migration: v1 → v2 (and idempotent ensure for v2).
+                # Additive: v2 tables, v3 tenant, v4 schedules, v5 queue, v6 claim, v7 lane, v8 SE tenant.
                 conn.executescript(DDL_V2)
                 self._ensure_execution_linkage_columns(conn)
+                self._migrate_workflow_runtime_tenant_v3(conn)
+                conn.executescript(DDL_V4)
+                conn.executescript(DDL_V5)
+                self._migrate_schedule_claim_v6(conn)
+                self._migrate_execution_lane_v7(conn)
+                self._migrate_side_effect_execution_tenant_v8(conn)
                 if version < SCHEMA_VERSION:
                     conn.execute(
                         "UPDATE side_effect_schema_meta SET version = ? WHERE id = 1",
@@ -227,6 +258,162 @@ class SqliteConnection:
             conn.execute(
                 f"ALTER TABLE side_effect_executions ADD COLUMN {name} {col_type}"
             )
+
+    def _migrate_workflow_runtime_tenant_v3(self, conn: sqlite3.Connection) -> None:
+        """Additive v3: tenant_id column + index + metadata backfill (idempotent)."""
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "workflow_runtime_state" not in tables:
+            return
+        existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(workflow_runtime_state)").fetchall()
+        }
+        if "tenant_id" not in existing:
+            conn.execute(
+                "ALTER TABLE workflow_runtime_state ADD COLUMN tenant_id TEXT"
+            )
+        # Backfill from safe_metadata_json when column is empty and metadata has tenant.
+        conn.execute(
+            """
+            UPDATE workflow_runtime_state
+            SET tenant_id = TRIM(
+                json_extract(safe_metadata_json, '$.tenant_id')
+            )
+            WHERE (tenant_id IS NULL OR TRIM(COALESCE(tenant_id, '')) = '')
+              AND json_extract(safe_metadata_json, '$.tenant_id') IS NOT NULL
+              AND TRIM(COALESCE(json_extract(safe_metadata_json, '$.tenant_id'), '')) != ''
+            """
+        )
+        conn.executescript(DDL_V3_INDEX)
+
+    def _migrate_schedule_claim_v6(self, conn: sqlite3.Connection) -> None:
+        """Additive v6: claim fencing columns on workflow_schedules."""
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "workflow_schedules" not in tables:
+            return
+        existing = {
+            str(row["name"])
+            for row in conn.execute("PRAGMA table_info(workflow_schedules)").fetchall()
+        }
+        for name, col_type in DDL_V6_COLUMNS:
+            if name in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE workflow_schedules ADD COLUMN {name} {col_type}"
+            )
+
+    def _migrate_execution_lane_v7(self, conn: sqlite3.Connection) -> None:
+        """Additive v7: execution_lane on queue_tasks + provider governor tables."""
+
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "queue_tasks" in tables:
+            existing = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(queue_tasks)").fetchall()
+            }
+            for name, col_type in DDL_V7_COLUMNS:
+                if name in existing:
+                    continue
+                conn.execute(f"ALTER TABLE queue_tasks ADD COLUMN {name} {col_type}")
+            conn.execute(
+                """
+                UPDATE queue_tasks SET execution_lane = 'background'
+                WHERE execution_lane IS NULL OR TRIM(execution_lane) = ''
+                """
+            )
+        conn.executescript(DDL_V7)
+
+    def _migrate_side_effect_execution_tenant_v8(self, conn: sqlite3.Connection) -> None:
+        """Additive v8: tenant_id on side_effect_executions + workflow/metadata backfill.
+
+        Legacy unresolved rows keep empty tenant_id (documented legacy contract).
+        New writes are fail-closed at the store/application layer.
+        """
+        tables = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        if "side_effect_executions" not in tables:
+            return
+        existing = {
+            str(row["name"])
+            for row in conn.execute(
+                "PRAGMA table_info(side_effect_executions)"
+            ).fetchall()
+        }
+        for name, col_type in DDL_V8_COLUMNS:
+            if name in existing:
+                continue
+            conn.execute(
+                f"ALTER TABLE side_effect_executions ADD COLUMN {name} {col_type}"
+            )
+        # Backfill from workflow_runtime_state when join is unambiguous.
+        if "workflow_runtime_state" in tables:
+            wf_cols = {
+                str(row["name"])
+                for row in conn.execute(
+                    "PRAGMA table_info(workflow_runtime_state)"
+                ).fetchall()
+            }
+            if "tenant_id" in wf_cols:
+                conn.execute(
+                    """
+                    UPDATE side_effect_executions
+                    SET tenant_id = (
+                        SELECT TRIM(w.tenant_id)
+                        FROM workflow_runtime_state w
+                        WHERE w.workflow_id = side_effect_executions.workflow_id
+                          AND w.tenant_id IS NOT NULL
+                          AND TRIM(COALESCE(w.tenant_id, '')) != ''
+                        LIMIT 1
+                    )
+                    WHERE TRIM(COALESCE(tenant_id, '')) = ''
+                      AND EXISTS (
+                        SELECT 1 FROM workflow_runtime_state w
+                        WHERE w.workflow_id = side_effect_executions.workflow_id
+                          AND w.tenant_id IS NOT NULL
+                          AND TRIM(COALESCE(w.tenant_id, '')) != ''
+                      )
+                    """
+                )
+        # Secondary: metadata.tenant_id when still empty.
+        conn.execute(
+            """
+            UPDATE side_effect_executions
+            SET tenant_id = TRIM(
+                json_extract(safe_metadata_json, '$.tenant_id')
+            )
+            WHERE TRIM(COALESCE(tenant_id, '')) = ''
+              AND json_extract(safe_metadata_json, '$.tenant_id') IS NOT NULL
+              AND TRIM(COALESCE(json_extract(safe_metadata_json, '$.tenant_id'), '')) != ''
+            """
+        )
+        # Normalize NULL → '' for legacy unresolved rows.
+        conn.execute(
+            """
+            UPDATE side_effect_executions
+            SET tenant_id = ''
+            WHERE tenant_id IS NULL
+            """
+        )
+        conn.executescript(DDL_V8_INDEX)
 
     def get_schema_version(self) -> int:
         conn = self.connect()
@@ -330,6 +517,19 @@ class PersistentSideEffectExecutionStore:
             return None
         return self._from_row(row)
 
+    def get_for_tenant(
+        self, execution_id: str, tenant_id: str
+    ) -> SideEffectExecutionRecord | None:
+        tid = str(tenant_id or "").strip()
+        if not tid:
+            return None
+        record = self.get(execution_id)
+        if record is None:
+            return None
+        if str(record.tenant_id or "").strip() != tid:
+            return None
+        return record
+
     def save(self, record: SideEffectExecutionRecord) -> SideEffectExecutionRecord:
         return self._upsert(record, insert=False)
 
@@ -377,9 +577,34 @@ class PersistentSideEffectExecutionStore:
         ).fetchall()
         return tuple(self._from_row(row) for row in rows)
 
+    def list_by_tenant(self, tenant_id: str) -> tuple[SideEffectExecutionRecord, ...]:
+        tid = str(tenant_id or "").strip()
+        if not tid:
+            return ()
+        conn = self._connection.connect()
+        rows = conn.execute(
+            "SELECT * FROM side_effect_executions WHERE tenant_id = ?",
+            (tid,),
+        ).fetchall()
+        return tuple(self._from_row(row) for row in rows)
+
+    @staticmethod
+    def _assert_tenant_writable(
+        record: SideEffectExecutionRecord, *, existing: SideEffectExecutionRecord | None
+    ) -> None:
+        """New writes require non-empty tenant_id; legacy empty rows may update in place."""
+        tid = str(record.tenant_id or "").strip()
+        if tid:
+            return
+        if existing is not None and not str(existing.tenant_id or "").strip():
+            return
+        raise SideEffectExecutionDeniedError("side_effect_tenant_required")
+
     def _upsert(
         self, record: SideEffectExecutionRecord, *, insert: bool
     ) -> SideEffectExecutionRecord:
+        existing = None if insert else self.get(record.execution_id)
+        self._assert_tenant_writable(record, existing=existing)
         safe_json, encrypted_json = _split_payload(
             dict(record.metadata),
             sensitivity=SENSITIVITY_INTERNAL,
@@ -414,6 +639,7 @@ class PersistentSideEffectExecutionStore:
             "version": int(record.version),
             "permit_id": record.permit_id,
             "approval_id": record.approval_id,
+            "tenant_id": str(record.tenant_id or ""),
             "sensitivity": SENSITIVITY_INTERNAL,
             "safe_metadata_json": safe_json,
             "encrypted_payload_json": encrypted_json,
@@ -453,6 +679,7 @@ class PersistentSideEffectExecutionStore:
                     "version",
                     "permit_id",
                     "approval_id",
+                    "tenant_id",
                     "sensitivity",
                     "safe_metadata_json",
                     "encrypted_payload_json",
@@ -470,6 +697,8 @@ class PersistentSideEffectExecutionStore:
                     raise SideEffectPersistenceConflictError()
             self._connection.maybe_autocommit()
         except SideEffectPersistenceConflictError:
+            raise
+        except SideEffectExecutionDeniedError:
             raise
         except sqlite3.Error as exc:
             raise SideEffectPersistenceUnavailableError(
@@ -510,6 +739,7 @@ class PersistentSideEffectExecutionStore:
             version=int(row["version"]),
             permit_id=_row_get(row, "permit_id"),
             approval_id=_row_get(row, "approval_id"),
+            tenant_id=str(_row_get(row, "tenant_id", "") or ""),
             metadata=metadata,
         )
 

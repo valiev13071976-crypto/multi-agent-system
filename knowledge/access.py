@@ -9,7 +9,8 @@ OP_READ = "read"
 OP_INGEST = "ingest"
 OP_REFRESH = "refresh"
 OP_REGISTER = "register"
-KNOWLEDGE_OPS = (OP_READ, OP_INGEST, OP_REFRESH, OP_REGISTER)
+OP_DELETE = "delete"
+KNOWLEDGE_OPS = (OP_READ, OP_INGEST, OP_REFRESH, OP_REGISTER, OP_DELETE)
 
 
 class KnowledgeAccessDenied(PermissionError):

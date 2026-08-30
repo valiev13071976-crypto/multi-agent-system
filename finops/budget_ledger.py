@@ -17,6 +17,7 @@ from finops.budget_models import (
     SCOPE_MONTHLY,
     SCOPE_PROVIDER,
     SCOPE_TASK,
+    SCOPE_TENANT,
     BudgetReservation,
     utc_now,
 )
@@ -36,6 +37,7 @@ def build_scope_refs(
     provider: str,
     model: str,
     when: datetime | None = None,
+    tenant_id: str | None = None,
 ) -> tuple[str, ...]:
     stamp = when or utc_now()
     day_start, _ = _day_bounds(stamp)
@@ -50,6 +52,9 @@ def build_scope_refs(
     ]
     if agent_id:
         refs.append(scope_ref(SCOPE_AGENT, agent_id))
+    tid = str(tenant_id or "").strip()
+    if tid:
+        refs.append(scope_ref(SCOPE_TENANT, tid))
     return tuple(refs)
 
 

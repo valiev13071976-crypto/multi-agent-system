@@ -8,6 +8,9 @@ class TaskQueueStore:
     def get(self, queue_task_id: str) -> QueueTask | None:
         raise NotImplementedError
 
+    def get_for_tenant(self, queue_task_id: str, tenant_id: str) -> QueueTask | None:
+        raise NotImplementedError
+
     def list_ready(self) -> tuple[QueueTask, ...]:
         raise NotImplementedError
 
@@ -30,6 +33,17 @@ class InMemoryTaskQueueStore(TaskQueueStore):
 
     def get(self, queue_task_id: str) -> QueueTask | None:
         return self._items.get(queue_task_id)
+
+    def get_for_tenant(self, queue_task_id: str, tenant_id: str) -> QueueTask | None:
+        tid = str(tenant_id or "").strip()
+        if not tid:
+            return None
+        task = self.get(queue_task_id)
+        if task is None:
+            return None
+        if str(getattr(task, "tenant_id", "") or "").strip() != tid:
+            return None
+        return task
 
     def save(self, task: QueueTask) -> None:
         self._items[task.queue_task_id] = task

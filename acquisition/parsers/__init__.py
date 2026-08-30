@@ -5,9 +5,26 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Mapping, Protocol, runtime_checkable
 
-from acquisition.errors import ParserFailedError, ParserNotFoundError, UnsupportedContentError
-from acquisition.models import ParsedRecord, RawArtifact, ValidationResult
+from acquisition.errors import (
+    ContentNestingTooDeepError,
+    ContentTooLargeError,
+    EncodingError,
+    ParserFailedError,
+    ParserNotFoundError,
+    UnsupportedContentError,
+)
+from acquisition.models import (
+    EXTRACT_EMPTY,
+    EXTRACT_MISSING,
+    EXTRACT_UNAVAILABLE,
+    ParsedRecord,
+    RawArtifact,
+    ValidationResult,
+)
 from acquisition.validation import validate_record
+
+MAX_PARSE_BYTES = 2_000_000
+MAX_JSON_NESTING = 32
 
 
 @dataclass(frozen=True)
@@ -31,6 +48,38 @@ class AcquisitionParser(Protocol):
     def parse(self, artifact: RawArtifact) -> tuple[ParsedRecord, ...]: ...
 
     def validate_output(self, record: ParsedRecord) -> ValidationResult: ...
+
+
+def _json_depth(value, depth: int = 0) -> int:
+    if depth > MAX_JSON_NESTING:
+        return depth
+    if isinstance(value, dict):
+        if not value:
+            return depth
+        return max(_json_depth(v, depth + 1) for v in value.values())
+    if isinstance(value, list):
+        if not value:
+            return depth
+        return max(_json_depth(v, depth + 1) for v in value)
+    return depth
+
+
+def preflight_artifact(artifact: RawArtifact) -> str | None:
+    """Return extraction status code when content cannot be parsed usefully."""
+    text = artifact.content_text
+    if text is None and not artifact.content_ref and not artifact.document_id:
+        return EXTRACT_MISSING
+    if text is not None and not str(text).strip():
+        return EXTRACT_EMPTY
+    nbytes = int(artifact.content_bytes_len or (len(text.encode("utf-8")) if text else 0))
+    if nbytes > MAX_PARSE_BYTES:
+        raise ContentTooLargeError()
+    if text:
+        try:
+            text.encode("utf-8")
+        except UnicodeError as exc:
+            raise EncodingError() from exc
+    return None
 
 
 class ParserRegistry:
@@ -62,12 +111,34 @@ class ParserRegistry:
         raise ParserNotFoundError()
 
     def parse(self, artifact: RawArtifact) -> tuple[ParsedRecord, ...]:
+        status = preflight_artifact(artifact)
+        if status in {EXTRACT_MISSING, EXTRACT_EMPTY}:
+            raise UnsupportedContentError(f"content_{status}")
         if not artifact.content_type and not artifact.content_text:
             raise UnsupportedContentError()
+        ct = (artifact.content_type or "").lower()
+        if "json" in ct or (artifact.content_text or "").lstrip()[:1] in {"{", "["}:
+            try:
+                import json
+
+                data = json.loads(artifact.content_text or "")
+                if _json_depth(data) > MAX_JSON_NESTING:
+                    raise ContentNestingTooDeepError()
+            except ContentNestingTooDeepError:
+                raise
+            except Exception:
+                pass
         parser = self.select(artifact)
         try:
             records = parser.parse(artifact)
-        except (ParserFailedError, UnsupportedContentError, ParserNotFoundError):
+        except (
+            ParserFailedError,
+            UnsupportedContentError,
+            ParserNotFoundError,
+            ContentTooLargeError,
+            ContentNestingTooDeepError,
+            EncodingError,
+        ):
             raise
         except Exception as exc:
             raise ParserFailedError() from exc

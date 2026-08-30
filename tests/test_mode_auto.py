@@ -2,6 +2,7 @@ from fastapi.testclient import TestClient
 import unittest
 
 from agents.model_router import (
+    REASON_AUTO_CAPABILITY_MATCH,
     REASON_AUTO_GENERAL_FALLBACK,
     REASON_AUTO_PROVIDER,
     REASON_EXPLICIT_PROVIDER,
@@ -76,7 +77,7 @@ class AutoModelRouterTests(unittest.TestCase):
         registry.auto_provider_order = ("anthropic", "openai")
         decision = ModelRouter(registry).decide(mode="auto", role_id="strategist")
         self.assertEqual(decision.provider_ids, ("openai",))
-        self.assertEqual(decision.reason, REASON_AUTO_GENERAL_FALLBACK)
+        self.assertEqual(decision.reason, REASON_AUTO_CAPABILITY_MATCH)
 
     def test_auto_with_no_available_returns_empty_providers(self):
         registry = registry_with()
@@ -110,7 +111,7 @@ class ModeAutoHttpTests(unittest.TestCase):
         self.assertEqual(mocks["anthropic"].await_count, 1)
         self.assertEqual(mocks["openai"].await_count, 0)
         self.assertEqual(main_mod.router.last_decision.provider_ids, ("anthropic",))
-        self.assertEqual(main_mod.router.last_decision.reason, REASON_AUTO_GENERAL_FALLBACK)
+        self.assertEqual(main_mod.router.last_decision.reason, REASON_AUTO_CAPABILITY_MATCH)
         self._assert_contract(response.json())
 
     def test_b_auto_skips_unavailable_anthropic(self):

@@ -111,9 +111,12 @@ class CommerceStore:
             return self._shared.connect()
         conn = getattr(self._local, "conn", None)
         if conn is None:
-            if self._path != ":memory:":
-                Path(self._path).parent.mkdir(parents=True, exist_ok=True)
-            conn = sqlite3.connect(self._path, check_same_thread=False)
+            if self._path.startswith("file:"):
+                conn = sqlite3.connect(self._path, check_same_thread=False, uri=True)
+            else:
+                if self._path != ":memory:":
+                    Path(self._path).parent.mkdir(parents=True, exist_ok=True)
+                conn = sqlite3.connect(self._path, check_same_thread=False)
             conn.row_factory = sqlite3.Row
             self._local.conn = conn
         return conn

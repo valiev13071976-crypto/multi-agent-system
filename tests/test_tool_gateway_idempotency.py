@@ -17,7 +17,7 @@ from workflow.engine import WorkflowEngine
 class ToolGatewayIdempotencyTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.engine = WorkflowEngine()
-        self.workflow_id = self.engine.create("t")
+        self.workflow_id = self.engine.create("t", tenant_id="tenant-se")
         self.engine.state_manager.plan(self.workflow_id)
         self.engine.state_manager.start(self.workflow_id)
         self.adapter = InMemoryReversibleWriteAdapter(

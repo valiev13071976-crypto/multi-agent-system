@@ -23,7 +23,9 @@ from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 from agents.routing_audit import (
     EMPTY_FACTOR_SNAPSHOT,
     REJECT_BUDGET_DENIED,
+    REJECT_BUDGET_SKIP,
     REJECT_CAPABILITY_MISMATCH,
+    REJECT_CAPACITY_UNAVAILABLE,
     REJECT_HEALTH_COOLDOWN,
     REJECT_UNAVAILABLE,
     REJECT_UNKNOWN_COST_DENIED,
@@ -178,11 +180,102 @@ class ModelRouter:
     providers from ``auto`` only.
     """
 
-    def __init__(self, registry: ProviderRegistry, health_tracker=None, runtime_stats=None):
+    def __init__(
+        self, registry: ProviderRegistry, health_tracker=None, runtime_stats=None, capacity_governor=None
+    ):
         self.registry = registry
         self.observability = None
         self.health_tracker = health_tracker
         self.runtime_stats = runtime_stats
+        self.capacity_governor = capacity_governor
+        # Live request identity for provider.selected correlation (observability only).
+        self._audit_request_id = None
+        self._audit_task_id = None
+        self._audit_tenant_id = None
+        self._audit_user_id = None
+        self._audit_actor_ref = None
+        self._audit_workflow_id = None
+
+    def bind_routing_audit(
+        self,
+        *,
+        request_id=None,
+        task_id=None,
+        tenant_id=None,
+        user_id=None,
+        actor_ref=None,
+        workflow_id=None,
+        observability=None,
+    ) -> None:
+        """Bind live execution identity for routing audit emit (no selection effect)."""
+
+        if observability is not None:
+            self.observability = observability
+        self._audit_request_id = request_id
+        self._audit_task_id = task_id
+        self._audit_tenant_id = tenant_id
+        self._audit_user_id = user_id
+        self._audit_actor_ref = actor_ref
+        self._audit_workflow_id = workflow_id
+
+    def clear_routing_audit(self) -> None:
+        self._audit_request_id = None
+        self._audit_task_id = None
+        self._audit_tenant_id = None
+        self._audit_user_id = None
+        self._audit_actor_ref = None
+        self._audit_workflow_id = None
+
+    def _routing_audit_context(self):
+        """Build observability context from bound live identity (ExpertManager-compatible)."""
+
+        obs = self.observability
+        if obs is None:
+            return None
+        request_id = str(self._audit_request_id or "").strip() or None
+        workflow_id = str(self._audit_workflow_id or "")
+        task_id = str(self._audit_task_id or "")
+        actor_ref = str(self._audit_actor_ref or "")
+        tenant_id = str(self._audit_tenant_id or "")
+        if workflow_id:
+            existing = obs.context_for_workflow(workflow_id)
+            if existing is not None:
+                return existing.child(
+                    task_id=task_id or existing.task_id,
+                    actor_ref=actor_ref or None,
+                    tenant_id=tenant_id or None,
+                )
+        return obs.create_context(
+            correlation_id=request_id,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            actor_ref=actor_ref,
+            tenant_id=tenant_id,
+        )
+
+    def _routing_audit_identity_metadata(self) -> dict[str, str]:
+        """Additive identity fields — only include values supplied upstream."""
+
+        meta: dict[str, str] = {}
+        request_id = str(self._audit_request_id or "").strip()
+        task_id = str(self._audit_task_id or "").strip()
+        tenant_id = str(self._audit_tenant_id or "").strip()
+        user_id = str(self._audit_user_id or "").strip()
+        actor_ref = str(self._audit_actor_ref or "").strip()
+        workflow_id = str(self._audit_workflow_id or "").strip()
+        if request_id:
+            meta["request_id"] = request_id
+        if task_id:
+            meta["task_id"] = task_id
+        if tenant_id:
+            meta["tenant_id"] = tenant_id
+        if user_id:
+            meta["user_id"] = user_id
+        if actor_ref:
+            meta["actor_ref"] = actor_ref
+        if workflow_id:
+            meta["workflow_id"] = workflow_id
+        return meta
 
     def _model_id(self, provider_id: str) -> str:
         try:
@@ -213,6 +306,32 @@ class ModelRouter:
                 kept.append(provider_id)
         return tuple(kept)
 
+    def _filter_by_capacity(self, provider_ids: tuple[str, ...]) -> tuple[str, ...]:
+        """Exclude providers with no shared capacity / open breaker (auto path)."""
+
+        gov = self.capacity_governor
+        if gov is None:
+            return tuple(provider_ids)
+        kept = []
+        for provider_id in provider_ids:
+            try:
+                model_id = self._model_id(provider_id)
+                if getattr(gov, "breaker_state", None):
+                    if gov.breaker_state(provider_id, model_id) == "OPEN":
+                        continue
+                # Soft availability probe (acquire+release) — fail closed on errors.
+                check = getattr(gov, "is_available", None)
+                if callable(check) and not check(provider_id, model_id, lane="interactive"):
+                    continue
+                kept.append(provider_id)
+            except Exception:
+                continue
+        return tuple(kept)
+
+    def _capacity_blocked_set(self, provider_ids: tuple[str, ...]) -> set[str]:
+        eligible = set(self._filter_by_capacity(provider_ids))
+        return {p for p in provider_ids if p not in eligible}
+
     def _health_blocked_set(self, provider_ids: tuple[str, ...]) -> set[str]:
         eligible = set(self._filter_by_health(provider_ids))
         return {p for p in provider_ids if p not in eligible}
@@ -221,6 +340,11 @@ class ModelRouter:
         costs = dict(getattr(budget_constraints, "candidate_costs", None) or {})
         if provider_id in costs and costs[provider_id] is None:
             return REJECT_UNKNOWN_COST_DENIED
+        decision = getattr(budget_constraints, "decision", None)
+        if decision == "SKIP_MODEL":
+            return REJECT_BUDGET_SKIP
+        if decision == "DEGRADE":
+            return REJECT_BUDGET_SKIP
         return REJECT_BUDGET_DENIED
 
     def _factor_for(
@@ -293,7 +417,18 @@ class ModelRouter:
             runtime_latency_avg_ms=runtime_latency_avg_ms,
             runtime_cost_avg=runtime_cost_avg,
             runtime_stats_state=runtime_stats_state,
-            extra={"role_id": role_id},
+            extra={
+                "role_id": role_id,
+                "budget_decision": getattr(budget_constraints, "decision", None),
+                "budget_reason_code": getattr(budget_constraints, "reason_code", None),
+                "skipped_providers": list(
+                    getattr(budget_constraints, "skipped_providers", ()) or ()
+                ),
+                "preferred_cheaper": [
+                    list(pair)
+                    for pair in (getattr(budget_constraints, "preferred_cheaper", ()) or ())
+                ],
+            },
         )
 
     def _audit_rows_for_pool(
@@ -434,14 +569,17 @@ class ModelRouter:
                 rejected_candidates=decision.rejected_candidates,
                 factor_snapshot=decision.factor_snapshot,
             )
+            metadata.update(self._routing_audit_identity_metadata())
+            # Empty selection / no-candidate outcomes still emit for correlation.
+            status = "selected" if provider_ids else "none"
             safe_emit(
                 self.observability,
                 "provider.selected",
-                context=self.observability.create_context(),
+                context=self._routing_audit_context(),
                 component="provider",
                 provider=provider,
                 model=str(model or ""),
-                status="selected",
+                status=status,
                 metadata=metadata,
             )
         return decision
@@ -503,7 +641,12 @@ class ModelRouter:
             return False
         if getattr(budget_constraints, "excluded_providers", ()):
             return True
+        if getattr(budget_constraints, "skipped_providers", ()):
+            return True
         if getattr(budget_constraints, "preferred_cheaper", ()):
+            return True
+        decision = getattr(budget_constraints, "decision", None)
+        if decision and decision not in (None, "CONTINUE"):
             return True
         if getattr(budget_constraints, "max_affordable_cost", None) is not None:
             return True
@@ -807,13 +950,14 @@ class ModelRouter:
                 factor_snapshot=snapshot,
             )
 
-        # Order: static availability/state → dynamic health → category →
+        # Order: static availability/state → dynamic health → capacity → category →
         # hard capabilities → budget → rank.
         active = self.registry.active_provider_ids()
         health_eligible = self._filter_by_health(active)
+        capacity_eligible = self._filter_by_capacity(health_eligible)
         capable = tuple(
             provider_id
-            for provider_id in health_eligible
+            for provider_id in capacity_eligible
             if (
                 self.registry.profile(provider_id) is not None
                 and category in self.registry.profile(provider_id).task_categories
@@ -841,6 +985,7 @@ class ModelRouter:
         )
 
         health_blocked = self._health_blocked_set(active)
+        capacity_blocked = self._capacity_blocked_set(health_eligible)
         health_rows = tuple(
             RoutingCandidateAudit(
                 provider_id,
@@ -851,6 +996,16 @@ class ModelRouter:
             for provider_id in active
             if provider_id in health_blocked
         )
+        capacity_rows = tuple(
+            RoutingCandidateAudit(
+                provider_id,
+                self._model_id(provider_id),
+                eligible=False,
+                rejection_reason=REJECT_CAPACITY_UNAVAILABLE,
+            )
+            for provider_id in health_eligible
+            if provider_id in capacity_blocked
+        )
 
         failure_considered, failure_rejected = self._audit_rows_for_pool(
             pool=category_matches or (),
@@ -859,7 +1014,7 @@ class ModelRouter:
             selected=(),
         )
         if not category_matches:
-            # Mark available non-supporters / health-blocked.
+            # Mark available non-supporters / health/capacity-blocked.
             rows = []
             for provider_id in active:
                 if provider_id in health_blocked:
@@ -869,6 +1024,15 @@ class ModelRouter:
                             self._model_id(provider_id),
                             eligible=False,
                             rejection_reason=REJECT_HEALTH_COOLDOWN,
+                        )
+                    )
+                elif provider_id in capacity_blocked:
+                    rows.append(
+                        RoutingCandidateAudit(
+                            provider_id,
+                            self._model_id(provider_id),
+                            eligible=False,
+                            rejection_reason=REJECT_CAPACITY_UNAVAILABLE,
                         )
                     )
                 else:
@@ -883,7 +1047,7 @@ class ModelRouter:
             failure_considered = tuple(rows)
             failure_rejected = failure_considered
         else:
-            failure_considered = health_rows + failure_considered
+            failure_considered = health_rows + capacity_rows + failure_considered
             failure_rejected = tuple(c for c in failure_considered if not c.eligible)
         failure_snapshot = self._factor_for(
             mode=MODE_AUTO,

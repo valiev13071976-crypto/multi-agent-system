@@ -64,7 +64,8 @@ ALLOWED_TRANSITIONS = {
     ),
     STATUS_RETRY_WAIT: frozenset({STATUS_LEASED, STATUS_CANCELLED}),
     STATUS_COMPLETED: frozenset(),
-    STATUS_DEAD_LETTERED: frozenset(),
+    # Redrive is the only legal escape from DLQ (operator-initiated).
+    STATUS_DEAD_LETTERED: frozenset({STATUS_QUEUED}),
     STATUS_CANCELLED: frozenset(),
 }
 
@@ -101,6 +102,12 @@ class QueueTask:
     lease_id: str | None = None
     leased_at: datetime | None = None
     lease_expires_at: datetime | None = None
+    worker_id: str | None = None
+    updated_at: datetime | None = None
+    tenant_id: str = ""
+    user_id: str = ""
+    actor_ref: str = ""
+    execution_lane: str = "background"
 
     def __post_init__(self):
         if self.status not in QUEUE_STATUSES:
@@ -108,3 +115,13 @@ class QueueTask:
         if self.priority not in PRIORITIES:
             raise ValueError(f"Invalid queue priority: {self.priority!r}")
         object.__setattr__(self, "metadata", _meta(self.metadata))
+        object.__setattr__(self, "tenant_id", str(self.tenant_id or ""))
+        object.__setattr__(self, "user_id", str(self.user_id or ""))
+        object.__setattr__(self, "actor_ref", str(self.actor_ref or ""))
+        lane = str(self.execution_lane or "background").strip().lower() or "background"
+        object.__setattr__(self, "execution_lane", lane)
+        if self.updated_at is None:
+            object.__setattr__(self, "updated_at", self.created_at)
+        if self.worker_id is not None:
+            wid = str(self.worker_id).strip()
+            object.__setattr__(self, "worker_id", wid or None)

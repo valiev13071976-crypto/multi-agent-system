@@ -317,9 +317,12 @@ class SideEffectExecutionRecord:
     version: int = 1
     permit_id: str | None = None
     approval_id: str | None = None
+    # P1-SE-TENANT: first-class tenant ownership (empty = legacy unresolved only).
+    tenant_id: str = ""
     metadata: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self):
+        object.__setattr__(self, "tenant_id", str(self.tenant_id or ""))
         object.__setattr__(self, "metadata", _meta(self.metadata))
 
 
@@ -337,6 +340,7 @@ class SideEffectExecutionContext:
     timeout_seconds: float | None = None
     idempotency_key: str | None = None
     resource: str | None = None
+    tenant_id: str | None = None
 
     def stamp(self) -> datetime:
         return self.now or utc_now()

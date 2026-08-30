@@ -105,7 +105,27 @@ def generate_workbook(
 
         buf = io.BytesIO()
         wb.save(buf)
-        return buf.getvalue()
+        data = buf.getvalue()
+        _validate_xlsx_bytes(data)
+        return data
+    except DataIntelError:
+        raise
+    except Exception as exc:
+        raise DataIntelError(EXCEL_GENERATION_FAILED) from exc
+
+
+def _validate_xlsx_bytes(data: bytes) -> None:
+    if not data or len(data) < 4:
+        raise DataIntelError(EXCEL_GENERATION_FAILED)
+    if data[:2] != b"PK":
+        raise DataIntelError(EXCEL_GENERATION_FAILED)
+    try:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(io.BytesIO(data), read_only=True)
+        if not wb.sheetnames:
+            raise DataIntelError(EXCEL_GENERATION_FAILED)
+        wb.close()
     except DataIntelError:
         raise
     except Exception as exc:

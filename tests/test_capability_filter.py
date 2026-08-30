@@ -99,13 +99,20 @@ class CapabilityMatchUnitTests(unittest.TestCase):
 
     def test_search_not_inferred_from_tools(self):
         profile = _profile("openai", tools=True, coding=True)
-        self.assertEqual(match_capability(profile, CAPABILITY_SEARCH), MATCH_UNRESOLVED)
+        self.assertEqual(match_capability(profile, CAPABILITY_SEARCH), MATCH_FAIL)
         self.assertFalse(
             profile_satisfies_requirements(
                 profile,
                 TaskRequirements(required_capabilities=(CAPABILITY_SEARCH,)),
             )
         )
+        capable = build_model_profile(
+            "openai",
+            "openai-m",
+            search_raw="true",
+            tools_raw="false",
+        )
+        self.assertEqual(match_capability(capable, CAPABILITY_SEARCH), MATCH_PASS)
 
     def test_long_context_from_class_and_window(self):
         by_class = _profile("openai", context_class="long")

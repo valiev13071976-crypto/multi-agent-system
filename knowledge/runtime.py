@@ -97,6 +97,7 @@ def build_knowledge_runtime(
     observability=None,
     default_scope: MemoryScope | None = None,
     freeze: bool = True,
+    store_path: str | None = None,
 ) -> KnowledgeRuntime | None:
     cfg = knowledge_config(env)
     if not cfg["enabled"]:
@@ -107,6 +108,14 @@ def build_knowledge_runtime(
     validator = KnowledgeValidator()
     write_policy = KnowledgeWritePolicy()
     rag_builder = RAGContextBuilder()
+    store = None
+    index = None
+    if store_path:
+        from knowledge.index import KnowledgeIndex
+        from knowledge.sqlite_store import SQLiteKnowledgeStore
+
+        store = SQLiteKnowledgeStore(store_path)
+        index = KnowledgeIndex()
     service = KnowledgeService(
         registry,
         access=access,
@@ -117,6 +126,8 @@ def build_knowledge_runtime(
         document_service=document_service,
         tool_gateway=tool_gateway,
         observability=observability,
+        store=store,
+        index=index,
         max_item_bytes=cfg["max_item_bytes"],
         max_results=cfg["max_results"],
         max_context_bytes=cfg["max_context_bytes"],

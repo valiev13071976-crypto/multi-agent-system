@@ -234,7 +234,7 @@ class SideEffectSecurityTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_bf_default_executor_cannot_write(self):
         engine = WorkflowEngine()
-        workflow_id = engine.create("task-se")
+        workflow_id = engine.create("task-se", tenant_id="tenant-se")
         engine.state_manager.plan(workflow_id)
         engine.state_manager.start(workflow_id)
         action = se_action(workflow_id)

@@ -377,7 +377,7 @@ class QueueWiringTests(unittest.IsolatedAsyncioTestCase):
             return StepResult(ok=True, data={})
 
         bundle.platform.register_handler(STEP_TYPE_HANDLER, handler)
-        created = await bundle.create_and_enqueue("demo.linear", "1", task_id="q1")
+        created = await bundle.create_and_enqueue("demo.linear", "1", task_id="q1", tenant_id="wf-test-tenant")
         self.assertEqual(created["status"], STATUS_QUEUED)
         self.assertIsNotNone(created["queue_task_id"])
         task = await bundle.worker.run_once()
@@ -398,6 +398,7 @@ class QueueWiringTests(unittest.IsolatedAsyncioTestCase):
                 schedule_id="s1",
                 workflow_type="demo.linear",
                 version="1",
+                payload={"tenant_id": "wf-test-tenant"},
                 run_at=now - timedelta(seconds=1),
                 interval_seconds=3600,
             )
@@ -506,11 +507,9 @@ class IdempotencyQueueTests(unittest.IsolatedAsyncioTestCase):
         bundle.platform.register_handler(STEP_TYPE_HANDLER, handler)
         key = "idem-exec-1"
         first = await bundle.create_and_enqueue(
-            "demo.linear", "1", task_id="i1", execution_key=key
-        )
+            "demo.linear", "1", task_id="i1", execution_key=key, tenant_id="wf-test-tenant")
         second = await bundle.create_and_enqueue(
-            "demo.linear", "1", task_id="i2", execution_key=key
-        )
+            "demo.linear", "1", task_id="i2", execution_key=key, tenant_id="wf-test-tenant")
         self.assertEqual(first["workflow_id"], second["workflow_id"])
         self.assertEqual(first["queue_task_id"], second["queue_task_id"])
         self.assertEqual(
@@ -541,8 +540,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
 
         bundle1.platform.register_handler(STEP_TYPE_HANDLER, handler)
         created = await bundle1.create_and_enqueue(
-            "demo.linear", "1", task_id="sr1", execution_key="sr-key-1"
-        )
+            "demo.linear", "1", task_id="sr1", execution_key="sr-key-1", tenant_id="wf-test-tenant")
         wid = created["workflow_id"]
         # Complete first step, then leave queued mid-flight
         bundle1.state_manager.start(wid)
@@ -579,8 +577,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
             STEP_TYPE_HANDLER, lambda ctx: StepResult(ok=True, data={})
         )
         created = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="retry-due-1"
-        )
+            "demo.linear", "1", execution_key="retry-due-1", tenant_id="wf-test-tenant")
         wid = created["workflow_id"]
         bundle.state_manager.mark_retry_wait(
             wid, next_retry_at=utc_now() - timedelta(seconds=1), error_code="timeout"
@@ -600,8 +597,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
             STEP_TYPE_HANDLER, lambda ctx: StepResult(ok=True, data={})
         )
         created = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="retry-future-1"
-        )
+            "demo.linear", "1", execution_key="retry-future-1", tenant_id="wf-test-tenant")
         wid = created["workflow_id"]
         bundle.state_manager.mark_retry_wait(
             wid, next_retry_at=utc_now() + timedelta(hours=1), error_code="timeout"
@@ -620,8 +616,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
         bundle = build_workflow_runtime(state_manager=sm)
         bundle.definitions.register(linear_demo_definition())
         created = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="wait-1"
-        )
+            "demo.linear", "1", execution_key="wait-1", tenant_id="wf-test-tenant")
         wid = created["workflow_id"]
         bundle.state_manager.start(wid)
         bundle.state_manager.start_step(wid, "a")
@@ -642,8 +637,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
         bundle = build_workflow_runtime(state_manager=sm)
         bundle.definitions.register(linear_demo_definition())
         created = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="term-1"
-        )
+            "demo.linear", "1", execution_key="term-1", tenant_id="wf-test-tenant")
         wid = created["workflow_id"]
         bundle.state_manager.fail_workflow(wid, "boom")
         bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
@@ -659,8 +653,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
         bundle = build_workflow_runtime(state_manager=sm)
         bundle.definitions.register(linear_demo_definition())
         created = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="dup-startup-1"
-        )
+            "demo.linear", "1", execution_key="dup-startup-1", tenant_id="wf-test-tenant")
         # Drain original queue object so only recovery matters
         bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
         r1 = bundle2.recover_and_reenqueue_persisted()
@@ -672,7 +665,7 @@ class StartupRecoveryTests(unittest.IsolatedAsyncioTestCase):
         tasks = list(bundle2.queue.store.list_all())
         self.assertEqual(
             tasks[0].execution_key,
-            scope_execution_key(DEFAULT_LEGACY_TENANT, "dup-startup-1"),
+            scope_execution_key("wf-test-tenant", "dup-startup-1"),
         )
 
 
@@ -684,11 +677,9 @@ class WorkflowIdempotencyTests(unittest.IsolatedAsyncioTestCase):
             STEP_TYPE_HANDLER, lambda ctx: StepResult(ok=True, data={})
         )
         a = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="wf-idem-1"
-        )
+            "demo.linear", "1", execution_key="wf-idem-1", tenant_id="wf-test-tenant")
         b = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="wf-idem-1"
-        )
+            "demo.linear", "1", execution_key="wf-idem-1", tenant_id="wf-test-tenant")
         self.assertEqual(a["workflow_id"], b["workflow_id"])
         self.assertEqual(a["queue_task_id"], b["queue_task_id"])
         self.assertEqual(len(list(bundle.state_manager._store.list_all())), 1)
@@ -700,13 +691,11 @@ class WorkflowIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         bundle = build_workflow_runtime(state_manager=sm)
         bundle.definitions.register(linear_demo_definition())
         first = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="wf-idem-restart"
-        )
+            "demo.linear", "1", execution_key="wf-idem-restart", tenant_id="wf-test-tenant")
         bundle2 = build_workflow_runtime(state_manager=StateManager(store=store, step_names=()))
         bundle2.definitions.register(linear_demo_definition())
         second = await bundle2.create_and_enqueue(
-            "demo.linear", "1", execution_key="wf-idem-restart"
-        )
+            "demo.linear", "1", execution_key="wf-idem-restart", tenant_id="wf-test-tenant")
         self.assertEqual(first["workflow_id"], second["workflow_id"])
         self.assertEqual(len(list(store.list_all())), 1)
 
@@ -714,11 +703,9 @@ class WorkflowIdempotencyTests(unittest.IsolatedAsyncioTestCase):
         bundle = build_workflow_runtime()
         bundle.definitions.register(linear_demo_definition())
         a = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="wf-a"
-        )
+            "demo.linear", "1", execution_key="wf-a", tenant_id="wf-test-tenant")
         b = await bundle.create_and_enqueue(
-            "demo.linear", "1", execution_key="wf-b"
-        )
+            "demo.linear", "1", execution_key="wf-b", tenant_id="wf-test-tenant")
         self.assertNotEqual(a["workflow_id"], b["workflow_id"])
         self.assertEqual(len(list(bundle.state_manager._store.list_all())), 2)
 

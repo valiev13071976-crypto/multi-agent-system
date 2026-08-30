@@ -68,9 +68,9 @@ def ctx(value="ok"):
     return SideEffectExecutionContext(payload={"value": value}, now=T0)
 
 
-def runtime(trust=TOOL_TRUST_INTERNAL_SAFE, reversible=True):
+def runtime(trust=TOOL_TRUST_INTERNAL_SAFE, reversible=True, *, tenant_id="tenant-se"):
     engine = WorkflowEngine()
-    workflow_id = engine.create("task-se")
+    workflow_id = engine.create("task-se", tenant_id=tenant_id)
     engine.state_manager.plan(workflow_id)
     engine.state_manager.start(workflow_id)
     adapter = InMemoryReversibleWriteAdapter(trust_level=trust, reversible=reversible)
@@ -182,9 +182,10 @@ def github_runtime(
     config=None,
     transport=None,
     timeout_seconds=15.0,
+    tenant_id="tenant-se",
 ):
     engine = WorkflowEngine()
-    workflow_id = engine.create("task-se")
+    workflow_id = engine.create("task-se", tenant_id=tenant_id)
     engine.state_manager.plan(workflow_id)
     engine.state_manager.start(workflow_id)
     fake = transport or FakeGitHubTransport()

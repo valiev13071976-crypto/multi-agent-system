@@ -33,7 +33,7 @@ class WorkflowRuntimeSqliteStoreTests(unittest.TestCase):
         self.tmp.cleanup()
 
     def test_waiting_approval_persists(self):
-        wf = self.manager.create(task_id="t1")
+        wf = self.manager.create(task_id="t1", tenant_id="tenant-sqlite")
         self.manager.plan(wf.workflow_id)
         self.manager.start(wf.workflow_id)
         self.manager.wait_for_approval(wf.workflow_id)
@@ -47,6 +47,7 @@ class WorkflowRuntimeSqliteStoreTests(unittest.TestCase):
         store2 = PersistentWorkflowRuntimeStore(conn2)
         loaded = store2.get(wf.workflow_id)
         self.assertEqual(loaded.status, STATUS_WAITING_APPROVAL)
+        self.assertEqual(loaded.tenant_id, "tenant-sqlite")
         point = store2.get_checkpoint(wf.workflow_id)
         self.assertEqual(point.payload.get("approval_id"), "ap-1")
         waiting = store2.list_waiting_approval()
@@ -54,7 +55,7 @@ class WorkflowRuntimeSqliteStoreTests(unittest.TestCase):
         conn2.close()
 
     def test_running_and_terminal_persist(self):
-        wf = self.manager.create(task_id="t2")
+        wf = self.manager.create(task_id="t2", tenant_id="tenant-sqlite")
         self.manager.plan(wf.workflow_id)
         self.manager.start(wf.workflow_id)
         self.assertEqual(self.store.get(wf.workflow_id).status, STATUS_RUNNING)
@@ -62,7 +63,7 @@ class WorkflowRuntimeSqliteStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(wf.workflow_id).status, STATUS_COMPLETED)
 
     def test_terminal_not_reopened(self):
-        wf = self.manager.create(task_id="t3")
+        wf = self.manager.create(task_id="t3", tenant_id="tenant-sqlite")
         self.manager.plan(wf.workflow_id)
         self.manager.start(wf.workflow_id)
         self.manager.fail_workflow(wf.workflow_id, "boom")
@@ -72,12 +73,18 @@ class WorkflowRuntimeSqliteStoreTests(unittest.TestCase):
         self.assertEqual(self.store.get(wf.workflow_id).status, STATUS_FAILED)
 
     def test_version_conflict(self):
-        wf = self.manager.create(task_id="t4")
+        wf = self.manager.create(task_id="t4", tenant_id="tenant-sqlite")
         state = self.store.get(wf.workflow_id)
         from dataclasses import replace
 
         with self.assertRaises(WorkflowConflictError):
             self.store.save(replace(state, version=state.version + 2, status=STATUS_RUNNING))
+
+    def test_create_without_tenant_fail_closed(self):
+        from security.tenant import MissingTenantError
+
+        with self.assertRaises(MissingTenantError):
+            self.manager.create(task_id="t-no-tenant")
 
 
 if __name__ == "__main__":

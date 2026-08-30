@@ -56,7 +56,7 @@ class ProductionPersistenceRestartTests(unittest.IsolatedAsyncioTestCase):
             runtime_a = _compose(path)
             engine_a = runtime_a.workflow_engine
             _install_fake_adapter(runtime_a)
-            workflow_id = engine_a.create("task-prod")
+            workflow_id = engine_a.create("task-prod", tenant_id="tenant-test")
             engine_a.state_manager.plan(workflow_id)
             engine_a.state_manager.start(workflow_id)
             action = se_action(
@@ -159,7 +159,7 @@ class ProductionPersistenceRestartTests(unittest.IsolatedAsyncioTestCase):
             runtime_a = _compose(path)
             engine_a = runtime_a.workflow_engine
             adapter_a = _install_fake_adapter(runtime_a)
-            workflow_id = engine_a.create("task-consume")
+            workflow_id = engine_a.create("task-consume", tenant_id="tenant-test")
             engine_a.state_manager.plan(workflow_id)
             engine_a.state_manager.start(workflow_id)
             action = se_action(

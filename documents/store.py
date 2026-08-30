@@ -66,6 +66,21 @@ class DocumentStore:
     def clear_extract_partials(self, document_id: str) -> None:
         return None
 
+    def save_processing_job(self, job) -> object:
+        return job
+
+    def get_processing_job(self, job_id: str, *, tenant_id: str | None = None):
+        return None
+
+    def list_processing_jobs(self, *, tenant_id: str, document_id: str | None = None):
+        return ()
+
+    def save_document_version(self, version) -> object:
+        return version
+
+    def list_document_versions(self, document_id: str, *, tenant_id: str | None = None):
+        return ()
+
     def close(self) -> None:
         return None
 
@@ -108,6 +123,8 @@ class InMemoryDocumentStore(DocumentStore):
         self._tags: dict[str, tuple[str, ...]] = {}
         self._blobs: dict[str, bytes] = {}
         self._partials: dict[str, dict[int, dict]] = {}
+        self._jobs: dict[str, object] = {}
+        self._versions: dict[str, list] = {}
         self.available = True
         self.connection_mode = "memory"
         self.persistence_backend = "memory"
@@ -227,3 +244,50 @@ class InMemoryDocumentStore(DocumentStore):
     def clear_extract_partials(self, document_id: str) -> None:
         with self._lock:
             self._partials.pop(document_id, None)
+
+    def save_processing_job(self, job):
+        if not self.available:
+            raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+        with self._lock:
+            self._jobs[job.job_id] = job
+            return job
+
+    def get_processing_job(self, job_id: str, *, tenant_id: str | None = None):
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                return None
+            if tenant_id is not None:
+                from security.tenant import tenants_match
+
+                if not tenants_match(getattr(job, "tenant_id", None), tenant_id):
+                    return None
+            return job
+
+    def list_processing_jobs(self, *, tenant_id: str, document_id: str | None = None):
+        from security.tenant import normalize_tenant_id, tenants_match
+
+        tid = normalize_tenant_id(tenant_id)
+        with self._lock:
+            rows = []
+            for job in self._jobs.values():
+                if not tenants_match(getattr(job, "tenant_id", None), tid):
+                    continue
+                if document_id and getattr(job, "document_id", None) != document_id:
+                    continue
+                rows.append(job)
+            return tuple(sorted(rows, key=lambda j: getattr(j, "job_id", "")))
+
+    def save_document_version(self, version):
+        if not self.available:
+            raise DocumentError(DOCUMENT_STORE_UNAVAILABLE)
+        with self._lock:
+            bucket = self._versions.setdefault(version.document_id, [])
+            bucket = [v for v in bucket if getattr(v, "version_id", None) != version.version_id]
+            bucket.append(version)
+            self._versions[version.document_id] = bucket
+            return version
+
+    def list_document_versions(self, document_id: str, *, tenant_id: str | None = None):
+        with self._lock:
+            return tuple(self._versions.get(document_id, ()))

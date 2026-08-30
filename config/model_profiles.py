@@ -53,6 +53,7 @@ def load_model_profiles(records: dict) -> dict[str, ModelProfile]:
             reasoning_raw=os.getenv(f"{prefix}_SUPPORTS_REASONING"),
             multilingual_raw=os.getenv(f"{prefix}_SUPPORTS_MULTILINGUAL"),
             coding_raw=os.getenv(f"{prefix}_SUPPORTS_CODING"),
+            search_raw=os.getenv(f"{prefix}_SUPPORTS_SEARCH"),
         )
     return profiles
 

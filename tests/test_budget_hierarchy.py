@@ -2,7 +2,7 @@ from decimal import Decimal
 import unittest
 
 from finops.budget_guard import BudgetGuard
-from finops.budget_models import DECISION_TERMINATE, BudgetPolicy, SCOPE_GLOBAL, SCOPE_PROVIDER
+from finops.budget_models import DECISION_SKIP_MODEL, BudgetPolicy, SCOPE_GLOBAL, SCOPE_PROVIDER
 from finops.models import BudgetLimits, PriceQuote
 from finops.service import FinOpsService
 
@@ -24,7 +24,8 @@ class BudgetHierarchyTests(unittest.TestCase):
         d = guard.evaluate(
             task_id="t", provider="openai", model="m", estimated_cost=Decimal("3")
         )
-        self.assertEqual(d.decision, DECISION_TERMINATE)
+        # Candidate exceeds provider-scope remaining → SKIP_MODEL (not global TERMINATE).
+        self.assertEqual(d.decision, DECISION_SKIP_MODEL)
         self.assertTrue(any("provider" in r for r in d.scope_reasons))
 
 

@@ -28,7 +28,7 @@ class BudgetObservabilityTests(unittest.TestCase):
         guard.evaluate(task_id="t", provider="openai", model="m", estimated_cost=Decimal("5"))
         types = {e.event_type for e in obs.sink.list_events()}
         self.assertIn("budget.evaluated", types)
-        self.assertGreaterEqual(obs.metrics.budget_terminate_total, 1)
+        self.assertGreaterEqual(obs.metrics.budget_skip_model_total, 1)
 
 
 if __name__ == "__main__":

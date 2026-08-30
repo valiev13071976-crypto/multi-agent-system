@@ -10,8 +10,15 @@ from pathlib import Path
 
 from acquisition.errors import AcquisitionError
 from acquisition.models import (
+    AcquiredResource,
+    AcquisitionJob,
     ChangeEvent,
+    CrawlCheckpoint,
+    DatasetResult,
+    FrontierEntry,
     FreshnessPolicy,
+    IngestionBatchResult,
+    NormalizedRecord,
     ParsedRecord,
     RawArtifact,
     SourceDescriptor,
@@ -19,9 +26,9 @@ from acquisition.models import (
 from acquisition.store import AcquisitionStore
 from autonomy.models import sanitize_metadata
 from security.config import DEFAULT_LEGACY_TENANT
-from security.tenant import normalize_tenant_id, scope_tenant_ref
+from security.tenant import MissingTenantError, normalize_tenant_id, require_tenant_id, scope_tenant_ref
 
-ACQUISITION_SCHEMA_VERSION = 1
+ACQUISITION_SCHEMA_VERSION = 2
 MAX_STORED_CONTENT_CHARS = 262_144  # 256 KiB — prefer content_ref/document_id for larger
 
 DDL = """
@@ -115,6 +122,153 @@ CREATE INDEX IF NOT EXISTS idx_acq_changes_record
 ON acquisition_changes(tenant_id, record_id, observed_at);
 """
 
+# Additive v2 tables — jobs, frontier, checkpoints, resources, normalized, datasets, ingest
+DDL_V2 = """
+CREATE TABLE IF NOT EXISTS acquisition_jobs (
+    job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    actor_id TEXT NOT NULL DEFAULT '',
+    source_id TEXT NOT NULL,
+    mode TEXT NOT NULL,
+    workload_class TEXT NOT NULL,
+    status TEXT NOT NULL,
+    workflow_id TEXT NOT NULL DEFAULT '',
+    trusted_job_type TEXT NOT NULL DEFAULT '',
+    execution_lane TEXT NOT NULL DEFAULT '',
+    policy_version TEXT NOT NULL DEFAULT '',
+    parser_version TEXT NOT NULL DEFAULT '',
+    normalizer_version TEXT NOT NULL DEFAULT '',
+    dedupe_version TEXT NOT NULL DEFAULT '',
+    ingestion_version TEXT NOT NULL DEFAULT '',
+    scrape_profile_id TEXT NOT NULL DEFAULT '',
+    scrape_profile_version TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    started_at TEXT,
+    completed_at TEXT,
+    cancel_requested INTEGER NOT NULL DEFAULT 0,
+    error_code TEXT NOT NULL DEFAULT '',
+    counters_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_acq_jobs_tenant_status
+ON acquisition_jobs(tenant_id, status, created_at);
+
+CREATE TABLE IF NOT EXISTS acquisition_frontier (
+    entry_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    status TEXT NOT NULL,
+    depth INTEGER NOT NULL DEFAULT 0,
+    parent_url TEXT NOT NULL DEFAULT '',
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    claim_token TEXT NOT NULL DEFAULT '',
+    error_code TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acq_frontier_job_status
+ON acquisition_frontier(tenant_id, job_id, status, depth);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_acq_frontier_canon
+ON acquisition_frontier(tenant_id, job_id, canonical_url);
+
+CREATE TABLE IF NOT EXISTS acquisition_checkpoints (
+    job_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    visited_count INTEGER NOT NULL DEFAULT 0,
+    frontier_pending INTEGER NOT NULL DEFAULT 0,
+    pages_fetched INTEGER NOT NULL DEFAULT 0,
+    pages_failed INTEGER NOT NULL DEFAULT 0,
+    pages_skipped INTEGER NOT NULL DEFAULT 0,
+    policy_version TEXT NOT NULL DEFAULT '',
+    parser_version TEXT NOT NULL DEFAULT '',
+    normalizer_version TEXT NOT NULL DEFAULT '',
+    dedupe_version TEXT NOT NULL DEFAULT '',
+    updated_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+
+CREATE TABLE IF NOT EXISTS acquisition_resources (
+    resource_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    url TEXT NOT NULL,
+    status TEXT NOT NULL,
+    content_type TEXT NOT NULL DEFAULT '',
+    content_length INTEGER NOT NULL DEFAULT 0,
+    content_hash TEXT NOT NULL DEFAULT '',
+    raw_artifact_ref TEXT NOT NULL DEFAULT '',
+    canonical_url TEXT NOT NULL DEFAULT '',
+    depth INTEGER NOT NULL DEFAULT 0,
+    parent_url TEXT NOT NULL DEFAULT '',
+    extraction_status TEXT NOT NULL DEFAULT 'ok',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    metadata_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acq_resources_job
+ON acquisition_resources(tenant_id, job_id, status);
+
+CREATE TABLE IF NOT EXISTS acquisition_normalized_records (
+    record_id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    tenant_id TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    resource_id TEXT NOT NULL DEFAULT '',
+    normalizer_version TEXT NOT NULL,
+    fields_json TEXT NOT NULL DEFAULT '{}',
+    field_status_json TEXT NOT NULL DEFAULT '{}',
+    fingerprint TEXT NOT NULL,
+    warnings_json TEXT NOT NULL DEFAULT '[]',
+    errors_json TEXT NOT NULL DEFAULT '[]',
+    provenance_json TEXT NOT NULL DEFAULT '{}',
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_acq_norm_tenant_fp
+ON acquisition_normalized_records(tenant_id, fingerprint);
+CREATE INDEX IF NOT EXISTS idx_acq_norm_job
+ON acquisition_normalized_records(tenant_id, job_id);
+
+CREATE TABLE IF NOT EXISTS acquisition_datasets (
+    dataset_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    name TEXT NOT NULL,
+    version TEXT NOT NULL,
+    record_count INTEGER NOT NULL DEFAULT 0,
+    fingerprint TEXT NOT NULL DEFAULT '',
+    source_ids_json TEXT NOT NULL DEFAULT '[]',
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_acq_datasets_tenant
+ON acquisition_datasets(tenant_id, job_id);
+
+CREATE TABLE IF NOT EXISTS acquisition_ingest_progress (
+    batch_id TEXT PRIMARY KEY,
+    tenant_id TEXT NOT NULL,
+    job_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    accepted INTEGER NOT NULL DEFAULT 0,
+    rejected INTEGER NOT NULL DEFAULT 0,
+    duplicate INTEGER NOT NULL DEFAULT 0,
+    failed INTEGER NOT NULL DEFAULT 0,
+    reason_codes_json TEXT NOT NULL DEFAULT '[]',
+    idempotency_key TEXT NOT NULL DEFAULT '',
+    created_at TEXT NOT NULL,
+    metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_acq_ingest_idem
+ON acquisition_ingest_progress(tenant_id, idempotency_key)
+WHERE idempotency_key != '';
+CREATE INDEX IF NOT EXISTS idx_acq_ingest_job
+ON acquisition_ingest_progress(tenant_id, job_id);
+"""
+
 
 class AcquisitionStoreUnavailableError(AcquisitionError):
     def __init__(self, error_code: str = "acquisition_store_unavailable"):
@@ -172,7 +326,13 @@ def _natural_key(fields: dict) -> str:
 
 
 def _tenant(tenant_id: str | None) -> str:
+    """Legacy-compatible tenant for v1 tables (sources/artifacts/records/changes)."""
     return scope_tenant_ref(normalize_tenant_id(tenant_id) or DEFAULT_LEGACY_TENANT)
+
+
+def _tenant_required(tenant_id: str | None) -> str:
+    """Fail-closed tenant for v2 objects (jobs/frontier/resources/datasets)."""
+    return require_tenant_id(tenant_id)
 
 
 class SqliteAcquisitionStore(AcquisitionStore):
@@ -223,6 +383,7 @@ class SqliteAcquisitionStore(AcquisitionStore):
             conn = self._connect()
             try:
                 conn.executescript(DDL)
+                conn.executescript(DDL_V2)
                 # Legacy empty tenant_id → default
                 conn.execute(
                     """
@@ -681,3 +842,443 @@ class SqliteAcquisitionStore(AcquisitionStore):
                 )
             )
         return tuple(out)
+
+    # --- v2 jobs ---
+    def save_job(self, job: AcquisitionJob) -> AcquisitionJob:
+        tid = _tenant_required(job.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_jobs(
+                    job_id, tenant_id, actor_id, source_id, mode, workload_class, status,
+                    workflow_id, trusted_job_type, execution_lane, policy_version, parser_version,
+                    normalizer_version, dedupe_version, ingestion_version, scrape_profile_id,
+                    scrape_profile_version, created_at, updated_at, started_at, completed_at,
+                    cancel_requested, error_code, counters_json, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    job.job_id,
+                    tid,
+                    job.actor_id,
+                    job.source_id,
+                    job.mode,
+                    job.workload_class,
+                    job.status,
+                    job.workflow_id,
+                    job.trusted_job_type,
+                    job.execution_lane,
+                    job.policy_version,
+                    job.parser_version,
+                    job.normalizer_version,
+                    job.dedupe_version,
+                    job.ingestion_version,
+                    job.scrape_profile_id,
+                    job.scrape_profile_version,
+                    _dt_to_db(job.created_at),
+                    _dt_to_db(job.updated_at),
+                    _dt_to_db(job.started_at),
+                    _dt_to_db(job.completed_at),
+                    1 if job.cancel_requested else 0,
+                    job.error_code,
+                    _json_dumps(dict(job.counters)),
+                    _json_dumps(dict(job.metadata)),
+                ),
+            )
+            self._commit(conn)
+        return job
+
+    def _row_to_job(self, row) -> AcquisitionJob:
+        return AcquisitionJob(
+            job_id=row["job_id"],
+            tenant_id=row["tenant_id"],
+            actor_id=row["actor_id"] or "",
+            source_id=row["source_id"],
+            mode=row["mode"],
+            workload_class=row["workload_class"],
+            status=row["status"],
+            workflow_id=row["workflow_id"] or "",
+            trusted_job_type=row["trusted_job_type"] or "",
+            execution_lane=row["execution_lane"] or "",
+            policy_version=row["policy_version"] or "",
+            parser_version=row["parser_version"] or "",
+            normalizer_version=row["normalizer_version"] or "",
+            dedupe_version=row["dedupe_version"] or "",
+            ingestion_version=row["ingestion_version"] or "",
+            scrape_profile_id=row["scrape_profile_id"] or "",
+            scrape_profile_version=row["scrape_profile_version"] or "",
+            created_at=_dt_from_db(row["created_at"]) or datetime.now(timezone.utc),
+            updated_at=_dt_from_db(row["updated_at"]) or datetime.now(timezone.utc),
+            started_at=_dt_from_db(row["started_at"]),
+            completed_at=_dt_from_db(row["completed_at"]),
+            cancel_requested=bool(row["cancel_requested"]),
+            error_code=row["error_code"] or "",
+            counters=_json_loads(row["counters_json"], {}),
+            metadata=_json_loads(row["metadata_json"], {}),
+        )
+
+    def get_job(self, job_id: str, *, tenant_id: str) -> AcquisitionJob | None:
+        tid = _tenant_required(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM acquisition_jobs WHERE job_id=? AND tenant_id=?",
+                (job_id, tid),
+            ).fetchone()
+        if row is None:
+            return None
+        return self._row_to_job(row)
+
+    def list_jobs(self, *, tenant_id: str, status: str | None = None) -> tuple[AcquisitionJob, ...]:
+        tid = _tenant_required(tenant_id)
+        sql = "SELECT * FROM acquisition_jobs WHERE tenant_id=?"
+        params: list = [tid]
+        if status:
+            sql += " AND status=?"
+            params.append(status)
+        sql += " ORDER BY created_at"
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(sql, params).fetchall()
+        return tuple(self._row_to_job(r) for r in rows)
+
+    # --- frontier ---
+    def save_frontier_entry(self, entry: FrontierEntry) -> FrontierEntry:
+        tid = _tenant_required(entry.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_frontier(
+                    entry_id, job_id, tenant_id, url, canonical_url, status, depth,
+                    parent_url, retry_count, claim_token, error_code, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    entry.entry_id,
+                    entry.job_id,
+                    tid,
+                    entry.url,
+                    entry.canonical_url,
+                    entry.status,
+                    int(entry.depth),
+                    entry.parent_url,
+                    int(entry.retry_count),
+                    entry.claim_token,
+                    entry.error_code,
+                    _dt_to_db(entry.created_at),
+                    _dt_to_db(entry.updated_at),
+                ),
+            )
+            self._commit(conn)
+        return entry
+
+    def list_frontier(
+        self,
+        *,
+        job_id: str,
+        tenant_id: str,
+        statuses: tuple[str, ...] | None = None,
+    ) -> tuple[FrontierEntry, ...]:
+        tid = _tenant_required(tenant_id)
+        sql = "SELECT * FROM acquisition_frontier WHERE tenant_id=? AND job_id=?"
+        params: list = [tid, job_id]
+        if statuses:
+            placeholders = ",".join("?" for _ in statuses)
+            sql += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        sql += " ORDER BY depth, created_at"
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(sql, params).fetchall()
+        out = []
+        for row in rows:
+            out.append(
+                FrontierEntry(
+                    entry_id=row["entry_id"],
+                    job_id=row["job_id"],
+                    tenant_id=row["tenant_id"],
+                    url=row["url"],
+                    canonical_url=row["canonical_url"],
+                    status=row["status"],
+                    depth=int(row["depth"] or 0),
+                    parent_url=row["parent_url"] or "",
+                    retry_count=int(row["retry_count"] or 0),
+                    claim_token=row["claim_token"] or "",
+                    error_code=row["error_code"] or "",
+                    created_at=_dt_from_db(row["created_at"]) or datetime.now(timezone.utc),
+                    updated_at=_dt_from_db(row["updated_at"]) or datetime.now(timezone.utc),
+                )
+            )
+        return tuple(out)
+
+    # --- checkpoints ---
+    def save_checkpoint(self, checkpoint: CrawlCheckpoint) -> CrawlCheckpoint:
+        tid = _tenant_required(checkpoint.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_checkpoints(
+                    job_id, tenant_id, visited_count, frontier_pending, pages_fetched,
+                    pages_failed, pages_skipped, policy_version, parser_version,
+                    normalizer_version, dedupe_version, updated_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checkpoint.job_id,
+                    tid,
+                    int(checkpoint.visited_count),
+                    int(checkpoint.frontier_pending),
+                    int(checkpoint.pages_fetched),
+                    int(checkpoint.pages_failed),
+                    int(checkpoint.pages_skipped),
+                    checkpoint.policy_version,
+                    checkpoint.parser_version,
+                    checkpoint.normalizer_version,
+                    checkpoint.dedupe_version,
+                    _dt_to_db(checkpoint.updated_at),
+                    _json_dumps(dict(checkpoint.metadata)),
+                ),
+            )
+            self._commit(conn)
+        return checkpoint
+
+    def get_checkpoint(self, job_id: str, *, tenant_id: str) -> CrawlCheckpoint | None:
+        tid = _tenant_required(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM acquisition_checkpoints WHERE job_id=? AND tenant_id=?",
+                (job_id, tid),
+            ).fetchone()
+        if row is None:
+            return None
+        return CrawlCheckpoint(
+            job_id=row["job_id"],
+            tenant_id=row["tenant_id"],
+            visited_count=int(row["visited_count"] or 0),
+            frontier_pending=int(row["frontier_pending"] or 0),
+            pages_fetched=int(row["pages_fetched"] or 0),
+            pages_failed=int(row["pages_failed"] or 0),
+            pages_skipped=int(row["pages_skipped"] or 0),
+            policy_version=row["policy_version"] or "",
+            parser_version=row["parser_version"] or "",
+            normalizer_version=row["normalizer_version"] or "",
+            dedupe_version=row["dedupe_version"] or "",
+            updated_at=_dt_from_db(row["updated_at"]) or datetime.now(timezone.utc),
+            metadata=_json_loads(row["metadata_json"], {}),
+        )
+
+    # --- resources ---
+    def save_resource(self, resource: AcquiredResource) -> AcquiredResource:
+        tid = _tenant_required(resource.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_resources(
+                    resource_id, job_id, tenant_id, source_id, url, status, content_type,
+                    content_length, content_hash, raw_artifact_ref, canonical_url, depth,
+                    parent_url, extraction_status, provenance_json, metadata_json,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    resource.resource_id,
+                    resource.job_id,
+                    tid,
+                    resource.source_id,
+                    resource.url,
+                    resource.status,
+                    resource.content_type,
+                    int(resource.content_length),
+                    resource.content_hash,
+                    resource.raw_artifact_ref,
+                    resource.canonical_url,
+                    int(resource.depth),
+                    resource.parent_url,
+                    resource.extraction_status,
+                    _json_dumps(dict(resource.provenance)),
+                    _json_dumps(dict(resource.metadata)),
+                    _dt_to_db(resource.created_at),
+                    _dt_to_db(resource.updated_at),
+                ),
+            )
+            self._commit(conn)
+        return resource
+
+    def list_resources(
+        self, *, job_id: str, tenant_id: str
+    ) -> tuple[AcquiredResource, ...]:
+        tid = _tenant_required(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            rows = conn.execute(
+                """
+                SELECT * FROM acquisition_resources
+                WHERE tenant_id=? AND job_id=?
+                ORDER BY created_at
+                """,
+                (tid, job_id),
+            ).fetchall()
+        out = []
+        for row in rows:
+            out.append(
+                AcquiredResource(
+                    resource_id=row["resource_id"],
+                    job_id=row["job_id"],
+                    tenant_id=row["tenant_id"],
+                    source_id=row["source_id"],
+                    url=row["url"],
+                    status=row["status"],
+                    content_type=row["content_type"] or "",
+                    content_length=int(row["content_length"] or 0),
+                    content_hash=row["content_hash"] or "",
+                    raw_artifact_ref=row["raw_artifact_ref"] or "",
+                    canonical_url=row["canonical_url"] or "",
+                    depth=int(row["depth"] or 0),
+                    parent_url=row["parent_url"] or "",
+                    extraction_status=row["extraction_status"] or "ok",
+                    provenance=_json_loads(row["provenance_json"], {}),
+                    metadata=_json_loads(row["metadata_json"], {}),
+                    created_at=_dt_from_db(row["created_at"]) or datetime.now(timezone.utc),
+                    updated_at=_dt_from_db(row["updated_at"]) or datetime.now(timezone.utc),
+                )
+            )
+        return tuple(out)
+
+    def save_normalized_record(self, record: NormalizedRecord) -> NormalizedRecord:
+        tid = _tenant_required(record.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_normalized_records(
+                    record_id, job_id, tenant_id, source_id, resource_id, normalizer_version,
+                    fields_json, field_status_json, fingerprint, warnings_json, errors_json,
+                    provenance_json, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    record.record_id,
+                    record.job_id,
+                    tid,
+                    record.source_id,
+                    record.resource_id,
+                    record.normalizer_version,
+                    _json_dumps(dict(record.fields)),
+                    _json_dumps(dict(record.field_status)),
+                    record.fingerprint,
+                    _json_dumps(list(record.warnings)),
+                    _json_dumps(list(record.errors)),
+                    _json_dumps(dict(record.provenance)),
+                    _dt_to_db(record.created_at),
+                ),
+            )
+            self._commit(conn)
+        return record
+
+    def save_dataset(self, dataset: DatasetResult) -> DatasetResult:
+        tid = _tenant_required(dataset.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_datasets(
+                    dataset_id, tenant_id, job_id, name, version, record_count, fingerprint,
+                    source_ids_json, created_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    dataset.dataset_id,
+                    tid,
+                    dataset.job_id,
+                    dataset.name,
+                    dataset.version,
+                    int(dataset.record_count),
+                    dataset.fingerprint,
+                    _json_dumps(list(dataset.source_ids)),
+                    _dt_to_db(dataset.created_at),
+                    _json_dumps(dict(dataset.metadata)),
+                ),
+            )
+            self._commit(conn)
+        return dataset
+
+    def get_dataset(self, dataset_id: str, *, tenant_id: str) -> DatasetResult | None:
+        tid = _tenant_required(tenant_id)
+        with self._lock:
+            conn = self._connect()
+            row = conn.execute(
+                "SELECT * FROM acquisition_datasets WHERE dataset_id=? AND tenant_id=?",
+                (dataset_id, tid),
+            ).fetchone()
+        if row is None:
+            return None
+        sources = _json_loads(row["source_ids_json"], [])
+        return DatasetResult(
+            dataset_id=row["dataset_id"],
+            tenant_id=row["tenant_id"],
+            job_id=row["job_id"],
+            name=row["name"],
+            version=row["version"],
+            record_count=int(row["record_count"] or 0),
+            fingerprint=row["fingerprint"] or "",
+            source_ids=tuple(sources or ()),
+            created_at=_dt_from_db(row["created_at"]) or datetime.now(timezone.utc),
+            metadata=_json_loads(row["metadata_json"], {}),
+        )
+
+    def save_ingest_batch(self, batch: IngestionBatchResult) -> IngestionBatchResult:
+        tid = _tenant_required(batch.tenant_id)
+        with self._lock:
+            conn = self._connect()
+            if batch.idempotency_key:
+                existing = conn.execute(
+                    """
+                    SELECT * FROM acquisition_ingest_progress
+                    WHERE tenant_id=? AND idempotency_key=?
+                    """,
+                    (tid, batch.idempotency_key),
+                ).fetchone()
+                if existing is not None:
+                    return IngestionBatchResult(
+                        batch_id=existing["batch_id"],
+                        tenant_id=existing["tenant_id"],
+                        job_id=existing["job_id"],
+                        dataset_id=existing["dataset_id"],
+                        accepted=int(existing["accepted"] or 0),
+                        rejected=int(existing["rejected"] or 0),
+                        duplicate=int(existing["duplicate"] or 0),
+                        failed=int(existing["failed"] or 0),
+                        reason_codes=tuple(_json_loads(existing["reason_codes_json"], []) or ()),
+                        idempotency_key=existing["idempotency_key"] or "",
+                        created_at=_dt_from_db(existing["created_at"]) or datetime.now(timezone.utc),
+                        metadata=_json_loads(existing["metadata_json"], {}),
+                    )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO acquisition_ingest_progress(
+                    batch_id, tenant_id, job_id, dataset_id, accepted, rejected, duplicate,
+                    failed, reason_codes_json, idempotency_key, created_at, metadata_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    batch.batch_id,
+                    tid,
+                    batch.job_id,
+                    batch.dataset_id,
+                    int(batch.accepted),
+                    int(batch.rejected),
+                    int(batch.duplicate),
+                    int(batch.failed),
+                    _json_dumps(list(batch.reason_codes)),
+                    batch.idempotency_key,
+                    _dt_to_db(batch.created_at),
+                    _json_dumps(dict(batch.metadata)),
+                ),
+            )
+            self._commit(conn)
+        return batch

@@ -62,6 +62,7 @@ class SideEffectPersistenceSecurityTests(unittest.TestCase):
                     completed_at=T0,
                     outcome="known_success",
                     rollback_status=ROLLBACK_NONE,
+                    tenant_id="tenant-se",
                     metadata={"note": "ok"},
                 )
             )
@@ -155,6 +156,7 @@ class SideEffectPersistenceFailureTests(unittest.IsolatedAsyncioTestCase):
                     completed_at=None,
                     outcome=OUTCOME_KNOWN_FAILURE,
                     rollback_status=ROLLBACK_NONE,
+                    tenant_id="tenant-se",
                 )
             )
             scan = scan_recovery_candidates(

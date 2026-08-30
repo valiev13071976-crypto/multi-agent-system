@@ -25,6 +25,7 @@ from workflow.definition import (
     StepExecution,
 )
 from workflow.errors import (
+    WorkflowCancelledError,
     WorkflowDeadlineExceededError,
     WorkflowDefinitionError,
     WorkflowTimeoutError,
@@ -107,6 +108,9 @@ class WorkflowPlatform:
         deadline_at=None,
         workflow_id: str | None = None,
         tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
     ):
         validate_definition(definition)
         timeout = definition.timeout_seconds
@@ -119,6 +123,12 @@ class WorkflowPlatform:
         }
         if tenant_id:
             meta["tenant_id"] = tenant_id
+        if request_id:
+            meta["request_id"] = request_id
+        if user_id:
+            meta["user_id"] = user_id
+        if actor_ref:
+            meta["actor_ref"] = actor_ref
         state = self.state_manager.create(
             task_id=task_id,
             workflow_id=workflow_id,
@@ -129,6 +139,9 @@ class WorkflowPlatform:
             metadata=meta,
             deadline_at=deadline,
             tenant_id=tenant_id,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=actor_ref,
         )
         self.state_manager.plan(state.workflow_id)
         self._obs(
@@ -269,7 +282,10 @@ class WorkflowPlatform:
                 ]
                 if not unfinished:
                     if state.status not in TERMINAL_STATUSES:
-                        self.state_manager.complete_workflow(workflow_id)
+                        try:
+                            self.state_manager.complete_workflow(workflow_id)
+                        except WorkflowCancelledError:
+                            break
                         self.state_manager.checkpoint(workflow_id)
                         self._obs(
                             "workflow.completed",
@@ -341,7 +357,10 @@ class WorkflowPlatform:
                 if state.status == STATUS_WAITING_APPROVAL:
                     return "waiting_approval"
 
-        started, ok = self.state_manager.start_step(workflow_id, step_id)
+        try:
+            started, ok = self.state_manager.start_step(workflow_id, step_id)
+        except WorkflowCancelledError:
+            return "cancelled"
         if not ok:
             return "skipped_start"
         self._obs(
@@ -359,6 +378,8 @@ class WorkflowPlatform:
             return await self._handle_failure(
                 workflow_id, step, error_code=exc.error_code, error_class=type(exc).__name__
             )
+        except WorkflowCancelledError:
+            return "cancelled"
         except Exception as exc:
             code = getattr(exc, "error_code", None) or type(exc).__name__
             return await self._handle_failure(
@@ -367,6 +388,11 @@ class WorkflowPlatform:
                 error_code=str(code),
                 error_class=type(exc).__name__,
             )
+
+        # Cancellation fence: STOP FUTURE COMMIT (remote I/O may already have finished).
+        latest = self.state_manager.get(workflow_id)
+        if latest.status in TERMINAL_STATUSES:
+            return "cancelled"
 
         if not result.ok:
             return await self._handle_failure(
@@ -386,7 +412,10 @@ class WorkflowPlatform:
                 "result_ref": result.result_ref,
                 "progress": progress,
             }
-            self.state_manager.defer_step(workflow_id, step_id, metadata=meta)
+            try:
+                self.state_manager.defer_step(workflow_id, step_id, metadata=meta)
+            except WorkflowCancelledError:
+                return "cancelled"
             self.state_manager.checkpoint(workflow_id)
             self._obs(
                 "workflow.step.continued",
@@ -404,7 +433,10 @@ class WorkflowPlatform:
             "result": result_data,
             "result_ref": result.result_ref,
         }
-        self.state_manager.complete_step(workflow_id, step_id, metadata=meta)
+        try:
+            self.state_manager.complete_step(workflow_id, step_id, metadata=meta)
+        except WorkflowCancelledError:
+            return "cancelled"
         duration = None
         if mono0 is not None and self.observability is not None:
             duration = int(self.observability.monotonic_ms() - mono0)
@@ -493,6 +525,8 @@ class WorkflowPlatform:
         self, workflow_id: str, step, *, error_code: str, error_class: str | None
     ) -> str:
         state = self.state_manager.get(workflow_id)
+        if state.status in TERMINAL_STATUSES:
+            return "cancelled"
         record = state.step(step.step_id)
         attempt = int(record.attempt) if record else 1
         policy = step.failure_policy
@@ -520,11 +554,14 @@ class WorkflowPlatform:
             ):
                 delay = step.retry_policy.delay_seconds(attempt)
                 next_at = utc_now() + timedelta(seconds=delay)
-                self.state_manager.mark_step_failed(workflow_id, step.step_id, error_code)
-                self.state_manager.bump_step_attempt(workflow_id, step.step_id)
-                self.state_manager.mark_retry_wait(
-                    workflow_id, next_retry_at=next_at, error_code=error_code
-                )
+                try:
+                    self.state_manager.mark_step_failed(workflow_id, step.step_id, error_code)
+                    self.state_manager.bump_step_attempt(workflow_id, step.step_id)
+                    self.state_manager.mark_retry_wait(
+                        workflow_id, next_retry_at=next_at, error_code=error_code
+                    )
+                except WorkflowCancelledError:
+                    return "cancelled"
                 self.state_manager.checkpoint(workflow_id)
                 self._obs(
                     "workflow.retry_scheduled",

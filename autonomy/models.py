@@ -158,10 +158,14 @@ class ProposedAction:
     tool_trust_level: str
     idempotency_key: str | None = None
     metadata: Mapping[str, object] = field(default_factory=dict)
+    tenant_id: str = ""
+    actor_ref: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "requested_capabilities", tuple(self.requested_capabilities))
         object.__setattr__(self, "metadata", _meta(self.metadata))
+        object.__setattr__(self, "tenant_id", str(self.tenant_id or ""))
+        object.__setattr__(self, "actor_ref", str(self.actor_ref or ""))
 
 
 @dataclass(frozen=True)

@@ -1,0 +1,27 @@
+"""Stage-5 production activation errors."""
+
+from __future__ import annotations
+
+
+class ProductionActivationError(ValueError):
+    def __init__(self, code: str, *, message: str = "", details: dict | None = None):
+        self.code = str(code)
+        self.message = message or code
+        self.details = dict(details or {})
+        super().__init__(self.message)
+
+
+BLOCKED_BY_PREVIOUS_STAGE = "BLOCKED_BY_PREVIOUS_STAGE"
+GO_LIVE_BLOCKED = "GO_LIVE_BLOCKED"
+CANDIDATE_INVALIDATED = "CANDIDATE_INVALIDATED"
+CANDIDATE_IMMUTABLE = "CANDIDATE_IMMUTABLE"
+STALE_HANDOFF = "STALE_HANDOFF"
+PLAN_INCOMPLETE = "PLAN_INCOMPLETE"
+AUTHORIZATION_DENIED = "AUTHORIZATION_DENIED"
+AUTHORIZATION_REPLAY = "AUTHORIZATION_REPLAY"
+AUTHORIZATION_STALE = "AUTHORIZATION_STALE"
+ACTIVATION_FAILED = "ACTIVATION_FAILED"
+ACTIVATION_CONFLICT = "ACTIVATION_CONFLICT"
+UNAUTHORIZED = "UNAUTHORIZED"
+ROLLBACK_REQUIRED = "ROLLBACK_REQUIRED"
+PRODUCTION_NOT_ACTIVE = "PRODUCTION_NOT_ACTIVE"

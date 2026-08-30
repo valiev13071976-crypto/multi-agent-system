@@ -4,16 +4,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from data_intel.planner import LARGE_BATCH_ROWS, LARGE_SYNC_ROWS
 from security.tenant import normalize_tenant_id
 
 
 @dataclass(frozen=True)
 class LargeDatasetPolicy:
-    max_sync_rows: int = 5_000
+    max_sync_rows: int = LARGE_SYNC_ROWS
     max_sync_cells: int = 200_000
     max_sync_bytes: int = 5_000_000
     rows_per_batch: int = 500
     max_memory_estimate_mb: int = 256
+    large_batch_rows: int = LARGE_BATCH_ROWS
 
     def requires_async(self, *, row_count: int = 0, cell_count: int = 0, size_bytes: int = 0) -> bool:
         if row_count > self.max_sync_rows:

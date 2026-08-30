@@ -93,6 +93,7 @@ class MetricsCollector:
     budget_reservation_denied_total: int = 0
     budget_degrade_total: int = 0
     budget_terminate_total: int = 0
+    budget_skip_model_total: int = 0
     budget_reserved_amount: int = 0
     budget_spent_amount: int = 0
     budget_released_amount: int = 0

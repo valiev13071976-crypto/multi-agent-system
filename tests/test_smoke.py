@@ -84,13 +84,26 @@ PROVIDER_ENV_KEYS = (
     "MOONSHOT_CONTEXT_CLASS",
     "MISTRAL_CONTEXT_CLASS",
     "OPENAI_SUPPORTS_TOOLS",
-    "OPENAI_SUPPORTS_REASONING",
     "ANTHROPIC_SUPPORTS_TOOLS",
     "GEMINI_SUPPORTS_TOOLS",
     "XAI_SUPPORTS_TOOLS",
     "DEEPSEEK_SUPPORTS_TOOLS",
     "MOONSHOT_SUPPORTS_TOOLS",
     "MISTRAL_SUPPORTS_TOOLS",
+    "OPENAI_SUPPORTS_REASONING",
+    "ANTHROPIC_SUPPORTS_REASONING",
+    "GEMINI_SUPPORTS_REASONING",
+    "XAI_SUPPORTS_REASONING",
+    "DEEPSEEK_SUPPORTS_REASONING",
+    "MOONSHOT_SUPPORTS_REASONING",
+    "MISTRAL_SUPPORTS_REASONING",
+    "OPENAI_SUPPORTS_CODING",
+    "ANTHROPIC_SUPPORTS_CODING",
+    "GEMINI_SUPPORTS_CODING",
+    "XAI_SUPPORTS_CODING",
+    "DEEPSEEK_SUPPORTS_CODING",
+    "MOONSHOT_SUPPORTS_CODING",
+    "MISTRAL_SUPPORTS_CODING",
     "OPENAI_SUPPORTS_VISION",
     "ANTHROPIC_SUPPORTS_VISION",
     "GEMINI_SUPPORTS_VISION",
@@ -212,10 +225,11 @@ class SmokeTests(unittest.TestCase):
         self.assertEqual(detail["error"], "no_providers_available")
 
     def test_analyze_passes_v2_pipeline_with_mode(self):
+        # Reasoning is inferred from default strategy/critique categories;
+        # must not require OPENAI_SUPPORTS_REASONING=true for strategist path.
         main_mod = load_app(
             OPENAI_API_KEY="fake-key",
             OPENAI_MODEL="fake-model",
-            OPENAI_SUPPORTS_REASONING="true",
         )
         with patch.object(
             main_mod.router.pipeline.expert_manager.openai,

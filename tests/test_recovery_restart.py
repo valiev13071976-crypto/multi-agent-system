@@ -38,6 +38,7 @@ class RecoveryRestartTests(unittest.TestCase):
                 started_at=stamp,
                 completed_at=stamp,
                 outcome=OUTCOME_UNCERTAIN,
+                tenant_id="tenant-se",
             )
         )
         with tempfile.TemporaryDirectory() as tmp:

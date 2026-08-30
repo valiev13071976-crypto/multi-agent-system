@@ -92,6 +92,16 @@ class PermitService:
                 raise ExecutionPermitMismatchError("permit_fingerprint_mismatch")
             if permit.idempotency_key != action.idempotency_key:
                 raise ExecutionPermitMismatchError("permit_idempotency_mismatch")
+            permit_tenant = str(getattr(permit, "tenant_id", "") or "")
+            action_tenant = str(getattr(action, "tenant_id", "") or "")
+            permit_actor = str(getattr(permit, "actor_ref", "") or "")
+            action_actor = str(getattr(action, "actor_ref", "") or "")
+            # Permit-bound tenant/actor must match. Empty permit fields stay
+            # legacy-compatible (workflow/task checks above still apply).
+            if permit_tenant and permit_tenant != action_tenant:
+                raise ExecutionPermitMismatchError("permit_tenant_mismatch")
+            if permit_actor and permit_actor != action_actor:
+                raise ExecutionPermitMismatchError("permit_actor_mismatch")
         return permit
 
     def consume_for_execution(

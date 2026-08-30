@@ -7,6 +7,7 @@ from finops.budget_guard import BudgetGuard
 from finops.budget_models import (
     DECISION_CONTINUE,
     DECISION_DEGRADE,
+    DECISION_SKIP_MODEL,
     DECISION_TERMINATE,
     BudgetPolicy,
     SCOPE_GLOBAL,
@@ -71,6 +72,16 @@ class BudgetGuardTests(unittest.TestCase):
         guard = _guard((BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("5")),))
         d = guard.evaluate(
             task_id="t", provider="openai", model="m", estimated_cost=Decimal("6")
+        )
+        # Provider-specific unaffordability is SKIP_MODEL (not global TERMINATE).
+        self.assertEqual(d.decision, DECISION_SKIP_MODEL)
+        self.assertEqual(d.excluded_providers, ("openai",))
+
+    def test_sticky_hard_violation_terminates(self):
+        guard = _guard((BudgetPolicy("g", SCOPE_GLOBAL, hard_limit=Decimal("100")),))
+        guard._hard_violation = True
+        d = guard.evaluate(
+            task_id="t", provider="openai", model="m", estimated_cost=Decimal("1")
         )
         self.assertEqual(d.decision, DECISION_TERMINATE)
 

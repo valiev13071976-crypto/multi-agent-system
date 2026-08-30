@@ -24,6 +24,7 @@ class ObservabilityContext:
     workflow_id: str = ""
     task_id: str = ""
     actor_ref: str = ""
+    tenant_id: str = ""
     started_at: datetime | None = None
 
     def __post_init__(self):
@@ -42,6 +43,7 @@ class ObservabilityContext:
         workflow_id: str = "",
         task_id: str = "",
         actor_ref: str = "",
+        tenant_id: str = "",
         started_at: datetime | None = None,
     ) -> ObservabilityContext:
         cid = correlation_id or _new_id()
@@ -54,6 +56,7 @@ class ObservabilityContext:
             workflow_id=workflow_id,
             task_id=task_id,
             actor_ref=actor_ref,
+            tenant_id=tenant_id,
             started_at=started_at or _utc_now(),
         )
 
@@ -63,6 +66,7 @@ class ObservabilityContext:
         workflow_id: str | None = None,
         task_id: str | None = None,
         actor_ref: str | None = None,
+        tenant_id: str | None = None,
     ) -> ObservabilityContext:
         return replace(
             self,
@@ -71,6 +75,7 @@ class ObservabilityContext:
             workflow_id=self.workflow_id if workflow_id is None else workflow_id,
             task_id=self.task_id if task_id is None else task_id,
             actor_ref=self.actor_ref if actor_ref is None else actor_ref,
+            tenant_id=self.tenant_id if tenant_id is None else tenant_id,
             started_at=_utc_now(),
         )
 
@@ -79,3 +84,6 @@ class ObservabilityContext:
 
     def with_task(self, task_id: str) -> ObservabilityContext:
         return replace(self, task_id=str(task_id or ""))
+
+    def with_tenant(self, tenant_id: str) -> ObservabilityContext:
+        return replace(self, tenant_id=str(tenant_id or ""))

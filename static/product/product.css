@@ -1,0 +1,9 @@
+.layout { display: flex; min-height: 100vh; font-family: system-ui, sans-serif; }
+.nav { width: 220px; background: #111; color: #eee; padding: 1rem; }
+.nav a { display: block; color: #ccc; text-decoration: none; padding: .4rem 0; }
+.nav a.active { color: #fff; font-weight: 600; }
+.main { flex: 1; padding: 1rem 1.5rem; }
+.header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+.card { border: 1px solid #ddd; border-radius: 8px; padding: 1rem; margin-bottom: 1rem; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: .5rem; border-bottom: 1px solid #eee; }

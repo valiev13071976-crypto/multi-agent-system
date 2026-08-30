@@ -5,9 +5,33 @@ from __future__ import annotations
 from security.config import DEFAULT_LEGACY_TENANT
 
 
+class MissingTenantError(ValueError):
+    """Raised when a new execution/write requires tenant_id but none was provided."""
+
+    def __init__(self, message: str = "tenant_id required for new execution"):
+        self.error = "missing_tenant"
+        super().__init__(message)
+
+
 def normalize_tenant_id(tenant_id: str | None) -> str:
+    """Legacy-compatible normalize for reads / migration (may yield legacy-default)."""
+
     raw = str(tenant_id or "").strip()
     return raw or DEFAULT_LEGACY_TENANT
+
+
+def require_tenant_id(tenant_id: str | None) -> str:
+    """Fail-closed tenant for new authenticated/analyze execution writes.
+
+    Blank/missing tenants must not silently collapse into legacy-default.
+    Explicit non-empty values (including an intentional legacy-default string
+    from auth-disabled defaults) are accepted as-is.
+    """
+
+    raw = str(tenant_id or "").strip()
+    if not raw:
+        raise MissingTenantError()
+    return raw
 
 
 def workflow_tenant_id(state) -> str:

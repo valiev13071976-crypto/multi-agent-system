@@ -2,7 +2,8 @@
 
 Note: finops.models.BudgetDecision remains the legacy allow/deny check result
 from FinOpsService.check_budget. This module defines the guard action decision
-(CONTINUE / DEGRADE / TERMINATE) under the same conceptual name for the guard API.
+(CONTINUE / SKIP_MODEL / DEGRADE / TERMINATE) under the same conceptual name
+for the guard API.
 """
 
 from __future__ import annotations
@@ -19,9 +20,34 @@ from autonomy.models import sanitize_metadata
 BUDGET_POLICY_VERSION = "1.0.0"
 
 DECISION_CONTINUE = "CONTINUE"
+DECISION_SKIP_MODEL = "SKIP_MODEL"
 DECISION_DEGRADE = "DEGRADE"
 DECISION_TERMINATE = "TERMINATE"
-BUDGET_DECISIONS = (DECISION_CONTINUE, DECISION_DEGRADE, DECISION_TERMINATE)
+BUDGET_DECISIONS = (
+    DECISION_CONTINUE,
+    DECISION_SKIP_MODEL,
+    DECISION_DEGRADE,
+    DECISION_TERMINATE,
+)
+
+# Explicit precedence — do not rely on enum/string ordering.
+# TERMINATE > DEGRADE > SKIP_MODEL > CONTINUE
+BUDGET_DECISION_PRECEDENCE = {
+    DECISION_CONTINUE: 0,
+    DECISION_SKIP_MODEL: 1,
+    DECISION_DEGRADE: 2,
+    DECISION_TERMINATE: 3,
+}
+
+
+def merge_budget_decision(current: str, incoming: str) -> str:
+    """Return the stronger of two budget decisions by canonical precedence."""
+
+    cur = current if current in BUDGET_DECISION_PRECEDENCE else DECISION_CONTINUE
+    nxt = incoming if incoming in BUDGET_DECISION_PRECEDENCE else DECISION_CONTINUE
+    if BUDGET_DECISION_PRECEDENCE[nxt] > BUDGET_DECISION_PRECEDENCE[cur]:
+        return nxt
+    return cur
 
 SCOPE_GLOBAL = "global"
 SCOPE_TENANT = "tenant"
@@ -134,7 +160,7 @@ class BudgetReservation:
 
 @dataclass(frozen=True)
 class BudgetDecision:
-    """BudgetGuard action decision: CONTINUE / DEGRADE / TERMINATE."""
+    """BudgetGuard action decision: CONTINUE / SKIP_MODEL / DEGRADE / TERMINATE."""
 
     decision: str
     reason_code: str
@@ -197,13 +223,16 @@ class BudgetConstraints:
 
     Built by BudgetGuard for ModelRouter selection. ``excluded_providers`` and
     optional ``candidate_costs`` / ``max_affordable_cost`` drive eligibility.
-    ``preferred_cheaper`` is advisory soft-degrade preference from guard evaluate.
+    ``preferred_cheaper`` is soft-DEGRADE preference: when set, selection is
+    restricted to those providers (monotonic — no silent re-upgrade).
+    ``skipped_providers`` names candidates excluded by SKIP_MODEL.
     """
 
     max_affordable_cost: Decimal | None = None
     remaining_budget: Decimal | None = None
     excluded_providers: tuple[str, ...] = ()
     excluded_models: tuple[str, ...] = ()
+    skipped_providers: tuple[str, ...] = ()
     preferred_cheaper: tuple[tuple[str, str], ...] = ()
     candidate_costs: Mapping[str, Decimal | None] = field(default_factory=dict)
     unknown_cost_policy: str | None = None
@@ -214,7 +243,14 @@ class BudgetConstraints:
     def __post_init__(self):
         object.__setattr__(self, "excluded_providers", tuple(self.excluded_providers))
         object.__setattr__(self, "excluded_models", tuple(self.excluded_models))
+        skipped = tuple(self.skipped_providers or ())
+        if not skipped and self.excluded_providers:
+            # Compatibility: hard exclusions are SKIP_MODEL candidates.
+            skipped = tuple(self.excluded_providers)
+        object.__setattr__(self, "skipped_providers", skipped)
         object.__setattr__(self, "preferred_cheaper", tuple(self.preferred_cheaper))
+        if self.decision not in BUDGET_DECISIONS:
+            object.__setattr__(self, "decision", DECISION_CONTINUE)
         if self.max_affordable_cost is not None and not isinstance(
             self.max_affordable_cost, Decimal
         ):

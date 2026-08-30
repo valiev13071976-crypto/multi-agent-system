@@ -1,0 +1,26 @@
+"""Stage-4 controlled launch errors."""
+
+from __future__ import annotations
+
+
+class ControlledLaunchError(ValueError):
+    def __init__(self, code: str, *, message: str = "", details: dict | None = None):
+        self.code = str(code)
+        self.message = message or code
+        self.details = dict(details or {})
+        super().__init__(self.message)
+
+
+BLOCKED_BY_STAGE_3 = "BLOCKED_BY_STAGE_3"
+STALE_STAGE3_HANDOFF = "STALE_STAGE3_HANDOFF"
+CANDIDATE_NOT_LOCKED = "CANDIDATE_NOT_LOCKED"
+CANDIDATE_IMMUTABLE = "CANDIDATE_IMMUTABLE"
+ROLLBACK_TARGET_REQUIRED = "ROLLBACK_TARGET_REQUIRED"
+TRAFFIC_DENIED = "TRAFFIC_DENIED"
+SHADOW_SIDE_EFFECT_DENIED = "SHADOW_SIDE_EFFECT_DENIED"
+CANARY_PRECONDITION_FAILED = "CANARY_PRECONDITION_FAILED"
+ROLLOUT_STEP_BLOCKED = "ROLLOUT_STEP_BLOCKED"
+GO_LIVE_BLOCKED = "GO_LIVE_BLOCKED"
+INVALID_TRANSITION = "INVALID_TRANSITION"
+UNAUTHORIZED = "UNAUTHORIZED"
+PRODUCTION_ACTIVE_FORBIDDEN = "PRODUCTION_ACTIVE_FORBIDDEN"

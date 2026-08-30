@@ -22,6 +22,22 @@ CAP_PURCHASE = "purchase"
 CAP_FINANCIAL_CHANGE = "financial_change"
 CAP_PERMISSION_MANAGE = "permission_manage"
 CAP_GITHUB_ISSUE_LABEL_WRITE = "github_issue_label_write"
+CAP_EMAIL_READ = "email_read"
+CAP_EMAIL_SEND = "email_send"
+CAP_CALENDAR_READ = "calendar_read"
+CAP_CALENDAR_WRITE = "calendar_write"
+CAP_TELEGRAM_READ = "telegram_read"
+CAP_TELEGRAM_SEND = "telegram_send"
+CAP_DB_READ = "db_read"
+CAP_DB_WRITE = "db_write"
+CAP_BROWSER_READ = "browser_read"
+CAP_BROWSER_WRITE = "browser_write"
+CAP_IMAGE_GENERATE = "image_generate"
+CAP_IMAGE_EDIT = "image_edit"
+CAP_SCRAPE = "scrape"
+CAP_SEO_READ = "seo_read"
+CAP_SEO_WRITE = "seo_write"
+CAP_MCP_INVOKE = "mcp_invoke"
 
 CAPABILITIES = (
     CAP_EXTERNAL_READ,
@@ -40,6 +56,22 @@ CAPABILITIES = (
     CAP_FINANCIAL_CHANGE,
     CAP_PERMISSION_MANAGE,
     CAP_GITHUB_ISSUE_LABEL_WRITE,
+    CAP_EMAIL_READ,
+    CAP_EMAIL_SEND,
+    CAP_CALENDAR_READ,
+    CAP_CALENDAR_WRITE,
+    CAP_TELEGRAM_READ,
+    CAP_TELEGRAM_SEND,
+    CAP_DB_READ,
+    CAP_DB_WRITE,
+    CAP_BROWSER_READ,
+    CAP_BROWSER_WRITE,
+    CAP_IMAGE_GENERATE,
+    CAP_IMAGE_EDIT,
+    CAP_SCRAPE,
+    CAP_SEO_READ,
+    CAP_SEO_WRITE,
+    CAP_MCP_INVOKE,
 )
 
 DEFAULT_REQUIRED = {
@@ -75,6 +107,9 @@ class CapabilityScope:
             "workflow_id": self.workflow_id,
             "task_id": self.task_id,
         }
+
+    def matches_resource(self, resource: str) -> bool:
+        return matches_resource(self.resource_pattern, resource)
 
 
 @dataclass(frozen=True)

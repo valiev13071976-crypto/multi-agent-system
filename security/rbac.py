@@ -6,8 +6,11 @@ from security.config import (
     ROLE_ADMIN,
     ROLE_APPROVER,
     ROLE_OPERATOR,
+    ROLE_SECURITY_AUDITOR,
     ROLE_SERVICE,
+    ROLE_TENANT_ADMIN,
     ROLE_USER,
+    ROLE_VIEWER,
 )
 
 # Permission strings
@@ -19,6 +22,22 @@ PERM_WORKFLOW_RESUME = "workflow:resume"
 PERM_HITL_APPROVE = "hitl:approve"
 PERM_ADMIN_METADATA = "admin:metadata"
 PERM_SERVICE_EXECUTE = "service:execute"
+
+# Block 15 operations admin capabilities
+PERM_OPS_READ = "operations:read"
+PERM_OPS_WRITE = "operations:write"
+PERM_OPS_RECOVERY = "operations:recovery"
+PERM_OPS_SECURITY_READ = "operations:security.read"
+PERM_OPS_COST_READ = "operations:cost.read"
+PERM_OPS_COST_WRITE = "operations:cost.write"
+PERM_OPS_TENANT_READ = "operations:tenant.read"
+PERM_OPS_TENANT_WRITE = "operations:tenant.write"
+PERM_OPS_APPROVAL = "operations:approval"
+PERM_OPS_ROUTING_WRITE = "operations:routing.write"
+
+_OPS_VIEWER = frozenset({PERM_OPS_READ, PERM_OPS_SECURITY_READ, PERM_OPS_COST_READ, PERM_OPS_TENANT_READ})
+_OPS_OPERATOR = _OPS_VIEWER | frozenset({PERM_OPS_WRITE, PERM_OPS_RECOVERY, PERM_OPS_APPROVAL})
+_OPS_PLATFORM = _OPS_OPERATOR | frozenset({PERM_OPS_COST_WRITE, PERM_OPS_TENANT_WRITE, PERM_OPS_ROUTING_WRITE})
 
 ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
     ROLE_USER: frozenset(
@@ -37,7 +56,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             PERM_WORKFLOW_CANCEL,
             PERM_WORKFLOW_RESUME,
         }
-    ),
+    )
+    | _OPS_OPERATOR,
     ROLE_APPROVER: frozenset(
         {
             PERM_ANALYZE_EXECUTE,
@@ -58,7 +78,8 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             PERM_HITL_APPROVE,
             PERM_ADMIN_METADATA,
         }
-    ),
+    )
+    | _OPS_PLATFORM,
     ROLE_SERVICE: frozenset(
         {
             PERM_SERVICE_EXECUTE,
@@ -68,6 +89,9 @@ ROLE_PERMISSIONS: dict[str, frozenset[str]] = {
             PERM_WORKFLOW_RESUME,
         }
     ),
+    ROLE_VIEWER: _OPS_VIEWER,
+    ROLE_SECURITY_AUDITOR: frozenset({PERM_OPS_SECURITY_READ}),
+    ROLE_TENANT_ADMIN: _OPS_VIEWER | frozenset({PERM_OPS_WRITE, PERM_OPS_RECOVERY, PERM_OPS_APPROVAL}),
 }
 
 

@@ -3,6 +3,7 @@ import uuid
 
 from security.redaction import redact
 from workflow.errors import (
+    WorkflowCancelledError,
     WorkflowNotFoundError,
     WorkflowTransitionError,
 )
@@ -51,6 +52,9 @@ class StateManager:
         metadata=None,
         deadline_at=None,
         tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
     ) -> WorkflowState:
         now = utc_now()
         wf_id = workflow_id or str(uuid.uuid4())
@@ -64,6 +68,15 @@ class StateManager:
             )
             for name in names
         )
+        meta = dict(metadata or {})
+        if request_id:
+            meta.setdefault("request_id", request_id)
+        if user_id:
+            meta.setdefault("user_id", user_id)
+        if actor_ref:
+            meta.setdefault("actor_ref", actor_ref)
+        if tenant_id:
+            meta.setdefault("tenant_id", tenant_id)
         state = WorkflowState(
             workflow_id=wf_id,
             task_id=task_id,
@@ -81,12 +94,24 @@ class StateManager:
             tenant_id=tenant_id,
             workflow_type=workflow_type,
             definition_version=definition_version,
-            metadata=dict(metadata or {}),
+            metadata=meta,
             next_retry_at=None,
             deadline_at=deadline_at,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=actor_ref,
         )
         self._store.create(state)
         return state
+
+    def _require_commit_allowed(self, state: WorkflowState) -> None:
+        """Cancellation fence: terminal workflows must not accept step commits.
+
+        Semantics: STOP FUTURE COMMIT / MUTATION — does not abort remote I/O
+        already in flight.
+        """
+        if state.status in TERMINAL_STATUSES:
+            raise WorkflowCancelledError("workflow_terminal")
 
     def find_by_execution_key(self, execution_key: str, *, tenant_id: str | None = None):
         store = self._store
@@ -107,6 +132,31 @@ class StateManager:
         if state is None:
             raise WorkflowNotFoundError(workflow_id)
         return state
+
+    def get_for_tenant(self, workflow_id: str, tenant_id: str) -> WorkflowState:
+        """Tenant-scoped get — cross-tenant → WorkflowNotFoundError."""
+        store = self._store
+        if hasattr(store, "get_for_tenant"):
+            state = store.get_for_tenant(workflow_id, tenant_id)
+        else:
+            from security.tenant import normalize_tenant_id, workflow_tenant_id
+
+            state = store.get(workflow_id)
+            if state is not None and workflow_tenant_id(state) != normalize_tenant_id(
+                tenant_id
+            ):
+                state = None
+        if state is None:
+            raise WorkflowNotFoundError(workflow_id)
+        return state
+
+    def list_by_status(
+        self, status: str, *, tenant_id: str | None = None
+    ) -> tuple[WorkflowState, ...]:
+        store = self._store
+        if hasattr(store, "list_by_status"):
+            return store.list_by_status(status, tenant_id=tenant_id)
+        return ()
 
     def transition(self, workflow_id: str, target: str) -> WorkflowState:
         state = self.get(workflow_id)
@@ -226,6 +276,7 @@ class StateManager:
         state = self.get(workflow_id)
         if state.status == STATUS_COMPLETED:
             return state
+        self._require_commit_allowed(state)
         if state.status == STATUS_VALIDATING:
             state = self.transition(workflow_id, STATUS_RUNNING)
         return self.transition(state.workflow_id, STATUS_COMPLETED)
@@ -249,6 +300,7 @@ class StateManager:
 
     def start_step(self, workflow_id: str, name: str) -> tuple[WorkflowState, bool]:
         state = self.get(workflow_id)
+        self._require_commit_allowed(state)
         record = state.step(name)
         if record is None:
             raise WorkflowTransitionError(state.status, name)
@@ -283,6 +335,7 @@ class StateManager:
 
     def bump_step_attempt(self, workflow_id: str, name: str) -> WorkflowState:
         state = self.get(workflow_id)
+        self._require_commit_allowed(state)
         record = state.step(name)
         if record is None:
             raise WorkflowTransitionError(state.status, name)
@@ -306,6 +359,7 @@ class StateManager:
     def defer_step(self, workflow_id: str, name: str, *, metadata=None) -> WorkflowState:
         """Keep step pending after a bounded slice — progress in metadata, no attempt bump."""
         state = self.get(workflow_id)
+        self._require_commit_allowed(state)
         record = state.step(name)
         if record is None:
             raise WorkflowTransitionError(state.status, name)
@@ -330,6 +384,7 @@ class StateManager:
 
     def complete_step(self, workflow_id: str, name: str, metadata=None) -> WorkflowState:
         state = self.get(workflow_id)
+        self._require_commit_allowed(state)
         record = state.step(name)
         if record is None:
             raise WorkflowTransitionError(state.status, name)
@@ -361,6 +416,7 @@ class StateManager:
         self, workflow_id: str, name: str, error_code: str
     ) -> WorkflowState:
         state = self.get(workflow_id)
+        self._require_commit_allowed(state)
         record = state.step(name)
         now = utc_now()
         code = redact(str(error_code or "step_failed"))
@@ -385,6 +441,7 @@ class StateManager:
         self, workflow_id: str, name: str, *, reason: str | None = None
     ) -> WorkflowState:
         state = self.get(workflow_id)
+        self._require_commit_allowed(state)
         record = state.step(name)
         if record is None:
             raise WorkflowTransitionError(state.status, name)

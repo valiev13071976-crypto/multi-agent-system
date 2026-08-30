@@ -8,8 +8,61 @@ import uuid
 
 from documents.errors import GENERATION_FAILED, DocumentError
 from documents.intelligence.contracts import GeneratedDocument, utc_now
+from documents.intelligence.templates import assert_generation_inputs
 from documents.models import content_hash_bytes
+from documents.platform_models import DocumentTemplate
 from security.tenant import normalize_tenant_id
+
+
+def validate_template_fields(template, data: dict) -> None:
+    """Fail closed when required template fields are missing."""
+    from documents.errors import GENERATED_DOCUMENT_INVALID, DocumentError
+
+    missing = [f for f in template.required_fields if not str((data or {}).get(f) or "").strip()]
+    if missing:
+        raise DocumentError(GENERATED_DOCUMENT_INVALID)
+
+
+def generate_from_template(
+    *,
+    template,
+    data: dict,
+    tenant_id: str,
+    paragraphs: list[str] | None = None,
+    tables: list | None = None,
+    headings: list[str] | None = None,
+):
+    validate_template_fields(template, data)
+    title = str(data.get("title") or data.get("subject") or template.template_id)
+    body = paragraphs or [str(data.get(k) or "") for k in template.sections if data.get(k)]
+    if not body:
+        body = [f"{k}: {v}" for k, v in data.items() if k in set(template.required_fields) | set(template.optional_fields)]
+    fmt = (template.output_format or "txt").lower()
+    if fmt == "docx":
+        return generate_docx(
+            tenant_id=tenant_id,
+            title=title,
+            paragraphs=body,
+            tables=tables,
+            headings=headings,
+            template_id=template.template_id,
+            template_version=template.version,
+        )
+    if fmt == "pdf":
+        return generate_pdf(
+            tenant_id=tenant_id,
+            title=title,
+            paragraphs=body,
+            template_id=template.template_id,
+            template_version=template.version,
+        )
+    return generate_txt(
+        tenant_id=tenant_id,
+        title=title,
+        paragraphs=body,
+        template_id=template.template_id,
+        template_version=template.version,
+    )
 
 
 def generate_txt(
@@ -19,7 +72,10 @@ def generate_txt(
     paragraphs: list[str],
     template_id: str = "txt_basic",
     template_version: str = "1.0.0",
+    template: DocumentTemplate | None = None,
+    fields: dict | None = None,
 ) -> GeneratedDocument:
+    assert_generation_inputs(title=title, paragraphs=paragraphs, template=template, fields=fields)
     body = title.strip() + "\n\n" + "\n\n".join(p.strip() for p in paragraphs if p)
     data = body.encode("utf-8")
     return GeneratedDocument(
@@ -44,7 +100,10 @@ def generate_docx(
     headings: list[str] | None = None,
     template_id: str = "docx_basic",
     template_version: str = "1.0.0",
+    template: DocumentTemplate | None = None,
+    fields: dict | None = None,
 ) -> GeneratedDocument:
+    assert_generation_inputs(title=title, paragraphs=paragraphs, template=template, fields=fields)
     try:
         from docx import Document
         from docx.enum.text import WD_BREAK
@@ -94,8 +153,11 @@ def generate_pdf(
     paragraphs: list[str],
     template_id: str = "pdf_basic",
     template_version: str = "1.0.0",
+    template: DocumentTemplate | None = None,
+    fields: dict | None = None,
 ) -> GeneratedDocument:
     """Minimal PDF generation without remote resources (pure PDF operators)."""
+    assert_generation_inputs(title=title, paragraphs=paragraphs, template=template, fields=fields)
     try:
         lines = [title] + [p for p in paragraphs if p]
         # Escape PDF string specials

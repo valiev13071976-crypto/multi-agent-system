@@ -29,6 +29,13 @@ from memory.retention import MemoryRetentionPolicy
 from memory.retrieval import MemoryRetriever
 from memory.store import MemoryPersistenceUnavailableError, MemoryStore, MemoryVersionConflict
 from memory.write_policy import MemoryWritePolicy
+from memory.write_decision import (
+    DECISION_ALLOW,
+    DECISION_DENY,
+    MemoryWriteDecision,
+    MemoryWriteGovernor,
+    MemoryWriteRequest,
+)
 from security.encryption import (
     ENCRYPTION_REQUIRED,
     SENSITIVITY_SECRET,
@@ -87,6 +94,7 @@ class MemoryService:
         self.encryption = encryption
         self.retriever = retriever or MemoryRetriever(encryption=encryption)
         self.write_policy = write_policy or MemoryWritePolicy()
+        self.write_governor = MemoryWriteGovernor(self.write_policy)
         self.context_builder = context_builder or KnowledgeContextBuilder()
         self.observability = observability
         self.max_record_bytes = int(max_record_bytes)
@@ -257,6 +265,42 @@ class MemoryService:
                 scope_type=record.scope.scope_type,
             )
         return created
+
+    def propose_write(self, request: MemoryWriteRequest) -> MemoryWriteDecision:
+        decision = self.write_governor.evaluate(request)
+        event = (
+            "memory.write.allowed"
+            if decision.decision == DECISION_ALLOW
+            else "memory.write.denied"
+        )
+        self._emit(
+            event,
+            status=decision.decision.lower(),
+            metadata={"reason": decision.reason},
+        )
+        return decision
+
+    def write_with_decision(
+        self,
+        request: MemoryWriteRequest,
+        *,
+        requesting_scope=None,
+        now: datetime | None = None,
+        validated: bool = False,
+    ) -> MemoryRecord:
+        decision = self.propose_write(request)
+        if decision.decision == DECISION_DENY or not decision.allow_durable:
+            if decision.requires_confirmation:
+                raise MemoryDenied("confirmation_required")
+            raise MemoryDenied(decision.reason)
+        self._emit("memory.write.requested", status="requested", metadata={})
+        return self.ingest(
+            request.ingest,
+            requesting_scope=requesting_scope or request.scope,
+            now=now,
+            validated=validated or request.explicit_user_authorized,
+            auto=False,
+        )
 
     def retrieve(self, query: MemoryQuery, *, requesting_scope=None) -> tuple:
         if not self.enabled or self.blocked_reason:

@@ -852,7 +852,7 @@ def finops_hard_limit_terminates(case) -> HandlerResult:
     from decimal import Decimal
 
     from finops.budget_guard import BudgetGuard
-    from finops.budget_models import DECISION_TERMINATE, BudgetPolicy, SCOPE_GLOBAL
+    from finops.budget_models import DECISION_SKIP_MODEL, BudgetPolicy, SCOPE_GLOBAL
     from finops.models import BudgetLimits, PriceQuote
     from finops.service import FinOpsService
 
@@ -874,9 +874,10 @@ def finops_hard_limit_terminates(case) -> HandlerResult:
         model="m",
         estimated_cost=Decimal("6"),
     )
-    if d.decision == DECISION_TERMINATE:
+    # Candidate-specific hard exceed → SKIP_MODEL (global sticky remains TERMINATE).
+    if d.decision == DECISION_SKIP_MODEL and d.excluded_providers == ("openai",):
         return _ok({"decision": d.decision, "reason": d.reason_code})
-    return _fail(["expected_terminate"], {"decision": d.decision})
+    return _fail(["expected_skip_model"], {"decision": d.decision})
 
 
 @handler("finops_missing_reservation_blocks")
@@ -1027,7 +1028,7 @@ def finops_degrade_capability_safe(case) -> HandlerResult:
 @handler("finops_unknown_cost_not_zero")
 def finops_unknown_cost_not_zero(case) -> HandlerResult:
     from finops.budget_guard import BudgetGuard
-    from finops.budget_models import BudgetPolicy, SCOPE_GLOBAL, DECISION_TERMINATE
+    from finops.budget_models import BudgetPolicy, SCOPE_GLOBAL, DECISION_SKIP_MODEL
     from finops.models import BudgetLimits
     from finops.service import FinOpsService
     from decimal import Decimal
@@ -1044,7 +1045,8 @@ def finops_unknown_cost_not_zero(case) -> HandlerResult:
     d = guard.evaluate(
         task_id="t", provider="openai", model="m", estimated_cost=None
     )
-    if d.decision == DECISION_TERMINATE and d.requested_cost is None:
+    # Unknown cost denied for this candidate → SKIP_MODEL (never treated as free).
+    if d.decision == DECISION_SKIP_MODEL and d.requested_cost is None:
         return _ok({"decision": d.decision, "reason": d.reason_code})
     return _fail(["unknown_became_free"], {"decision": d.decision})
 

@@ -16,9 +16,23 @@ ROLE_OPERATOR = "operator"
 ROLE_APPROVER = "approver"
 ROLE_ADMIN = "admin"
 ROLE_SERVICE = "service"
+ROLE_VIEWER = "viewer"
+ROLE_SECURITY_AUDITOR = "security_auditor"
+ROLE_TENANT_ADMIN = "tenant_admin"
+ROLE_PLATFORM_ADMIN = "platform_admin"
 
 ALL_ROLES = frozenset(
-    {ROLE_USER, ROLE_OPERATOR, ROLE_APPROVER, ROLE_ADMIN, ROLE_SERVICE}
+    {
+        ROLE_USER,
+        ROLE_OPERATOR,
+        ROLE_APPROVER,
+        ROLE_ADMIN,
+        ROLE_SERVICE,
+        ROLE_VIEWER,
+        ROLE_SECURITY_AUDITOR,
+        ROLE_TENANT_ADMIN,
+        ROLE_PLATFORM_ADMIN,
+    }
 )
 
 

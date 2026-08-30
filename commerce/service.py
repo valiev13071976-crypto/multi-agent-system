@@ -538,7 +538,20 @@ class CommerceService:
         from commerce.capabilities import CAP_INVENTORY_RESERVE, CAP_SUPPLIER_WRITE
 
         self.require_capabilities(capabilities or (CAP_SUPPLIER_WRITE, CAP_INVENTORY_RESERVE), (CAP_SUPPLIER_WRITE,))
-        key = idempotency_key or f"recv:{uuid.uuid4().hex[:8]}"
+        if idempotency_key:
+            key = str(idempotency_key)
+        else:
+            import hashlib
+            import json
+
+            digest = hashlib.sha256(
+                json.dumps(
+                    {"supplier_id": supplier_id, "lines": lines},
+                    sort_keys=True,
+                    default=str,
+                ).encode("utf-8")
+            ).hexdigest()[:16]
+            key = f"recv:{tenant_id}:{supplier_id}:{digest}"
         op_id, existing = self._op(tenant_id, "procurement_receive", key, {"supplier_id": supplier_id})
         if existing and existing.get("status") == "completed":
             return existing

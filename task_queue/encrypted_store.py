@@ -29,6 +29,19 @@ class EncryptedTaskQueueStore(TaskQueueStore):
     def get(self, queue_task_id: str):
         return self._inner.get(queue_task_id)
 
+    def get_for_tenant(self, queue_task_id: str, tenant_id: str):
+        if hasattr(self._inner, "get_for_tenant"):
+            return self._inner.get_for_tenant(queue_task_id, tenant_id)
+        tid = str(tenant_id or "").strip()
+        if not tid:
+            return None
+        task = self.get(queue_task_id)
+        if task is None:
+            return None
+        if str(getattr(task, "tenant_id", "") or "").strip() != tid:
+            return None
+        return task
+
     def save(self, task):
         self._inner.save(task)
 

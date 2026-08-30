@@ -24,6 +24,7 @@ BIZ_WAYBILL = "waybill"
 BIZ_PRICE_LIST = "price_list"
 BIZ_STATEMENT = "statement"
 BIZ_GENERIC = "generic_document"
+BIZ_UNKNOWN = "unknown"
 BUSINESS_DOC_TYPES = (
     BIZ_CONTRACT,
     BIZ_INVOICE,
@@ -32,6 +33,7 @@ BUSINESS_DOC_TYPES = (
     BIZ_PRICE_LIST,
     BIZ_STATEMENT,
     BIZ_GENERIC,
+    BIZ_UNKNOWN,
 )
 
 
@@ -94,10 +96,13 @@ class ExtractedField:
     source_ref: str = ""
     confidence: str = CONF_MEDIUM
     method: str = "rule"
+    status: str = "FOUND"
 
     def __post_init__(self):
         if self.confidence not in CONFIDENCE_LEVELS:
             object.__setattr__(self, "confidence", CONF_MEDIUM)
+        status = str(self.status or "FOUND").upper()
+        object.__setattr__(self, "status", status)
 
 
 @dataclass(frozen=True)

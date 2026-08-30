@@ -260,6 +260,9 @@ class AutonomyGate:
         return decision
 
 
+_UNSET = object()
+
+
 def build_proposed_action(
     *,
     action_type: str,
@@ -268,15 +271,33 @@ def build_proposed_action(
     resource: str = "web",
     tool_trust_level: str = "READ_ONLY_EXTERNAL",
     requested_capabilities=None,
-    idempotency_key: str | None = None,
+    idempotency_key: str | None | object = _UNSET,
     workflow_id: str = "wf-1",
     task_id: str = "task-1",
     metadata=None,
     risk_class: str | None = None,
     action_id: str | None = None,
+    tenant_id: str = "",
+    actor_ref: str = "",
 ) -> ProposedAction:
+    from side_effects.idempotency_keys import stable_side_effect_idempotency_key
+
     meta = dict(metadata or {})
     classifier = ActionRiskClassifier()
+    # Omitted key → stable default for protected writes.
+    # Explicit None/blank → leave empty (executor fail-closed: idempotency_required).
+    if idempotency_key is _UNSET:
+        if action_type in PROTECTED_IDEMPOTENCY_TYPES:
+            key = stable_side_effect_idempotency_key(
+                workflow_id=workflow_id,
+                tool_id=tool_id,
+                operation=operation,
+                resource=resource,
+            )
+        else:
+            key = None
+    else:
+        key = str(idempotency_key or "").strip() or None
     return ProposedAction(
         action_id=action_id or str(uuid.uuid4()),
         workflow_id=workflow_id,
@@ -293,6 +314,8 @@ def build_proposed_action(
             else required_capabilities_for(action_type)
         ),
         tool_trust_level=tool_trust_level,
-        idempotency_key=idempotency_key,
+        idempotency_key=key,
         metadata=meta,
+        tenant_id=str(tenant_id or ""),
+        actor_ref=str(actor_ref or ""),
     )

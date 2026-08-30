@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 
 from documents.intelligence.classify import classify_document_text
 from documents.intelligence.contracts import (
@@ -21,6 +21,12 @@ from documents.intelligence.contracts import (
     StructuredDocument,
 )
 from documents.intelligence.validation import validate_structured
+from documents.platform_models import (
+    FIELD_AMBIGUOUS,
+    FIELD_FOUND,
+    FIELD_MISSING,
+    ExtractionSchema,
+)
 
 
 @dataclass(frozen=True)
@@ -36,6 +42,16 @@ def _search_patterns(text: str, patterns: tuple[str, ...]) -> str | None:
         if m:
             return (m.group(1) if m.lastindex else m.group(0)).strip()
     return None
+
+
+def _search_all_patterns(text: str, patterns: tuple[str, ...]) -> list[str]:
+    found: list[str] = []
+    for pat in patterns:
+        for m in re.finditer(pat, text, flags=re.I | re.M):
+            val = (m.group(1) if m.lastindex else m.group(0)).strip()
+            if val and val not in found:
+                found.append(val)
+    return found
 
 
 CONTRACT_PATTERNS = (
@@ -161,6 +177,7 @@ def extract_structured(
                 source_ref="text:search",
                 confidence=CONF_MEDIUM,
                 method="regex",
+                status=FIELD_FOUND,
             )
         )
         if fp.group == "dates":
@@ -179,7 +196,6 @@ def extract_structured(
 
     line_items = _parse_line_items_from_tables(content.tables)
     if biz == BIZ_PRICE_LIST and not line_items:
-        # CSV-like lines: sku,price
         for line in text.splitlines()[1:200]:
             parts = re.split(r"[,;\t]", line)
             if len(parts) >= 2 and parts[0].strip():
@@ -209,10 +225,152 @@ def extract_structured(
         field_evidence=tuple(evidence),
     )
     vr = validate_structured(structured)
-    from dataclasses import replace
-
     return replace(
         structured,
         validation_ok=vr.ok,
         validation_errors=vr.errors,
+    )
+
+
+def _default_patterns_for_name(name: str) -> tuple[str, ...]:
+    n = name.lower()
+    if n in {"total", "amount", "subtotal", "vat_amount"}:
+        return (rf"(?:{re.escape(name)}|итого|сумма)\s*[:\s]*([0-9]+(?:[.,][0-9]+)?)",)
+    if "date" in n:
+        return (rf"(?:{re.escape(name)}|date|дата)\s*[:\s]*(\d{{1,2}}[./-]\d{{1,2}}[./-]\d{{2,4}})",)
+    if "number" in n or n.endswith("_id") or n in {"inn", "contract_number", "invoice_number"}:
+        return (
+            rf"(?:{re.escape(name)}|{re.escape(name.replace('_', ' '))})\s*(?:no|№|#)?\s*[:\s]*([A-Za-z0-9\-/]+)",
+        )
+    return (rf"(?:{re.escape(name)}|{re.escape(name.replace('_', ' '))})\s*[:\s]*(.+)",)
+
+
+def extract_structured_with_schema(
+    content: DocumentContent,
+    schema: ExtractionSchema,
+) -> StructuredDocument:
+    """Extract fields per ExtractionSchema — never invent values.
+
+    Marks MISSING for required absent fields, AMBIGUOUS if multiple conflicting
+    matches. Keeps extract_structured() for backward compatibility.
+    """
+    text = content.text or ""
+    fields: dict = {}
+    dates: dict = {}
+    amounts: dict = {}
+    identifiers: dict = {}
+    parties: list = []
+    evidence: list[ExtractedField] = []
+    errors: list[str] = []
+
+    for spec in schema.fields:
+        aliases = (spec.name,) + tuple(spec.aliases or ())
+        patterns: list[str] = []
+        for alias in aliases:
+            patterns.extend(_default_patterns_for_name(alias))
+            patterns.append(
+                rf"(?:{re.escape(alias)}|{re.escape(alias.replace('_', ' '))})\s*[:\s]*(.+)"
+            )
+        matches = _search_all_patterns(text, tuple(patterns))
+        unique = []
+        seen = set()
+        for m in matches:
+            key = m.strip().lower()
+            if key not in seen:
+                seen.add(key)
+                unique.append(m.strip())
+
+        if not unique:
+            evidence.append(
+                ExtractedField(
+                    name=spec.name,
+                    value=None,
+                    source_ref="schema",
+                    confidence=CONF_LOW,
+                    method="schema",
+                    status=FIELD_MISSING,
+                )
+            )
+            if spec.required:
+                errors.append(f"missing_required:{spec.name}")
+            continue
+
+        if len(unique) > 1:
+            evidence.append(
+                ExtractedField(
+                    name=spec.name,
+                    value=unique,
+                    source_ref="schema",
+                    confidence=CONF_LOW,
+                    method="schema",
+                    status=FIELD_AMBIGUOUS,
+                )
+            )
+            errors.append(f"ambiguous:{spec.name}")
+            continue
+
+        val = unique[0]
+        evidence.append(
+            ExtractedField(
+                name=spec.name,
+                value=val,
+                source_ref="schema",
+                confidence=CONF_MEDIUM,
+                method="schema",
+                status=FIELD_FOUND,
+            )
+        )
+        ftype = str(spec.type or "string").lower()
+        if ftype in {"number", "money", "decimal", "amount"}:
+            try:
+                amounts[spec.name] = float(str(val).replace(",", ".").replace("%", ""))
+            except ValueError:
+                fields[spec.name] = val
+        elif ftype == "date":
+            dates[spec.name] = val
+        elif ftype in {"id", "identifier"}:
+            identifiers[spec.name] = val
+        elif ftype == "party":
+            parties.append({"role": spec.name, "name": val})
+        else:
+            if "number" in spec.name or spec.name in {"inn", "invoice_number", "contract_number"}:
+                identifiers[spec.name] = val
+            elif "date" in spec.name:
+                dates[spec.name] = val
+            elif spec.name in {"total", "amount", "subtotal", "vat_amount"}:
+                try:
+                    amounts[spec.name] = float(str(val).replace(",", "."))
+                except ValueError:
+                    fields[spec.name] = val
+            else:
+                fields[spec.name] = val
+
+    line_items = _parse_line_items_from_tables(content.tables)
+    doc_type = schema.document_type or BIZ_GENERIC
+    structured = StructuredDocument(
+        document_id=content.document_id,
+        document_type=doc_type if doc_type in _SCHEMA or doc_type == BIZ_GENERIC else BIZ_GENERIC,
+        schema_version=schema.version or schema.schema_id,
+        fields=fields,
+        line_items=tuple(line_items),
+        parties=tuple(parties),
+        dates=dates,
+        amounts=amounts,
+        identifiers=identifiers,
+        confidence=CONF_MEDIUM if any(e.status == FIELD_FOUND for e in evidence) else CONF_LOW,
+        provenance={
+            "extraction_method": "schema",
+            "schema_id": schema.schema_id,
+            "schema_version": schema.version,
+        },
+        field_evidence=tuple(evidence),
+        validation_ok=not errors,
+        validation_errors=tuple(errors),
+    )
+    vr = validate_structured(structured)
+    combined_errors = tuple(dict.fromkeys(list(structured.validation_errors) + list(vr.errors)))
+    return replace(
+        structured,
+        validation_ok=vr.ok and not errors,
+        validation_errors=combined_errors,
     )

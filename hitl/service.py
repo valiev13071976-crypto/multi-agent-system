@@ -430,6 +430,8 @@ class HITLService:
             self.last_permit = existing_permit
             return existing_permit
         stamp = evaluate_kwargs.get("now") or utc_now()
+        action_tenant = str(getattr(action, "tenant_id", "") or "")
+        action_actor = str(getattr(action, "actor_ref", "") or "")
         permit = ExecutionPermit(
             permit_id=str(uuid.uuid4()),
             workflow_id=action.workflow_id,
@@ -444,7 +446,14 @@ class HITLService:
             tool_id=action.tool_id,
             operation=action.operation,
             idempotency_key=action.idempotency_key,
-            metadata={"approval_class": record.approval_class},
+            tenant_id=action_tenant,
+            actor_ref=action_actor,
+            metadata={
+                "approval_class": record.approval_class,
+                # Persist ownership in metadata for durable stores without columns.
+                "tenant_id": action_tenant,
+                "actor_ref": action_actor,
+            },
         )
         self.permits.store.create(permit)
         self.last_permit = permit

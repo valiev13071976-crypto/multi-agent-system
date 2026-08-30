@@ -46,9 +46,31 @@ critical case removed from suite vs baseline.
 
 BLOCKED if the suite cannot run due to local infrastructure/config.
 
+## Offline promotion governance (PATCH-MR-06)
+
+Full promotion lifecycle is represented **offline** in `evals/promotion.py`:
+
+```text
+EVALUATED → CANDIDATE → SHADOW_VALIDATED → CANARY_VALIDATED
+         → RELEASE_APPROVED / PRODUCTION_ELIGIBLE
+```
+
+- Candidate Policy is a versioned artifact (base + proposed `routing_policy_version`,
+  eval suite/run/manifest refs, model/provider profile versions).
+- Shadow / Canary are **evidence contracts** (offline). No live traffic mirroring
+  and no real canary deploy in this module.
+- ReleaseGate PASS is required **after** Shadow + Canary acceptance.
+- `PRODUCTION_ELIGIBLE != PRODUCTION_ACTIVE`.
+- Production activation remains a **manual/external** step (config/env/code deploy).
+  There is no `--apply-production` and ReleaseGate never writes live ModelRouter
+  configuration.
+
+Missing latency/cost metrics must be recorded as `unavailable` — never fabricated.
+
 ## Notes
 
 - No live provider calls in the core suite.
 - No real GitHub writes; fake adapters only.
 - Reports/baselines must not contain secrets.
 - Does not change the public `/api/analyze` contract.
+- Eval / ReleaseGate / Candidate artifacts must not auto-mutate production routing.

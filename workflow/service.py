@@ -11,8 +11,18 @@ from task_queue.errors import QueueDuplicateExecutionError
 from task_queue.models import PRIORITY_NORMAL
 from task_queue.queue import TaskQueue
 from task_queue.worker import ExecutionContextRegistry, TaskWorker, WorkerConfig
-from security.tenant import normalize_tenant_id, scope_execution_key, workflow_tenant_id
+from security.tenant import (
+    normalize_tenant_id,
+    require_tenant_id,
+    scope_execution_key,
+    workflow_tenant_id,
+)
 from workflow.definition import ScheduleSpec
+from workflow.admission import (
+    AdmissionController,
+    AdmissionRejectedError,
+    AdmissionLimits,
+)
 from workflow.models import (
     STATUS_PLANNED,
     STATUS_QUEUED,
@@ -25,6 +35,12 @@ from workflow.models import (
 )
 from workflow.platform import WorkflowPlatform
 from workflow.registry import DefinitionRegistry
+from workflow.runtime_role import (
+    ROLE_API,
+    resolve_runtime_role,
+    role_runs_worker_loops,
+    workflow_worker_enabled,
+)
 from workflow.schedule import WorkflowScheduler
 from workflow.state_manager import StateManager
 
@@ -42,21 +58,78 @@ class WorkflowRuntimeBundle:
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
     _stop: asyncio.Event | None = field(default=None, repr=False)
     _startup_recovery_ran: bool = field(default=False, repr=False)
+    last_startup_recovery_error: str | None = field(default=None, repr=False)
+    last_startup_recovery_result: dict | None = field(default=None, repr=False)
+    last_schedule_tick_error: str | None = field(default=None, repr=False)
+    runtime_role: str = field(default="combined")
+    admission: AdmissionController | None = field(default=None, repr=False)
+    _claims_stopped: bool = field(default=False, repr=False)
+
+    def record_startup_recovery_failure(self, exc: BaseException) -> None:
+        """Surface startup recovery failure without silent swallow.
+
+        Degraded startup is allowed; the failure must remain diagnosable.
+        """
+        from security.redaction import redact
+
+        message = redact(str(exc) or type(exc).__name__)
+        self.last_startup_recovery_error = message
+        obs = self.platform.observability
+        if obs is not None:
+            ctx = obs.create_context(workflow_id="", task_id="startup")
+            obs.emit(
+                "workflow.startup_recovery",
+                context=ctx,
+                component="workflow_service",
+                status="failed",
+                error_code=type(exc).__name__,
+                metadata={"error": message},
+            )
+
+    def record_schedule_tick_failure(
+        self, exc: BaseException, *, schedule_id: str | None = None
+    ) -> None:
+        """Surface schedule persist/restore failures (not silent)."""
+        from security.redaction import redact
+
+        message = redact(str(exc) or type(exc).__name__)
+        self.last_schedule_tick_error = message
+        obs = self.platform.observability
+        if obs is not None:
+            ctx = obs.create_context(workflow_id="", task_id="schedule")
+            meta = {"error": message}
+            if schedule_id:
+                meta["schedule_id"] = schedule_id
+            obs.emit(
+                "workflow.schedule_tick",
+                context=ctx,
+                component="workflow_service",
+                status="failed",
+                error_code=type(exc).__name__,
+                metadata=meta,
+            )
 
     async def start_background(self, *, poll_interval: float = 0.25) -> None:
         if self._worker_task is not None:
             return
-        # Startup: recover + re-enqueue before draining the queue.
-        self.recover_and_reenqueue_persisted()
+        if not role_runs_worker_loops(self.runtime_role):
+            return
+        self._claims_stopped = False
+        # Startup: recover + re-enqueue before draining the queue (worker/combined only).
+        try:
+            self.recover_and_reenqueue_persisted()
+        except Exception as exc:
+            self.record_startup_recovery_failure(exc)
         self._stop = asyncio.Event()
 
         async def _loop():
             while self._stop is not None and not self._stop.is_set():
                 try:
-                    await self.tick_schedules()
-                    # Promote due retry_wait workflows into the queue.
-                    self.reenqueue_due_retries()
-                    await self.worker.run_once()
+                    if not self._claims_stopped:
+                        await self.tick_schedules()
+                        self.reenqueue_due_retries()
+                        self.queue.recover_stuck_running(force=False)
+                        await self.worker.run_once()
                 except Exception:
                     pass
                 await asyncio.sleep(poll_interval)
@@ -64,6 +137,7 @@ class WorkflowRuntimeBundle:
         self._worker_task = asyncio.create_task(_loop())
 
     async def stop_background(self) -> None:
+        self.stop_new_claims()
         if self._stop is not None:
             self._stop.set()
         if self._worker_task is not None:
@@ -74,33 +148,150 @@ class WorkflowRuntimeBundle:
                 pass
             self._worker_task = None
 
+    def stop_new_claims(self) -> None:
+        """Graceful worker shutdown: stop scheduler/queue claims; leases remain."""
+
+        self._claims_stopped = True
+
     async def tick_schedules(self) -> list[str]:
+        from datetime import timedelta
+
+        from side_effects.errors import SideEffectPersistenceUnavailableError
+
+        if self._claims_stopped:
+            return []
         launched = []
-        for due in self.scheduler.due():
+        store = self.scheduler.store
+        claim_fn = getattr(store, "claim_due_window", None)
+        complete_fn = getattr(store, "complete_claimed_window", None)
+        stale_fn = getattr(store, "list_stale_claims", None)
+
+        async def _fire(due, *, claim=None, window_at=None, key: str):
             payload = dict(due.payload or {})
-            # Prefer commerce-specific idempotency key when present
+            tenant_id = payload.get("tenant_id")
+            from security.config import DEFAULT_LEGACY_TENANT
+
+            resolved_tenant = require_tenant_id(
+                tenant_id if tenant_id not in (None, "") else DEFAULT_LEGACY_TENANT
+            )
+            result = await self.create_and_enqueue(
+                due.workflow_type,
+                due.version,
+                task_id=f"sched-{due.schedule_id}-{due.run_count}",
+                execution_key=key,
+                metadata={
+                    "schedule_id": due.schedule_id,
+                    "trigger": "scheduled",
+                    "execution_lane": "scheduled",
+                    **payload,
+                },
+                tenant_id=resolved_tenant,
+                priority=PRIORITY_NORMAL,
+                execution_lane="scheduled",
+            )
+            if claim is not None and complete_fn is not None and window_at is not None:
+                stamp = utc_now()
+                next_run = window_at
+                enabled = due.enabled
+                if due.interval_seconds:
+                    next_run = stamp + timedelta(seconds=float(due.interval_seconds))
+                else:
+                    enabled = False
+                complete_fn(
+                    due.schedule_id,
+                    claim_token=claim.claim_token,
+                    claimed_window_at=window_at,
+                    execution_key=key,
+                    next_run_at=next_run,
+                    enabled=enabled,
+                    now=stamp,
+                )
+            else:
+                self.scheduler.mark_enqueued(due.schedule_id, execution_key=key)
+            launched.append(result["workflow_id"])
+            obs = self.platform.observability
+            if obs is not None:
+                from observability.helpers import safe_emit
+
+                safe_emit(
+                    obs,
+                    "workflow.schedule_claimed",
+                    context=obs.create_context(workflow_id=result["workflow_id"]),
+                    component="scheduler",
+                    status="enqueued",
+                    metadata={
+                        "schedule_id": due.schedule_id,
+                        "execution_key": key,
+                        "tenant_id": resolved_tenant,
+                    },
+                )
+
+        # Recover claim→enqueue crash window (expired claims).
+        if callable(stale_fn):
+            try:
+                for stale in stale_fn(utc_now()):
+                    due = stale.state
+                    window = stale.claimed_window_at
+                    payload = dict(due.payload or {})
+                    if due.workflow_type == "commerce.reconcile":
+                        tenant = str(payload.get("tenant_id") or "legacy-default")
+                        key = f"commerce-reconcile:{tenant}:{int(window.timestamp())}"
+                    elif due.workflow_type == "payments.reconcile":
+                        tenant = str(payload.get("tenant_id") or "legacy-default")
+                        key = f"payments-reconcile:{tenant}:{int(window.timestamp())}"
+                    else:
+                        from dataclasses import replace
+
+                        key = self.scheduler.execution_key_for(
+                            replace(due, next_run_at=window)
+                        )
+                    try:
+                        await _fire(
+                            due, claim=stale, window_at=window, key=key
+                        )
+                    except Exception:
+                        continue
+            except SideEffectPersistenceUnavailableError as exc:
+                self.record_schedule_tick_failure(exc)
+
+        try:
+            due_list = self.scheduler.due()
+        except SideEffectPersistenceUnavailableError as exc:
+            self.record_schedule_tick_failure(exc)
+            return launched
+
+        for due in due_list:
+            payload = dict(due.payload or {})
+            window = due.next_run_at
             if due.workflow_type == "commerce.reconcile":
                 tenant = str(payload.get("tenant_id") or "legacy-default")
-                window = int(due.next_run_at.timestamp())
-                key = f"commerce-reconcile:{tenant}:{window}"
+                key = f"commerce-reconcile:{tenant}:{int(window.timestamp())}"
             elif due.workflow_type == "payments.reconcile":
                 tenant = str(payload.get("tenant_id") or "legacy-default")
-                window = int(due.next_run_at.timestamp())
-                key = f"payments-reconcile:{tenant}:{window}"
+                key = f"payments-reconcile:{tenant}:{int(window.timestamp())}"
             else:
                 key = self.scheduler.execution_key_for(due)
-            tenant_id = payload.get("tenant_id")
-            try:
-                result = await self.create_and_enqueue(
-                    due.workflow_type,
-                    due.version,
-                    task_id=f"sched-{due.schedule_id}-{due.run_count}",
-                    execution_key=key,
-                    metadata={"schedule_id": due.schedule_id, **payload},
-                    tenant_id=str(tenant_id) if tenant_id else None,
+            claim = None
+            if callable(claim_fn):
+                claim = claim_fn(
+                    due.schedule_id,
+                    expected_next_run_at=window,
+                    now=utc_now(),
                 )
-                self.scheduler.mark_enqueued(due.schedule_id, execution_key=key)
-                launched.append(result["workflow_id"])
+                if claim is None:
+                    continue
+            try:
+                await _fire(
+                    due,
+                    claim=claim,
+                    window_at=window if claim is not None else None,
+                    key=key,
+                )
+            except SideEffectPersistenceUnavailableError as exc:
+                self.record_schedule_tick_failure(exc, schedule_id=due.schedule_id)
+                continue
+            except AdmissionRejectedError:
+                continue
             except Exception:
                 continue
         return launched
@@ -115,6 +306,9 @@ class WorkflowRuntimeBundle:
         metadata=None,
         sync: bool = False,
         tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
     ) -> dict:
         definition = self.definitions.get(workflow_type, version)
         task_id = task_id or str(uuid.uuid4())
@@ -124,6 +318,9 @@ class WorkflowRuntimeBundle:
             execution_key=execution_key,
             metadata=metadata,
             tenant_id=tenant_id,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=actor_ref,
         )
         return {
             "workflow_id": state.workflow_id,
@@ -142,14 +339,21 @@ class WorkflowRuntimeBundle:
         task_id: str | None = None,
         metadata=None,
         tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
     ) -> dict:
+        tenant = require_tenant_id(tenant_id)
         created = self.create_workflow(
             workflow_type,
             version,
             task_id=task_id,
             metadata=metadata,
             sync=True,
-            tenant_id=tenant_id,
+            tenant_id=tenant,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=actor_ref,
         )
         self.state_manager.start(created["workflow_id"])
         result = await self.platform.advance(created["workflow_id"])
@@ -166,8 +370,25 @@ class WorkflowRuntimeBundle:
         priority: str = PRIORITY_NORMAL,
         timeout_seconds: float | None = None,
         tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
+        execution_lane: str | None = None,
     ) -> dict:
-        tenant = normalize_tenant_id(tenant_id)
+        tenant = require_tenant_id(tenant_id)
+        meta_in = dict(metadata or {})
+        if execution_lane:
+            meta_in.setdefault("execution_lane", execution_lane)
+        admission = self.admission or AdmissionController(
+            observability=self.platform.observability
+        )
+        admission.require_enqueue(
+            self.queue,
+            tenant_id=tenant,
+            priority=priority,
+            execution_lane=execution_lane,
+            metadata=meta_in,
+        )
         # Idempotency BEFORE creating a WorkflowInstance (tenant-scoped).
         if execution_key:
             existing = self.state_manager.find_by_execution_key(
@@ -180,6 +401,7 @@ class WorkflowRuntimeBundle:
                     timeout_seconds=timeout_seconds,
                     workflow_type=workflow_type,
                     version=version,
+                    execution_lane=execution_lane or meta_in.get("execution_lane"),
                 )
 
         created = self.create_workflow(
@@ -187,9 +409,12 @@ class WorkflowRuntimeBundle:
             version,
             task_id=task_id,
             execution_key=execution_key,
-            metadata=metadata,
+            metadata=meta_in,
             sync=False,
             tenant_id=tenant,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=actor_ref,
         )
         if execution_key:
             winner = self.state_manager.find_by_execution_key(
@@ -207,12 +432,18 @@ class WorkflowRuntimeBundle:
                     timeout_seconds=timeout_seconds,
                     workflow_type=workflow_type,
                     version=version,
+                    execution_lane=execution_lane or meta_in.get("execution_lane"),
                 )
         return self.enqueue_existing(
             created["workflow_id"],
             priority=priority,
             timeout_seconds=timeout_seconds,
-            metadata={"workflow_type": workflow_type, "version": version},
+            metadata={
+                "workflow_type": workflow_type,
+                "version": version,
+                **({"execution_lane": execution_lane} if execution_lane else {}),
+            },
+            execution_lane=execution_lane,
         )
 
     def _return_existing_for_enqueue(
@@ -223,6 +454,7 @@ class WorkflowRuntimeBundle:
         timeout_seconds: float | None,
         workflow_type: str,
         version: str,
+        execution_lane: str | None = None,
     ) -> dict:
         state = self.state_manager.get(workflow_id)
         if state.status in TERMINAL_STATUSES:
@@ -247,8 +479,13 @@ class WorkflowRuntimeBundle:
             workflow_id,
             priority=priority,
             timeout_seconds=timeout_seconds,
-            metadata={"workflow_type": workflow_type, "version": version},
+            metadata={
+                "workflow_type": workflow_type,
+                "version": version,
+                **({"execution_lane": execution_lane} if execution_lane else {}),
+            },
             idempotent=True,
+            execution_lane=execution_lane,
         )
 
     def enqueue_existing(
@@ -259,6 +496,7 @@ class WorkflowRuntimeBundle:
         timeout_seconds: float | None = None,
         metadata=None,
         idempotent: bool = False,
+        execution_lane: str | None = None,
     ) -> dict:
         """Enqueue an existing workflow without creating a new WorkflowInstance."""
 
@@ -303,11 +541,21 @@ class WorkflowRuntimeBundle:
         exec_key = state.execution_key
         tenant = workflow_tenant_id(state)
         scoped_key = scope_execution_key(tenant, exec_key)
+        user_id = str(getattr(state, "user_id", None) or (state.metadata or {}).get("user_id") or "")
+        actor_ref = str(
+            getattr(state, "actor_ref", None) or (state.metadata or {}).get("actor_ref") or ""
+        )
         meta = metadata or {
             "workflow_type": state.workflow_type or "",
             "version": state.definition_version or "",
             "tenant_id": tenant,
         }
+        meta = dict(meta)
+        meta.setdefault("tenant_id", tenant)
+        if user_id:
+            meta.setdefault("user_id", user_id)
+        if actor_ref:
+            meta.setdefault("actor_ref", actor_ref)
         handler = self._make_handler(workflow_id)
         self.registry.register(scoped_key, handler)
         self._obs_queue(workflow_id, "workflow.queued")
@@ -319,6 +567,10 @@ class WorkflowRuntimeBundle:
                 priority=priority,
                 timeout_seconds=timeout_seconds,
                 metadata=meta,
+                tenant_id=tenant,
+                user_id=user_id,
+                actor_ref=actor_ref,
+                execution_lane=execution_lane,
             )
         except QueueDuplicateExecutionError:
             # Prior queue task is terminal, but workflow still needs work
@@ -332,6 +584,10 @@ class WorkflowRuntimeBundle:
                 priority=priority,
                 timeout_seconds=timeout_seconds,
                 metadata={**dict(meta), "wake_of": scoped_key},
+                tenant_id=tenant,
+                user_id=user_id,
+                actor_ref=actor_ref,
+                execution_lane=execution_lane,
             )
             return {
                 "workflow_id": state.workflow_id,
@@ -355,21 +611,27 @@ class WorkflowRuntimeBundle:
         """Production startup recovery for durable workflows + empty TaskQueue.
 
         Flow:
-          load persisted → recover interrupted running → identify runnable/due
-          → re-enqueue existing → (caller starts worker)
+          reclaim stuck queue RUNNING → load persisted → recover interrupted
+          → skip analyze orphans (no workflow_type) → re-enqueue durable runnable
         """
 
+        self.last_startup_recovery_error = None
         recovered: list[str] = []
         reenqueued: list[str] = []
         skipped: list[dict] = []
+        queue_reclaimed: list[str] = []
+
+        try:
+            queue_reclaimed = list(self.queue.recover_stuck_running(force=False))
+        except Exception as exc:
+            self.record_startup_recovery_failure(exc)
+            raise
+
         try:
             workflows = list(self.state_manager._store.list_all())
-        except Exception:
-            return {
-                "recovered": recovered,
-                "reenqueued": reenqueued,
-                "skipped": skipped,
-            }
+        except Exception as exc:
+            self.record_startup_recovery_failure(exc)
+            raise
 
         # Deterministic order
         workflows.sort(key=lambda w: (w.created_at, w.workflow_id))
@@ -379,6 +641,24 @@ class WorkflowRuntimeBundle:
             try:
                 state = self.state_manager.get(wid)
             except Exception:
+                skipped.append({"workflow_id": wid, "reason": "load_failed"})
+                continue
+
+            # Path A analyze orphans: durable state without DAG definition.
+            # Demote interrupted steps for consistency; never Path-B re-enqueue.
+            if not state.workflow_type:
+                if state.status == STATUS_RUNNING:
+                    try:
+                        self.platform.recover_after_restart(wid)
+                        recovered.append(wid)
+                    except Exception:
+                        skipped.append(
+                            {"workflow_id": wid, "reason": "analyze_recover_failed"}
+                        )
+                        continue
+                skipped.append(
+                    {"workflow_id": wid, "reason": "not_durable_definition"}
+                )
                 continue
 
             if state.status == STATUS_RUNNING:
@@ -420,6 +700,13 @@ class WorkflowRuntimeBundle:
                 skipped.append({"workflow_id": wid, "reason": state.status})
 
         self._startup_recovery_ran = True
+        result = {
+            "recovered": recovered,
+            "reenqueued": reenqueued,
+            "skipped": skipped,
+            "queue_reclaimed": queue_reclaimed,
+        }
+        self.last_startup_recovery_result = result
         obs = self.platform.observability
         if obs is not None:
             ctx = obs.create_context(workflow_id="", task_id="startup")
@@ -432,13 +719,10 @@ class WorkflowRuntimeBundle:
                     "recovered_count": len(recovered),
                     "reenqueued_count": len(reenqueued),
                     "skipped_count": len(skipped),
+                    "queue_reclaimed_count": len(queue_reclaimed),
                 },
             )
-        return {
-            "recovered": recovered,
-            "reenqueued": reenqueued,
-            "skipped": skipped,
-        }
+        return result
 
     def reenqueue_due_retries(self) -> list[str]:
         """Background helper: enqueue retry_wait workflows whose next_retry_at is due."""
@@ -526,12 +810,28 @@ class WorkflowRuntimeBundle:
         exec_key = f"{state.execution_key}:resume:{int(utc_now().timestamp())}"
         tenant = workflow_tenant_id(state)
         scoped_key = scope_execution_key(tenant, exec_key)
+        user_id = str(
+            getattr(state, "user_id", None) or (state.metadata or {}).get("user_id") or ""
+        )
+        actor_ref = str(
+            getattr(state, "actor_ref", None)
+            or (state.metadata or {}).get("actor_ref")
+            or ""
+        )
         self.registry.register(scoped_key, self._make_handler(workflow_id))
         task = self.queue.enqueue(
             workflow_id=workflow_id,
             task_id=state.task_id,
             execution_key=scoped_key,
-            metadata={"resume": True, "tenant_id": tenant},
+            metadata={
+                "resume": True,
+                "tenant_id": tenant,
+                **({"user_id": user_id} if user_id else {}),
+                **({"actor_ref": actor_ref} if actor_ref else {}),
+            },
+            tenant_id=tenant,
+            user_id=user_id,
+            actor_ref=actor_ref,
         )
         self._obs_queue(workflow_id, "workflow.resumed_queued")
         return {
@@ -550,6 +850,10 @@ def build_workflow_runtime(
     hitl_service=None,
     queue: TaskQueue | None = None,
     definitions: DefinitionRegistry | None = None,
+    schedule_store=None,
+    task_queue_store=None,
+    runtime_role: str | None = None,
+    env: dict | None = None,
 ) -> WorkflowRuntimeBundle:
     sm = state_manager or (
         workflow_engine.state_manager if workflow_engine is not None else StateManager()
@@ -570,9 +874,46 @@ def build_workflow_runtime(
         workflow_engine=workflow_engine,
     )
     registry = ExecutionContextRegistry()
-    tq = queue or TaskQueue()
+    role = runtime_role or resolve_runtime_role(env)
+    limits = AdmissionLimits.from_env(env)
+    admission = AdmissionController(
+        limits,
+        observability=observability or platform.observability,
+    )
+    from task_queue.lanes import LaneCapacityConfig, parse_worker_lanes
+
+    lane_cfg = LaneCapacityConfig.from_env(env)
+    source = env if env is not None else {}
+    import os as _os
+
+    worker_lanes = parse_worker_lanes(
+        source.get("WORKER_LANES")
+        if hasattr(source, "get")
+        else _os.environ.get("WORKER_LANES")
+    )
+    if queue is not None:
+        tq = queue
+    elif task_queue_store is not None:
+        tq = TaskQueue(
+            store=task_queue_store,
+            admission_limits=limits,
+            lane_config=lane_cfg,
+            allowed_lanes=worker_lanes,
+        )
+    else:
+        tq = TaskQueue(
+            admission_limits=limits,
+            lane_config=lane_cfg,
+            allowed_lanes=worker_lanes,
+        )
     if observability is not None:
         tq.observability = observability
+    if getattr(tq, "admission_limits", None) is None:
+        tq.admission_limits = limits
+    if getattr(tq, "lane_config", None) is None:
+        tq.lane_config = lane_cfg
+    if getattr(tq, "allowed_lanes", None) is None:
+        tq.allowed_lanes = worker_lanes
     worker = TaskWorker(
         tq,
         engine=workflow_engine,
@@ -584,13 +925,13 @@ def build_workflow_runtime(
         queue=tq,
         worker=worker,
         registry=registry,
-        scheduler=WorkflowScheduler(),
+        scheduler=WorkflowScheduler(store=schedule_store),
         definitions=defs,
         state_manager=sm,
+        runtime_role=role,
+        admission=admission,
     )
 
 
-def workflow_worker_enabled(env: dict | None = None) -> bool:
-    source = env if env is not None else os.environ
-    raw = str(source.get("WORKFLOW_WORKER_ENABLED", "true")).strip().lower()
-    return raw in {"1", "true", "yes", "on"}
+# Re-export for callers still importing from workflow.service
+# workflow_worker_enabled is imported from workflow.runtime_role above.

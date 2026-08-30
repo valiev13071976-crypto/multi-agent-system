@@ -1,4 +1,5 @@
 import re
+import uuid
 
 from agents.validators.models import (
     FACT_HEAVY_CATEGORIES,
@@ -80,27 +81,154 @@ class FactValidator:
             reason=reason,
         )
 
-    async def validate(self, expert_answers: dict, *, category: str | None = None):
-        result = await self._validate_impl(expert_answers, category=category)
+    def _obs_runtime(self):
         obs = self.observability
         if obs is None and self.gateway is not None:
             obs = getattr(self.gateway, "observability", None)
-        if obs is not None:
-            from observability.helpers import safe_emit
+        return obs
 
-            safe_emit(
-                obs,
-                "validation.completed",
-                context=obs.create_context(),
-                component="validation",
-                status=getattr(result, "status", ""),
-                metadata={
-                    "validator_type": "fact",
-                    "pass": getattr(result, "status", "") == STATUS_PASS,
-                    "confidence": getattr(result, "score", None),
-                    "reason_code_count": 1 if getattr(result, "reason", None) else 0,
-                },
+    def _resolve_obs_context(
+        self,
+        *,
+        parent_context=None,
+        envelope=None,
+        task_id: str = "",
+        workflow_id: str = "",
+        tenant_id: str = "",
+        actor_ref: str = "",
+        correlation_id: str | None = None,
+    ):
+        """Prefer parent/envelope lineage; never invent competing root when parent exists."""
+        obs = self._obs_runtime()
+        if obs is None:
+            return None
+
+        if parent_context is not None:
+            return obs.child_span(
+                parent_context,
+                workflow_id=workflow_id or None,
+                task_id=task_id or None,
+                tenant_id=tenant_id or None,
+                actor_ref=actor_ref or None,
             )
+
+        if envelope is not None:
+            env_workflow = str(getattr(envelope, "workflow_id", "") or "")
+            env_task = str(getattr(envelope, "task_id", "") or task_id or "")
+            env_tenant = str(getattr(envelope, "tenant_id", "") or "")
+            env_actor = str(getattr(envelope, "actor_ref", "") or "")
+            existing = (
+                obs.context_for_workflow(env_workflow) if env_workflow else None
+            )
+            if existing is not None:
+                return existing.child(
+                    task_id=env_task or existing.task_id,
+                    actor_ref=env_actor or None,
+                    tenant_id=env_tenant or None,
+                )
+            from observability.context import ObservabilityContext
+
+            return ObservabilityContext(
+                correlation_id=str(envelope.correlation_id),
+                trace_id=str(envelope.trace_id),
+                span_id=str(uuid.uuid4()),
+                parent_span_id=None,
+                workflow_id=env_workflow,
+                task_id=env_task,
+                actor_ref=env_actor,
+                tenant_id=env_tenant,
+            )
+
+        resolved_workflow = str(workflow_id or "")
+        if resolved_workflow:
+            existing = obs.context_for_workflow(resolved_workflow)
+            if existing is not None:
+                return existing.child(
+                    task_id=task_id or existing.task_id,
+                    actor_ref=actor_ref or None,
+                    tenant_id=tenant_id or None,
+                )
+
+        # Legacy callers without parent/envelope.
+        return obs.create_context(
+            correlation_id=correlation_id,
+            workflow_id=resolved_workflow,
+            task_id=str(task_id or ""),
+            actor_ref=str(actor_ref or ""),
+            tenant_id=str(tenant_id or ""),
+        )
+
+    def _emit_validation_completed(
+        self,
+        result,
+        *,
+        envelope=None,
+        parent_context=None,
+        task_id: str = "",
+        workflow_id: str = "",
+        tenant_id: str = "",
+        actor_ref: str = "",
+        request_id: str | None = None,
+    ) -> None:
+        obs = self._obs_runtime()
+        if obs is None:
+            return
+        from observability.helpers import safe_emit
+
+        if envelope is not None:
+            task_id = str(getattr(envelope, "task_id", "") or task_id or "")
+            workflow_id = str(getattr(envelope, "workflow_id", "") or "")
+            tenant_id = str(getattr(envelope, "tenant_id", "") or "")
+            actor_ref = str(getattr(envelope, "actor_ref", "") or "")
+            request_id = str(getattr(envelope, "request_id", "") or request_id or "") or None
+
+        context = self._resolve_obs_context(
+            parent_context=parent_context,
+            envelope=envelope,
+            task_id=task_id,
+            workflow_id=workflow_id,
+            tenant_id=tenant_id,
+            actor_ref=actor_ref,
+            correlation_id=request_id,
+        )
+        safe_emit(
+            obs,
+            "validation.completed",
+            context=context,
+            component="validation",
+            status=getattr(result, "status", ""),
+            metadata={
+                "validator_type": "fact",
+                "pass": getattr(result, "status", "") == STATUS_PASS,
+                "confidence": getattr(result, "score", None),
+                "reason_code_count": 1 if getattr(result, "reason", None) else 0,
+            },
+        )
+
+    async def validate(
+        self,
+        expert_answers: dict,
+        *,
+        category: str | None = None,
+        envelope=None,
+        parent_context=None,
+        task_id: str | None = None,
+        workflow_id: str | None = None,
+        tenant_id: str | None = None,
+        actor_ref: str | None = None,
+        request_id: str | None = None,
+    ):
+        result = await self._validate_impl(expert_answers, category=category)
+        self._emit_validation_completed(
+            result,
+            envelope=envelope,
+            parent_context=parent_context,
+            task_id=str(task_id or ""),
+            workflow_id=str(workflow_id or ""),
+            tenant_id=str(tenant_id or ""),
+            actor_ref=str(actor_ref or ""),
+            request_id=request_id,
+        )
         return result
 
     async def _validate_impl(self, expert_answers: dict, *, category: str | None = None):

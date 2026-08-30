@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from types import MappingProxyType
+from typing import Mapping
 
 from tools.errors import (
     ToolDisabledError,
@@ -13,6 +15,7 @@ from tools.errors import (
 )
 from tools.models import (
     ADAPTER_UNAVAILABLE,
+    VERSION_DISABLED,
     ToolDescriptor,
     ToolRequest,
     WRITE_TRUST_LEVELS,
@@ -21,11 +24,43 @@ from tools.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
+class RouteRejection:
+    tool_id: str
+    reason: str
+
+    def as_dict(self) -> dict:
+        return {"tool_id": self.tool_id, "reason": self.reason}
+
+
+@dataclass(frozen=True)
 class RouteDecision:
     tool_id: str
     descriptor: ToolDescriptor
     explicit: bool
     capability_match: bool
+    selected_tool: str = ""
+    selected_version: str = ""
+    candidates: tuple[str, ...] = ()
+    rejected: tuple[RouteRejection, ...] = ()
+    policy_decision: str = "allow"
+    trust_decision: str = "allow"
+    routing_metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        selected = self.selected_tool or self.tool_id
+        object.__setattr__(self, "selected_tool", selected)
+        object.__setattr__(
+            self,
+            "selected_version",
+            self.selected_version or self.descriptor.version,
+        )
+        object.__setattr__(self, "candidates", tuple(self.candidates or ()))
+        object.__setattr__(self, "rejected", tuple(self.rejected or ()))
+        object.__setattr__(
+            self,
+            "routing_metadata",
+            MappingProxyType(dict(self.routing_metadata or {})),
+        )
 
 
 class ToolRouter:
@@ -43,43 +78,156 @@ class ToolRouter:
         request: ToolRequest,
         *,
         capability: str | None = None,
+        capabilities=None,
+        workload_class: str | None = None,
+        data_scope: str | None = None,
+        require_tenant_permission: bool = False,
     ) -> RouteDecision:
         explicit = bool(request.tool_id)
+        rejected: list[RouteRejection] = []
+        candidates: list[str] = []
+        meta: dict[str, object] = {}
+
         if explicit:
-            descriptor = self.registry.get(request.tool_id)
+            version_pin = str(getattr(request, "tool_version", "") or "").strip() or None
+            try:
+                row = self.registry.resolve(request.tool_id, version_pin)
+                descriptor = row.descriptor
+            except ToolDisabledError:
+                rejected.append(RouteRejection(request.tool_id, "tool_disabled"))
+                raise
+            except ToolNotFoundError as exc:
+                reason = getattr(exc, "error_code", "tool_not_found")
+                rejected.append(RouteRejection(request.tool_id, reason))
+                raise
+            candidates = [descriptor.tool_id]
         elif capability:
-            matches = self.find_by_capability(capability)
+            matches, rejected = self._eligible_by_capability(
+                capability,
+                operation=request.operation,
+                capabilities=capabilities,
+                workload_class=workload_class or getattr(request, "metadata", {}).get(  # type: ignore[union-attr]
+                    "workload_class"
+                ),
+                data_scope=data_scope or getattr(request, "data_scope_ref", "") or None,
+            )
+            candidates = [d.tool_id for d in matches]
             if not matches:
-                raise ToolNotFoundError("tool_not_found")
+                meta["rejected"] = [r.as_dict() for r in rejected]
+                raise ToolNotFoundError("no_eligible_tool")
             descriptor = matches[0]
         else:
             raise ToolNotFoundError("tool_not_found")
 
-        if not descriptor.enabled:
+        if not descriptor.enabled or descriptor.version_status == VERSION_DISABLED:
+            rejected.append(RouteRejection(descriptor.tool_id, "tool_disabled"))
             raise ToolDisabledError()
         if request.operation and request.operation not in descriptor.operations:
+            rejected.append(RouteRejection(descriptor.tool_id, "operation_not_allowed"))
             raise ToolOperationNotAllowedError()
+
+        # Tenant permission via capabilities (no silent unauthorized fallback)
+        policy_decision = "allow"
+        trust_decision = "allow"
+        if capabilities is not None or require_tenant_permission:
+            ok, reason = self._tenant_capability_ok(descriptor, capabilities)
+            if not ok:
+                policy_decision = "deny"
+                rejected.append(RouteRejection(descriptor.tool_id, reason))
+                raise ToolPolicyDeniedError(reason)
+
+        # Trust decision is recorded; health never overrides auth
+        if descriptor.trust_level in WRITE_TRUST_LEVELS and descriptor.read_only:
+            trust_decision = "deny"
+            rejected.append(RouteRejection(descriptor.tool_id, "trust_policy_denied"))
+            raise ToolPolicyDeniedError("tool_policy_denied")
+
         health = self._adapter_health.get(descriptor.adapter_id, "healthy")
+        meta["adapter_health"] = health
         if health == ADAPTER_UNAVAILABLE:
+            rejected.append(RouteRejection(descriptor.tool_id, "adapter_unavailable"))
             raise ToolUnavailableError()
+
+        # Workload / data scope soft filters already applied for capability route;
+        # for explicit route record mismatch metadata without silent swap.
+        hint = str(descriptor.workload_class_hint or "")
+        if workload_class and hint and hint != workload_class:
+            meta["workload_mismatch"] = True
+        if data_scope and descriptor.resource_prefix:
+            if not str(data_scope).startswith(str(descriptor.resource_prefix)):
+                meta["data_scope_mismatch"] = True
+
         return RouteDecision(
             tool_id=descriptor.tool_id,
             descriptor=descriptor,
             explicit=explicit,
             capability_match=bool(capability),
+            selected_tool=descriptor.tool_id,
+            selected_version=descriptor.version,
+            candidates=tuple(candidates),
+            rejected=tuple(rejected),
+            policy_decision=policy_decision,
+            trust_decision=trust_decision,
+            routing_metadata=meta,
         )
 
+    def _tenant_capability_ok(self, descriptor: ToolDescriptor, capabilities) -> tuple[bool, str]:
+        required = set(descriptor.capabilities_required or ())
+        if not required:
+            return True, "allow"
+        if capabilities is None:
+            return False, "missing_tool_capability"
+        provided: set[str] = set()
+        if hasattr(capabilities, "capabilities"):
+            provided |= set(capabilities.capabilities or ())
+        elif isinstance(capabilities, (set, list, tuple)):
+            provided |= set(capabilities)
+        if not required <= provided:
+            return False, "missing_tool_capability"
+        return True, "allow"
+
+    def _eligible_by_capability(
+        self,
+        capability: str,
+        *,
+        operation: str = "",
+        capabilities=None,
+        workload_class: str | None = None,
+        data_scope: str | None = None,
+    ) -> tuple[list[ToolDescriptor], list[RouteRejection]]:
+        rejected: list[RouteRejection] = []
+        eligible: list[ToolDescriptor] = []
+        for desc in self.registry.list_tools(include_disabled=True):
+            if capability not in desc.capabilities_required and capability != desc.category:
+                continue
+            if not desc.enabled or desc.version_status == VERSION_DISABLED:
+                rejected.append(RouteRejection(desc.tool_id, "tool_disabled"))
+                continue
+            if operation and operation not in desc.operations:
+                rejected.append(RouteRejection(desc.tool_id, "operation_not_allowed"))
+                continue
+            ok, reason = self._tenant_capability_ok(desc, capabilities) if capabilities is not None else (True, "allow")
+            if capabilities is not None and not ok:
+                rejected.append(RouteRejection(desc.tool_id, reason))
+                continue
+            health = self._adapter_health.get(desc.adapter_id, "healthy")
+            if health == ADAPTER_UNAVAILABLE:
+                rejected.append(RouteRejection(desc.tool_id, "adapter_unavailable"))
+                continue
+            if workload_class and desc.workload_class_hint:
+                if desc.workload_class_hint != workload_class:
+                    rejected.append(RouteRejection(desc.tool_id, "workload_incompatible"))
+                    continue
+            if data_scope and desc.resource_prefix:
+                if not str(data_scope).startswith(str(desc.resource_prefix)):
+                    rejected.append(RouteRejection(desc.tool_id, "data_scope_mismatch"))
+                    continue
+            eligible.append(desc)
+        return eligible, rejected
+
     def find_by_capability(self, capability: str) -> tuple[ToolDescriptor, ...]:
-        cap = str(capability or "").strip()
-        if not cap:
-            return ()
-        out = []
-        for desc in self.registry.list_tools():
-            if cap in desc.capabilities_required or cap == desc.category:
-                health = self._adapter_health.get(desc.adapter_id, "healthy")
-                if health != ADAPTER_UNAVAILABLE:
-                    out.append(desc)
-        return tuple(out)
+        matches, _ = self._eligible_by_capability(capability)
+        return tuple(matches)
 
     def find_by_category(self, category: str) -> tuple[ToolDescriptor, ...]:
         cat = str(category or "").strip()

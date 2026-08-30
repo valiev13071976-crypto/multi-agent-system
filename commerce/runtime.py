@@ -58,6 +58,7 @@ class CommerceRuntime:
         enabled: bool = True,
         reconciliation_enabled: bool = False,
         reconciliation_interval_seconds: float = DEFAULT_INTERVAL_SECONDS,
+        product_platform=None,
     ):
         self.service = service
         self.store = store
@@ -65,6 +66,7 @@ class CommerceRuntime:
         self.enabled = enabled
         self.reconciliation_enabled = reconciliation_enabled
         self.reconciliation_interval_seconds = float(reconciliation_interval_seconds)
+        self.product_platform = product_platform
 
     def health(self) -> dict:
         schedules = 0
@@ -157,6 +159,14 @@ def build_commerce_runtime(
         data_intelligence=data_intelligence,
         acquisition_service=acquisition_service,
     )
+    product_platform = None
+    try:
+        from commerce.product_platform.runtime import build_product_platform_service
+
+        product_platform = build_product_platform_service(store=store)
+        service.product_platform = product_platform
+    except Exception:
+        product_platform = None
     recon_scheduler = None
     if workflow_runtime is not None:
         try:
@@ -184,7 +194,6 @@ def build_commerce_runtime(
                 tenants,
                 interval_seconds=cfg["reconciliation_interval_seconds"],
             )
-    _ = observability
     return CommerceRuntime(
         service=service,
         store=store,
@@ -192,4 +201,5 @@ def build_commerce_runtime(
         enabled=True,
         reconciliation_enabled=bool(cfg["reconciliation_enabled"]),
         reconciliation_interval_seconds=cfg["reconciliation_interval_seconds"],
+        product_platform=product_platform,
     )

@@ -22,6 +22,14 @@ class UsageRecord:
     estimated_cost: Decimal | None
     currency: str
     timestamp: datetime
+    # Attribution (optional defaults preserve existing call sites)
+    workflow_id: str = ""
+    tenant_id: str = ""
+    user_id: str = ""
+    request_id: str = ""
+    # P1-USAGE ownership (envelope-sourced on live Core path; empty for legacy)
+    actor_ref: str = ""
+    execution_id: str = ""
 
 
 @dataclass(frozen=True)

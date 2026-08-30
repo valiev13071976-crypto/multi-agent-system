@@ -181,6 +181,7 @@ class SideEffectExecutor:
         authorization_type = None
         authorization_id = ""
         started_at = stamp
+        tenant_id = ""
 
         self.audit.record(
             EVENT_EXECUTION_REQUESTED,
@@ -199,6 +200,9 @@ class SideEffectExecutor:
             update_metrics=False,
         )
         try:
+            # Soft resolve early so pre-mutate denials persist with ownership when known.
+            # Fail-closed tenant require runs only before mutate/start persistence.
+            tenant_id = self._peek_execution_tenant(action, state_manager)
             self._deny_disabled_actions(action)
             self._require_executable_action_type(action)
             if not action.idempotency_key:
@@ -207,6 +211,7 @@ class SideEffectExecutor:
             if completed is not None:
                 return self._result_from_record(completed)
             self._require_workflow_running(state_manager, action.workflow_id)
+            tenant_id = self._require_execution_tenant(action, state_manager)
             fingerprint = action_fingerprint(action)
             authorization_type, authorization_id = self._authorize(
                 action,
@@ -246,6 +251,7 @@ class SideEffectExecutor:
                     permit=permit if authorization_type == AUTHORIZATION_EXECUTION_PERMIT else None,
                     hitl=hitl,
                     stamp=stamp,
+                    tenant_id=tenant_id,
                 )
                 if authorization_type == AUTHORIZATION_EXECUTION_PERMIT:
                     permit_consumed = True
@@ -316,7 +322,10 @@ class SideEffectExecutor:
                 metadata={"execution_id": execution_id},
             )
             ctx.idempotency_key = action.idempotency_key
+            ctx.tenant_id = tenant_id
             timeout = timeout_seconds if timeout_seconds is not None else ctx.timeout_seconds
+            # Cancellation fence immediately before protected mutate (STOP FUTURE MUTATION).
+            self._require_workflow_running(state_manager, action.workflow_id)
             adapter_result = await self._invoke_adapter(adapter, action, ctx, timeout)
             if ctx.simulate_finalization_failure or self.simulate_finalization_failure:
                 raise SideEffectExecutionError("finalization_failed")
@@ -344,7 +353,12 @@ class SideEffectExecutor:
             )
             try:
                 self._finalize_success(
-                    result, authorization_type, authorization_id, action, attempt=1
+                    result,
+                    authorization_type,
+                    authorization_id,
+                    action,
+                    attempt=1,
+                    tenant_id=tenant_id,
                 )
             except Exception as exc:
                 # External success already confirmed; local durability failure → uncertain.
@@ -380,6 +394,7 @@ class SideEffectExecutor:
                         authorization_id,
                         action,
                         attempt=1,
+                        tenant_id=tenant_id,
                     )
                 except Exception:
                     pass
@@ -539,13 +554,26 @@ class SideEffectExecutor:
                     **extra_meta,
                 },
             )
-            self._save_record(
-                result,
-                authorization_type or AUTHORIZATION_AUTONOMY_DECISION,
-                authorization_id,
-                action,
-                attempt=1,
-            )
+            try:
+                self._save_record(
+                    result,
+                    authorization_type or AUTHORIZATION_AUTONOMY_DECISION,
+                    authorization_id,
+                    action,
+                    attempt=1,
+                    tenant_id=tenant_id,
+                )
+            except SideEffectExecutionDeniedError as save_exc:
+                # Never mask the original pre-mutate denial/error with tenant fail-closed
+                # from denial-record persistence when tenant was not yet required.
+                if (
+                    not adapter_started
+                    and getattr(save_exc, "error_code", None)
+                    == "side_effect_tenant_required"
+                ):
+                    pass
+                else:
+                    raise
             if uncertain:
                 self._flag_reconciliation(result)
                 return result
@@ -866,6 +894,34 @@ class SideEffectExecutor:
         if action.action_type != ACTION_WRITE:
             raise SideEffectExecutionDeniedError("action_type_not_enabled")
 
+    def _peek_execution_tenant(self, action, state_manager) -> str:
+        """Best-effort tenant from trusted workflow state; empty when unknown."""
+        if state_manager is None:
+            return ""
+        try:
+            state = state_manager.get(action.workflow_id)
+            tid = getattr(state, "tenant_id", None)
+            if tid:
+                return str(tid).strip()
+            meta = getattr(state, "metadata", None) or {}
+            if isinstance(meta, dict):
+                raw = str(meta.get("tenant_id") or "").strip()
+                if raw:
+                    return raw
+        except Exception:
+            return ""
+        return ""
+
+    def _require_execution_tenant(self, action, state_manager) -> str:
+        """Resolve tenant from trusted workflow state; fail closed when missing."""
+        from security.tenant import MissingTenantError, require_tenant_id
+
+        tid = self._peek_execution_tenant(action, state_manager) or None
+        try:
+            return require_tenant_id(tid)
+        except MissingTenantError as exc:
+            raise SideEffectExecutionDeniedError("side_effect_tenant_required") from exc
+
     def _require_workflow_running(self, state_manager, workflow_id: str):
         if state_manager is None:
             return
@@ -1022,6 +1078,7 @@ class SideEffectExecutor:
         permit=None,
         hitl=None,
         stamp=None,
+        tenant_id: str = "",
     ) -> None:
         """Persist started execution, then durable-consume permit before any mutation."""
 
@@ -1034,6 +1091,7 @@ class SideEffectExecutor:
                 started_at=started_at,
                 permit=permit,
                 use_uow=False,
+                tenant_id=tenant_id,
             )
             if permit is not None:
                 self._consume_permit(permit, action, hitl, stamp)
@@ -1057,6 +1115,7 @@ class SideEffectExecutor:
         started_at,
         permit=None,
         use_uow: bool = True,
+        tenant_id: str = "",
     ) -> None:
         key = action.idempotency_key or ""
         permit_id = None
@@ -1086,6 +1145,7 @@ class SideEffectExecutor:
             version=1,
             permit_id=permit_id,
             approval_id=approval_id,
+            tenant_id=str(tenant_id or ""),
             metadata={"phase": "started"},
         )
         try:
@@ -1117,11 +1177,20 @@ class SideEffectExecutor:
                         self.idempotency.bind_execution(key, execution_id)
         except SideEffectPersistenceUnavailableError:
             raise
+        except SideEffectExecutionDeniedError:
+            raise
         except Exception as exc:
             raise SideEffectPersistenceUnavailableError() from exc
 
     def _finalize_success(
-        self, result, authorization_type, authorization_id, action, attempt: int
+        self,
+        result,
+        authorization_type,
+        authorization_id,
+        action,
+        attempt: int,
+        *,
+        tenant_id: str = "",
     ) -> None:
         uow = None
         if self.persistence is not None:
@@ -1129,19 +1198,41 @@ class SideEffectExecutor:
         if uow is not None:
             with uow:
                 self._save_record(
-                    result, authorization_type, authorization_id, action, attempt
+                    result,
+                    authorization_type,
+                    authorization_id,
+                    action,
+                    attempt,
+                    tenant_id=tenant_id,
                 )
                 self.idempotency.mark_completed(action.idempotency_key)
         else:
             self._save_record(
-                result, authorization_type, authorization_id, action, attempt
+                result,
+                authorization_type,
+                authorization_id,
+                action,
+                attempt,
+                tenant_id=tenant_id,
             )
             self.idempotency.mark_completed(action.idempotency_key)
 
-    def _save_record(self, result, authorization_type, authorization_id, action, attempt: int):
+    def _save_record(
+        self,
+        result,
+        authorization_type,
+        authorization_id,
+        action,
+        attempt: int,
+        *,
+        tenant_id: str = "",
+    ):
         key = action.idempotency_key or ""
         existing = self.store.get(result.execution_id)
         next_version = 1 if existing is None else int(existing.version) + 1
+        resolved_tenant = str(tenant_id or "")
+        if not resolved_tenant and existing is not None:
+            resolved_tenant = str(existing.tenant_id or "")
         record = SideEffectExecutionRecord(
             execution_id=result.execution_id,
             action_id=result.action_id,
@@ -1183,6 +1274,7 @@ class SideEffectExecutor:
             approval_id=(
                 existing.approval_id if existing is not None else None
             ),
+            tenant_id=resolved_tenant,
             metadata={
                 "authorization_type": authorization_type,
                 "attempt": attempt,

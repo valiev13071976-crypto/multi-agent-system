@@ -5,6 +5,7 @@ from __future__ import annotations
 from decimal import Decimal, InvalidOperation
 
 from data_intel.cleaning import clean_text, normalize_decimal_string
+from data_intel.errors import DATASET_CURRENCY_MISMATCH
 from data_intel.product_match import match_products
 
 
@@ -25,6 +26,10 @@ def _product_key(row: dict) -> str:
             return f"{k}:{v.upper()}"
     name = clean_text(row.get("product_name") or row.get("name") or row.get("товар"))
     return f"name:{(name or '').lower()}"
+
+
+def _currency(row: dict) -> str:
+    return (clean_text(row.get("currency") or row.get("валюта")) or "").upper()
 
 
 def compare_price_lists(
@@ -50,6 +55,19 @@ def compare_price_lists(
                 continue
             if not m.same_entity and m.confidence in {"low", "unresolved"}:
                 unresolved.append({"key": key, "match": m, "left": l, "right": r})
+                continue
+            lc, rc = _currency(l), _currency(r)
+            if lc and rc and lc != rc:
+                unresolved.append(
+                    {
+                        "key": key,
+                        "reason": DATASET_CURRENCY_MISMATCH,
+                        "left_currency": lc,
+                        "right_currency": rc,
+                        "left": l,
+                        "right": r,
+                    }
+                )
                 continue
             lp = _dec(l.get("price"))
             rp = _dec(r.get("price"))

@@ -54,18 +54,24 @@ class ObservabilityRuntime:
         workflow_id: str = "",
         task_id: str = "",
         actor_ref: str = "",
+        tenant_id: str = "",
     ) -> ObservabilityContext:
         if workflow_id:
             with self._lock:
                 existing = self._contexts.get(workflow_id)
             if existing is not None:
                 # Preserve lineage: do not invent a second correlation/trace.
-                return existing.child(task_id=task_id or existing.task_id)
+                return existing.child(
+                    task_id=task_id or existing.task_id,
+                    actor_ref=actor_ref or None,
+                    tenant_id=tenant_id or None,
+                )
         ctx = ObservabilityContext.root(
             correlation_id=correlation_id,
             workflow_id=workflow_id,
             task_id=task_id,
             actor_ref=actor_ref,
+            tenant_id=tenant_id,
         )
         if workflow_id:
             with self._lock:
@@ -117,6 +123,14 @@ class ObservabilityRuntime:
             return None
         ctx = context or self.create_context()
         try:
+            meta = dict(metadata or {})
+            if ctx.tenant_id and "tenant_id" not in meta:
+                meta["tenant_id"] = ctx.tenant_id
+            if ctx.actor_ref and "actor_ref" not in meta:
+                meta["actor_ref"] = ctx.actor_ref
+            if ctx.correlation_id and "request_id" not in meta:
+                # correlation_id is bound to security request_id when provided.
+                meta["request_id"] = ctx.correlation_id
             event = make_event(
                 event_type,
                 correlation_id=ctx.correlation_id,
@@ -135,7 +149,7 @@ class ObservabilityRuntime:
                 error_code=error_code,
                 risk=risk,
                 trust_level=trust_level,
-                metadata=metadata,
+                metadata=meta,
                 exception_type=exception_type,
                 max_bytes=self.max_event_bytes,
             )

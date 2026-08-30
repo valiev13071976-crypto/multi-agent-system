@@ -89,6 +89,12 @@ EVENT_TOOL_WRITE_STARTED = "tool.write_started"
 EVENT_TOOL_WRITE_COMPLETED = "tool.write_completed"
 EVENT_TOOL_FAILED = "tool.failed"
 EVENT_TOOL_UNCERTAIN = "tool.uncertain"
+EVENT_TOOL_ROUTED = "tool.routed"
+EVENT_TOOL_AUTHORIZED = "tool.authorized"
+EVENT_TOOL_STARTED = "tool.started"
+EVENT_TOOL_COMPLETED = "tool.completed"
+EVENT_TOOL_RETRY = "tool.retry"
+EVENT_TOOL_SIDE_EFFECT = "tool.side_effect"
 
 
 class ToolAuditLog:
@@ -384,15 +390,54 @@ class ToolGateway:
             self._reject_bypass(request)
             args = validate_tool_arguments(dict(request.arguments))
             capability = str(request.capability_context or "").strip() or None
-            route = self.router.route(request, capability=capability)
+            version_pin = str(getattr(request, "tool_version", "") or "").strip() or None
+            if version_pin:
+                # Fail-closed version pin via registry.resolve
+                self.registry.resolve(request.tool_id, version_pin)
+            route = self.router.route(
+                request,
+                capability=capability,
+                capabilities=capabilities,
+            )
             descriptor = route.descriptor
+            self.audit.record(
+                EVENT_TOOL_ROUTED,
+                request_id=request.request_id,
+                tool_id=route.selected_tool,
+                selected_version=route.selected_version,
+                policy_decision=route.policy_decision,
+                trust_decision=route.trust_decision,
+            )
             if request.operation not in descriptor.operations:
                 raise ToolOperationNotAllowedError()
-            self._require_capabilities(descriptor, request, capabilities)
+            # Light permissions wiring when capabilities provided
+            if capabilities is not None:
+                from tools.permissions import authorize_tool_request
+
+                auth = authorize_tool_request(
+                    request=request,
+                    descriptor=descriptor,
+                    capabilities=capabilities,
+                    raise_on_deny=True,
+                )
+                self.audit.record(
+                    EVENT_TOOL_AUTHORIZED,
+                    request_id=request.request_id,
+                    tool_id=descriptor.tool_id,
+                    reason_code=auth.reason_code,
+                )
+            else:
+                self._require_capabilities(descriptor, request, capabilities)
             if descriptor.trust_level == TOOL_TRUST_PRIVILEGED:
                 raise ToolPolicyDeniedError("tool_policy_denied")
             if descriptor.trust_level == TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE:
                 raise ToolPolicyDeniedError("tool_policy_denied")
+            self.audit.record(
+                EVENT_TOOL_STARTED,
+                request_id=request.request_id,
+                tool_id=descriptor.tool_id,
+                operation=request.operation,
+            )
             self._obs_emit(
                 "tool.started",
                 obs_ctx,
@@ -407,6 +452,12 @@ class ToolGateway:
                     request, descriptor, args, started=started, stamp=stamp
                 )
             else:
+                self.audit.record(
+                    EVENT_TOOL_SIDE_EFFECT,
+                    request_id=request.request_id,
+                    tool_id=descriptor.tool_id,
+                    operation=request.operation,
+                )
                 result = await self._invoke_write(
                     request,
                     descriptor,
@@ -425,6 +476,14 @@ class ToolGateway:
             duration = result.duration_ms
             if mono0 is not None and self.observability is not None:
                 duration = int(self.observability.monotonic_ms() - mono0)
+            self.audit.record(
+                EVENT_TOOL_COMPLETED,
+                request_id=request.request_id,
+                tool_id=descriptor.tool_id,
+                operation=request.operation,
+                status=result.status,
+                success=result.success,
+            )
             self._emit_tool_terminal(obs_ctx, descriptor, result, duration)
             self._record_metrics(descriptor, result)
             return result
@@ -556,7 +615,10 @@ class ToolGateway:
             tool_id=descriptor.tool_id,
             operation=request.operation,
         )
-        registration = self.registry.get_registration(descriptor.tool_id)
+        registration = self.registry.resolve(
+            descriptor.tool_id,
+            str(getattr(request, "tool_version", "") or "").strip() or descriptor.version,
+        )
         adapter = registration.adapter
         if adapter is None or not hasattr(adapter, "execute_read"):
             raise ToolError("tool_execution_failed")

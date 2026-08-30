@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panda Chat</title>
+  <link rel="stylesheet" href="/static/chat/chat.css">
+</head>
+<body>
+  <div id="app" class="app">
+    <aside id="sidebar" class="sidebar" aria-label="Conversations">
+      <header class="sidebar-header">
+        <h1>Panda</h1>
+        <a href="/product" class="account-link">Account</a>
+        <button id="new-chat" type="button" aria-label="New conversation">+ New</button>
+      </header>
+      <ul id="conversation-list" class="conversation-list" role="list"></ul>
+      <section id="tasks-panel" class="tasks-panel" aria-label="Background tasks">
+        <h2>Tasks</h2>
+        <ul id="task-list" role="list"></ul>
+      </section>
+    </aside>
+    <main class="main" aria-label="Chat">
+      <header class="chat-header">
+        <button id="sidebar-toggle" type="button" class="sidebar-toggle" aria-label="Toggle sidebar">☰</button>
+        <h2 id="chat-title">New conversation</h2>
+        <span id="run-status" class="run-status" role="status" aria-live="polite"></span>
+      </header>
+      <div id="messages" class="messages" role="log" aria-live="polite"></div>
+      <div id="attachments-preview" class="attachments-preview" aria-label="Selected attachments"></div>
+      <footer class="composer">
+        <div class="composer-tools">
+          <label class="file-label" aria-label="Attach file">
+            📎
+            <input id="file-input" type="file" multiple hidden>
+          </label>
+          <button id="mic-btn" type="button" aria-label="Voice input" aria-pressed="false">🎤</button>
+        </div>
+        <textarea id="composer" rows="1" placeholder="Message Panda…" aria-label="Message input"></textarea>
+        <button id="send-btn" type="button" aria-label="Send message">Send</button>
+        <button id="stop-btn" type="button" class="hidden" aria-label="Stop run">Stop</button>
+      </footer>
+    </main>
+  </div>
+  <audio id="tts-player" hidden></audio>
+  <script src="/static/chat/chat.js"></script>
+</body>
+</html>

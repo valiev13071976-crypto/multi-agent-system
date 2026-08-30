@@ -9,6 +9,12 @@ class WorkflowStateStore:
     def get(self, workflow_id: str) -> WorkflowState | None:
         raise NotImplementedError
 
+    def get_for_tenant(
+        self, workflow_id: str, tenant_id: str
+    ) -> WorkflowState | None:
+        """Tenant-scoped get — cross-tenant id → None."""
+        raise NotImplementedError
+
     def save(self, state: WorkflowState) -> None:
         raise NotImplementedError
 
@@ -18,10 +24,13 @@ class WorkflowStateStore:
     def get_checkpoint(self, workflow_id: str) -> Checkpoint | None:
         raise NotImplementedError
 
-    def list_by_status(self, status: str) -> tuple[WorkflowState, ...]:
+    def list_by_status(
+        self, status: str, *, tenant_id: str | None = None
+    ) -> tuple[WorkflowState, ...]:
         raise NotImplementedError
 
     def list_all(self) -> tuple[WorkflowState, ...]:
+        """Internal/unscoped — recovery/maintenance only. Not for tenant-facing APIs."""
         raise NotImplementedError
 
     def find_by_execution_key(
@@ -54,6 +63,18 @@ class InMemoryWorkflowStateStore(WorkflowStateStore):
     def get(self, workflow_id: str) -> WorkflowState | None:
         return self._states.get(workflow_id)
 
+    def get_for_tenant(
+        self, workflow_id: str, tenant_id: str
+    ) -> WorkflowState | None:
+        from security.tenant import workflow_tenant_id
+
+        state = self.get(workflow_id)
+        if state is None:
+            return None
+        if workflow_tenant_id(state) != normalize_tenant_id(tenant_id):
+            return None
+        return state
+
     def save(self, state: WorkflowState) -> None:
         self._states[state.workflow_id] = state
         if state.execution_key:
@@ -67,12 +88,23 @@ class InMemoryWorkflowStateStore(WorkflowStateStore):
     def get_checkpoint(self, workflow_id: str) -> Checkpoint | None:
         return self._checkpoints.get(workflow_id)
 
-    def list_by_status(self, status: str) -> tuple[WorkflowState, ...]:
-        return tuple(
+    def list_by_status(
+        self, status: str, *, tenant_id: str | None = None
+    ) -> tuple[WorkflowState, ...]:
+        from security.tenant import workflow_tenant_id
+
+        items = tuple(
             item for item in self._states.values() if item.status == status
+        )
+        if tenant_id is None:
+            return items
+        tenant = normalize_tenant_id(tenant_id)
+        return tuple(
+            item for item in items if workflow_tenant_id(item) == tenant
         )
 
     def list_all(self) -> tuple[WorkflowState, ...]:
+        """Internal/unscoped — recovery/maintenance only."""
         return tuple(self._states.values())
 
     def find_by_execution_key(

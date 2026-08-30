@@ -71,6 +71,25 @@ class WorkflowScheduler:
         self._now = now_fn or utc_now
 
     def register(self, spec: ScheduleSpec) -> ScheduleState:
+        # New schedule registration is fail-closed: explicit tenant required.
+        # Existing legacy schedules already in the store remain tickable under
+        # tick_schedules compatibility (blank → DEFAULT_LEGACY_TENANT).
+        from security.tenant import require_tenant_id
+
+        require_tenant_id((spec.payload or {}).get("tenant_id"))
+        existing = self.store.get(spec.schedule_id)
+        if existing is not None:
+            # Idempotent re-register (compose restart): refresh definition fields
+            # but preserve runtime progress so due windows are not reset/duplicated.
+            state = replace(
+                existing,
+                workflow_type=spec.workflow_type,
+                version=spec.version,
+                payload=dict(spec.payload),
+                interval_seconds=spec.interval_seconds,
+            )
+            self.store.save(state)
+            return state
         now = self._now()
         next_run = spec.run_at or now
         state = ScheduleState(

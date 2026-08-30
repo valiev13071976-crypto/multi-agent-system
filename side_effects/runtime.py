@@ -155,6 +155,8 @@ class SideEffectRuntime:
     data_intelligence_runtime: object | None = None
     integration_runtime: object | None = None
     commerce_runtime: object | None = None
+    seo_marketing_runtime: object | None = None
+    b2b_commerce_runtime: object | None = None
     payments_runtime: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
@@ -301,6 +303,10 @@ class SideEffectRuntime:
             meta["integrations"] = dict(self.integration_runtime.health())
         if self.commerce_runtime is not None:
             meta["commerce"] = dict(self.commerce_runtime.health())
+        if self.seo_marketing_runtime is not None:
+            meta["seo_marketing"] = dict(self.seo_marketing_runtime.health())
+        if self.b2b_commerce_runtime is not None:
+            meta["b2b_commerce"] = dict(self.b2b_commerce_runtime.health())
         if self.payments_runtime is not None:
             meta["payments"] = dict(self.payments_runtime.health())
         return type(health)(
@@ -414,6 +420,16 @@ class SideEffectRuntime:
                 self.commerce_runtime.close()
             except Exception:
                 pass
+        if self.seo_marketing_runtime is not None and hasattr(self.seo_marketing_runtime, "close"):
+            try:
+                self.seo_marketing_runtime.close()
+            except Exception:
+                pass
+        if self.b2b_commerce_runtime is not None and hasattr(self.b2b_commerce_runtime, "close"):
+            try:
+                self.b2b_commerce_runtime.close()
+            except Exception:
+                pass
         if self.payments_runtime is not None and hasattr(self.payments_runtime, "close"):
             try:
                 self.payments_runtime.close()
@@ -433,9 +449,14 @@ def build_tool_gateway(
     document_service=None,
     document_intelligence=None,
     data_intelligence=None,
+    content_intelligence=None,
     commerce_service=None,
     payments_service=None,
     credential_store=None,
+    product_media_service=None,
+    product_platform_service=None,
+    seo_marketing_service=None,
+    b2b_commerce_service=None,
     freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
     """Register built-in tools, platform adapters, optionally GitHub write, then freeze."""
@@ -494,10 +515,33 @@ def build_tool_gateway(
         document_service=document_service,
         document_intelligence=document_intelligence,
         data_intelligence=data_intelligence,
+        content_intelligence=content_intelligence,
         commerce_service=commerce_service,
         payments_service=payments_service,
         credential_store=credential_store,
+        product_media_service=product_media_service,
+        product_platform_service=product_platform_service,
+        seo_marketing_service=seo_marketing_service,
+        b2b_commerce_service=b2b_commerce_service,
     )
+    if product_platform_service is not None:
+        from commerce.product_platform.side_effect import register_commerce_platform_side_effects
+
+        pp_adapter = platform["adapters"].get("product_platform")
+        if pp_adapter is not None:
+            register_commerce_platform_side_effects(side_effect_registry, pp_adapter)
+    if seo_marketing_service is not None:
+        from seo_marketing.side_effect import register_seo_marketing_side_effects
+
+        seo_adapter = platform["adapters"].get("seo_marketing")
+        if seo_adapter is not None:
+            register_seo_marketing_side_effects(side_effect_registry, seo_adapter)
+    if b2b_commerce_service is not None:
+        from b2b_commerce.side_effect import register_b2b_commerce_side_effects
+
+        b2b_adapter = platform["adapters"].get("b2b_commerce")
+        if b2b_adapter is not None:
+            register_b2b_commerce_side_effects(side_effect_registry, b2b_adapter)
     router = ToolRouter(gateway.registry)
     for adapter in platform["adapters"].values():
         adapter_id = getattr(adapter, "adapter_id", "")
@@ -599,18 +643,30 @@ def _finalize_runtime(
     workflow_runtime = None
     try:
         from workflow.service import build_workflow_runtime
+        from workflow.runtime_role import resolve_runtime_role, role_runs_worker_loops
 
+        role = resolve_runtime_role(env)
         workflow_runtime = build_workflow_runtime(
             state_manager=engine.state_manager,
             workflow_engine=engine,
             observability=obs,
             autonomy_gate=gate,
             hitl_service=hitl,
+            schedule_store=getattr(persistence, "schedule_store", None)
+            if persistence is not None
+            else None,
+            task_queue_store=getattr(persistence, "task_queue_store", None)
+            if persistence is not None
+            else None,
+            runtime_role=role,
+            env=env,
         )
-        try:
-            workflow_runtime.recover_and_reenqueue_persisted()
-        except Exception:
-            pass
+        # Worker/combined only: API replicas must not reclaim/re-enqueue/tick.
+        if role_runs_worker_loops(role):
+            try:
+                workflow_runtime.recover_and_reenqueue_persisted()
+            except Exception as exc:
+                workflow_runtime.record_startup_recovery_failure(exc)
     except Exception:
         workflow_runtime = None
 
@@ -733,6 +789,71 @@ def _finalize_runtime(
     except Exception:
         payments_runtime = None
 
+    content_intelligence_runtime = None
+    product_media_runtime = None
+    try:
+        from product_media.runtime import build_product_media_runtime
+
+        pm_path = str(env.get("PRODUCT_MEDIA_DB_PATH") or ":memory:")
+        product_media_runtime = build_product_media_runtime(db_path=pm_path)
+        engine.product_media_service = product_media_runtime
+    except Exception:
+        product_media_runtime = None
+
+    try:
+        from content_intel.runtime import build_content_intelligence_runtime
+
+        content_intelligence_runtime = build_content_intelligence_runtime(
+            env=env,
+            knowledge_service=None,
+            tool_gateway=None,
+            observability=obs,
+            product_media_service=product_media_runtime,
+        )
+        if content_intelligence_runtime is not None:
+            engine.content_intelligence = content_intelligence_runtime.service
+    except Exception:
+        content_intelligence_runtime = None
+
+    seo_marketing_runtime = None
+    try:
+        from seo_marketing.runtime import build_seo_marketing_runtime
+
+        seo_marketing_runtime = build_seo_marketing_runtime(
+            env=env,
+            content_intelligence_service=(
+                content_intelligence_runtime.service if content_intelligence_runtime else None
+            ),
+            product_platform_service=(
+                commerce_runtime.product_platform if commerce_runtime else None
+            ),
+            product_media_service=product_media_runtime,
+            observability=obs,
+        )
+        if seo_marketing_runtime is not None:
+            engine.seo_marketing_service = seo_marketing_runtime.service
+    except Exception:
+        seo_marketing_runtime = None
+
+    b2b_commerce_runtime = None
+    try:
+        from b2b_commerce.runtime import build_b2b_commerce_runtime
+
+        b2b_commerce_runtime = build_b2b_commerce_runtime(
+            env=env,
+            product_platform_service=(
+                commerce_runtime.product_platform if commerce_runtime else None
+            ),
+            document_service=(
+                document_runtime.service if document_runtime else None
+            ),
+            observability=obs,
+        )
+        if b2b_commerce_runtime is not None:
+            engine.b2b_commerce_service = b2b_commerce_runtime.service
+    except Exception:
+        b2b_commerce_runtime = None
+
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
         executor=executor,
@@ -752,8 +873,21 @@ def _finalize_runtime(
         data_intelligence=(
             data_intelligence_runtime.service if data_intelligence_runtime else None
         ),
+        content_intelligence=(
+            content_intelligence_runtime.service if content_intelligence_runtime else None
+        ),
+        product_media_service=product_media_runtime,
         commerce_service=(
             commerce_runtime.service if commerce_runtime else None
+        ),
+        product_platform_service=(
+            commerce_runtime.product_platform if commerce_runtime else None
+        ),
+        seo_marketing_service=(
+            seo_marketing_runtime.service if seo_marketing_runtime else None
+        ),
+        b2b_commerce_service=(
+            b2b_commerce_runtime.service if b2b_commerce_runtime else None
         ),
         payments_service=(
             payments_runtime.service if payments_runtime else None
@@ -847,6 +981,8 @@ def _finalize_runtime(
         knowledge_runtime = None
     if knowledge_runtime is not None:
         engine.knowledge_service = knowledge_runtime.service
+    if content_intelligence_runtime is not None and knowledge_runtime is not None:
+        content_intelligence_runtime.service.knowledge_service = knowledge_runtime.service
 
     procurement_runtime = None
     from procurement.runtime import build_procurement_runtime, procurement_config
@@ -915,6 +1051,10 @@ def _finalize_runtime(
             )
         if commerce_runtime is not None:
             commerce_runtime.service.acquisition_service = acquisition_runtime.service
+        if seo_marketing_runtime is not None:
+            seo_marketing_runtime.service.acquisition = acquisition_runtime.service
+        if b2b_commerce_runtime is not None and acquisition_runtime is not None:
+            b2b_commerce_runtime.service.acquisition = acquisition_runtime.service
     except Exception:
         acquisition_runtime = None
 
@@ -945,6 +1085,8 @@ def _finalize_runtime(
         data_intelligence_runtime=data_intelligence_runtime,
         integration_runtime=integration_runtime,
         commerce_runtime=commerce_runtime,
+        seo_marketing_runtime=seo_marketing_runtime,
+        b2b_commerce_runtime=b2b_commerce_runtime,
         payments_runtime=payments_runtime,
     )
 

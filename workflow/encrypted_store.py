@@ -31,6 +31,18 @@ class EncryptedWorkflowStateStore(WorkflowStateStore):
     def get(self, workflow_id: str):
         return self._inner.get(workflow_id)
 
+    def get_for_tenant(self, workflow_id: str, tenant_id: str):
+        if hasattr(self._inner, "get_for_tenant"):
+            return self._inner.get_for_tenant(workflow_id, tenant_id)
+        from security.tenant import normalize_tenant_id, workflow_tenant_id
+
+        state = self.get(workflow_id)
+        if state is None:
+            return None
+        if workflow_tenant_id(state) != normalize_tenant_id(tenant_id):
+            return None
+        return state
+
     def save(self, state):
         self._inner.save(state)
 
@@ -69,12 +81,13 @@ class EncryptedWorkflowStateStore(WorkflowStateStore):
     def get_checkpoint(self, workflow_id: str) -> Checkpoint | None:
         return self._inner.get_checkpoint(workflow_id)
 
-    def list_by_status(self, status: str):
+    def list_by_status(self, status: str, *, tenant_id: str | None = None):
         if hasattr(self._inner, "list_by_status"):
-            return self._inner.list_by_status(status)
+            return self._inner.list_by_status(status, tenant_id=tenant_id)
         return ()
 
     def list_all(self):
+        """Internal/unscoped — recovery/maintenance only."""
         if hasattr(self._inner, "list_all"):
             return self._inner.list_all()
         return ()

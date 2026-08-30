@@ -28,6 +28,20 @@ DEFAULT_LATENCY_CLASS = "standard"
 DEFAULT_CONTEXT_CLASS = "standard"
 DEFAULT_TASK_CATEGORIES = ("general",)
 
+# Categories advertised when {PREFIX}_TASK_CATEGORIES is unset.
+# Core chat providers include strategy/critique because DEFAULT_ROLE is
+# strategist and those categories require the reasoning capability.
+PROVIDER_DEFAULT_TASK_CATEGORIES: dict[str, tuple[str, ...]] = {
+    "openai": ("general", "strategy", "critique"),
+    "anthropic": ("general", "strategy", "critique"),
+    "gemini": ("general", "strategy", "critique"),
+    "grok": ("general", "strategy", "critique", "trend_analysis"),
+    "deepseek": ("general", "strategy", "critique"),
+}
+
+# Advertising these categories implies reasoning when *_SUPPORTS_REASONING is unset.
+REASONING_IMPLIED_CATEGORIES = frozenset({"strategy", "critique"})
+
 ROLE_TO_ROUTING_CATEGORY = {
     "strategist": "strategy",
     "critic": "critique",
@@ -125,15 +139,25 @@ class ModelProfile:
     supports_reasoning: bool = False
     supports_multilingual: bool = False
     supports_coding: bool = False
+    supports_search: bool = False
 
 
 def routing_category_for_role(role_id: str) -> str:
     return ROLE_TO_ROUTING_CATEGORY.get(role_id, "general")
 
 
-def parse_csv_categories(raw: str | None) -> tuple[str, ...]:
+def default_task_categories_for_provider(provider_id: str) -> tuple[str, ...]:
+    return PROVIDER_DEFAULT_TASK_CATEGORIES.get(provider_id, DEFAULT_TASK_CATEGORIES)
+
+
+def parse_csv_categories(
+    raw: str | None,
+    *,
+    default: tuple[str, ...] | None = None,
+) -> tuple[str, ...]:
+    fallback = default if default is not None else DEFAULT_TASK_CATEGORIES
     if raw is None or not str(raw).strip():
-        return DEFAULT_TASK_CATEGORIES
+        return fallback
 
     ordered = []
     unknown = []
@@ -156,8 +180,29 @@ def parse_csv_categories(raw: str | None) -> tuple[str, ...]:
             f"Unknown task category in model profile config: {', '.join(unknown)}."
         )
     if not ordered:
-        return DEFAULT_TASK_CATEGORIES
+        return fallback
     return tuple(ordered)
+
+
+def resolve_supports_reasoning(
+    provider_id: str,
+    categories: tuple[str, ...],
+    reasoning_raw: str | None,
+) -> bool:
+    """Resolve supports_reasoning from explicit env or implied categories.
+
+    Explicit ``{PREFIX}_SUPPORTS_REASONING`` always wins.
+    When unset, advertising strategy/critique implies reasoning so production
+    correctness does not depend on a manual env flag for the default
+    strategist/critique path. Providers without those categories stay False.
+    """
+
+    prefix = PROVIDER_PROFILE_ENV[provider_id]
+    if reasoning_raw is not None and str(reasoning_raw).strip() != "":
+        return parse_bool_flag(
+            reasoning_raw, False, f"{prefix}_SUPPORTS_REASONING"
+        )
+    return bool(REASONING_IMPLIED_CATEGORIES.intersection(categories))
 
 
 def parse_class_value(raw: str | None, allowed: tuple[str, ...], default: str, label: str) -> str:
@@ -229,6 +274,7 @@ def build_model_profile(
     reasoning_raw: str | None = None,
     multilingual_raw: str | None = None,
     coding_raw: str | None = None,
+    search_raw: str | None = None,
 ) -> ModelProfile:
     prefix = PROVIDER_PROFILE_ENV[provider_id]
     status = str(quality_status or "provisional").strip().lower()
@@ -237,6 +283,10 @@ def build_model_profile(
     state = str(model_state or "active").strip().lower()
     if state not in {"active", "deprecated", "disabled"}:
         state = "active"
+    categories = parse_csv_categories(
+        task_categories_raw,
+        default=default_task_categories_for_provider(provider_id),
+    )
     return ModelProfile(
         provider_id=provider_id,
         model_id=model_id or "",
@@ -250,7 +300,7 @@ def build_model_profile(
         latency_class=parse_class_value(
             latency_raw, LATENCY_CLASSES, DEFAULT_LATENCY_CLASS, f"{prefix}_LATENCY_CLASS"
         ),
-        task_categories=parse_csv_categories(task_categories_raw),
+        task_categories=categories,
         supports_tools=parse_bool_flag(tools_raw, False, f"{prefix}_SUPPORTS_TOOLS"),
         supports_vision=parse_bool_flag(vision_raw, False, f"{prefix}_SUPPORTS_VISION"),
         supports_structured_output=parse_bool_flag(
@@ -262,11 +312,12 @@ def build_model_profile(
         context_window=context_window,
         quality_status=status,
         model_state=state,
-        supports_reasoning=parse_bool_flag(
-            reasoning_raw, False, f"{prefix}_SUPPORTS_REASONING"
+        supports_reasoning=resolve_supports_reasoning(
+            provider_id, categories, reasoning_raw
         ),
         supports_multilingual=parse_bool_flag(
             multilingual_raw, False, f"{prefix}_SUPPORTS_MULTILINGUAL"
         ),
         supports_coding=parse_bool_flag(coding_raw, False, f"{prefix}_SUPPORTS_CODING"),
+        supports_search=parse_bool_flag(search_raw, False, f"{prefix}_SUPPORTS_SEARCH"),
     )

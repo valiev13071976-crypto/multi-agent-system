@@ -35,7 +35,7 @@ class ProtectedStateExpiryTests(unittest.TestCase):
             )
             attach_protected_persistence(engine, bundle)
             stamp = utc_now()
-            workflow_id = engine.create("t-exp")
+            workflow_id = engine.create("t-exp", tenant_id="tenant-test")
             engine.state_manager.plan(workflow_id)
             engine.state_manager.start(workflow_id)
             action = se_action(

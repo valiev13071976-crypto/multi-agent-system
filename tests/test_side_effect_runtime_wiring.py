@@ -5,6 +5,10 @@ from fastapi.testclient import TestClient
 from side_effects.github.models import GITHUB_TOOL_ID
 from side_effects.github.transport import FakeGitHubTransport, GitHubHttpTransport
 from side_effects.runtime import compose_side_effect_runtime
+from commerce.product_platform.side_effect import COMMERCE_WRITE_TOOLS
+from seo_marketing.side_effect import SEO_WRITE_TOOLS
+from b2b_commerce.side_effect import B2B_WRITE_TOOLS
+from b2b_commerce.side_effect import B2B_WRITE_TOOLS
 from tests.test_github_write_config import DictSecrets
 from tests.test_mode_auto import STRATEGY_TEXT, load_auto_app
 from tests.test_mode_routing import env_for, mock_provider_runs
@@ -17,8 +21,26 @@ class SideEffectRuntimeWiringTests(unittest.TestCase):
 
     def test_ag_default_zero_write_adapters(self):
         runtime = compose_side_effect_runtime(secrets=DictSecrets(), env={})
-        self.assertEqual(len(runtime.registry), 0)
         self.assertIsNone(runtime.registry.get(GITHUB_TOOL_ID))
+        for spec in COMMERCE_WRITE_TOOLS:
+            self.assertIsNotNone(
+                runtime.registry.get(spec["tool_id"]),
+                msg=f"missing commerce side-effect adapter for {spec['tool_id']}",
+            )
+        for spec in SEO_WRITE_TOOLS:
+            self.assertIsNotNone(
+                runtime.registry.get(spec["tool_id"]),
+                msg=f"missing seo side-effect adapter for {spec['tool_id']}",
+            )
+        for spec in B2B_WRITE_TOOLS:
+            self.assertIsNotNone(
+                runtime.registry.get(spec["tool_id"]),
+                msg=f"missing b2b side-effect adapter for {spec['tool_id']}",
+            )
+        self.assertEqual(
+            len(runtime.registry),
+            len(COMMERCE_WRITE_TOOLS) + len(SEO_WRITE_TOOLS) + len(B2B_WRITE_TOOLS),
+        )
 
     def test_ah_enabled_valid_composes_adapter(self):
         runtime = compose_side_effect_runtime(

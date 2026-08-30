@@ -30,6 +30,8 @@ from side_effects.sqlite_store import (
 )
 from side_effects.store import InMemorySideEffectExecutionStore
 from side_effects.reconciliation_store import InMemoryReconciliationStore
+from task_queue.store import InMemoryTaskQueueStore
+from workflow.schedule import InMemoryScheduleStore
 from workflow.store import InMemoryWorkflowStateStore
 
 
@@ -55,6 +57,8 @@ class SideEffectPersistenceBundle:
     approval_store: object | None = None
     permit_store: object | None = None
     workflow_runtime_store: object | None = None
+    schedule_store: object | None = None
+    task_queue_store: object | None = None
     protected_state_ready: bool = False
     metadata: Mapping[str, object] = field(default_factory=dict)
 
@@ -68,6 +72,10 @@ class SideEffectPersistenceBundle:
             object.__setattr__(
                 self, "workflow_runtime_store", InMemoryWorkflowStateStore()
             )
+        if self.schedule_store is None:
+            object.__setattr__(self, "schedule_store", InMemoryScheduleStore())
+        if self.task_queue_store is None:
+            object.__setattr__(self, "task_queue_store", InMemoryTaskQueueStore())
 
     def unit_of_work(self) -> SideEffectPersistenceUnitOfWork | None:
         if self.connection is None:
@@ -105,6 +113,8 @@ def _memory_bundle(
         approval_store=InMemoryApprovalStore(),
         permit_store=InMemoryExecutionPermitStore(),
         workflow_runtime_store=InMemoryWorkflowStateStore(),
+        schedule_store=InMemoryScheduleStore(),
+        task_queue_store=InMemoryTaskQueueStore(),
         protected_state_ready=False,
         reason_code=reason_code,
     )
@@ -155,6 +165,11 @@ def build_side_effect_persistence(
         workflow_store = PersistentWorkflowRuntimeStore(
             connection, encryption=encryption
         )
+        from workflow.schedule_store import PersistentScheduleStore
+        from task_queue.sqlite_store import PersistentTaskQueueStore
+
+        schedule_store = PersistentScheduleStore(connection)
+        task_queue_store = PersistentTaskQueueStore(connection)
         registry = IdempotencyRegistry(idem_store)
         scan_flag = source.get("SIDE_EFFECT_RECOVERY_SCAN_ON_STARTUP")
         if run_recovery_scan is None:
@@ -195,6 +210,8 @@ def build_side_effect_persistence(
             approval_store=approval_store,
             permit_store=permit_store,
             workflow_runtime_store=workflow_store,
+            schedule_store=schedule_store,
+            task_queue_store=task_queue_store,
             protected_state_ready=True,
             reason_code="persistence_ready",
             metadata={
@@ -221,6 +238,8 @@ def build_side_effect_persistence(
             approval_store=failed.approval_store,
             permit_store=failed.permit_store,
             workflow_runtime_store=failed.workflow_runtime_store,
+            schedule_store=failed.schedule_store,
+            task_queue_store=failed.task_queue_store,
             protected_state_ready=False,
             reason_code=str(exc.error_code),
         )
@@ -243,6 +262,8 @@ def build_side_effect_persistence(
             approval_store=failed.approval_store,
             permit_store=failed.permit_store,
             workflow_runtime_store=failed.workflow_runtime_store,
+            schedule_store=failed.schedule_store,
+            task_queue_store=failed.task_queue_store,
             protected_state_ready=False,
             reason_code="side_effect_persistence_unavailable",
         )

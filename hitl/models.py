@@ -86,6 +86,8 @@ def action_fingerprint(action) -> str:
         "idempotency_key": action.idempotency_key,
         "workflow_id": action.workflow_id,
         "task_id": action.task_id,
+        "tenant_id": str(getattr(action, "tenant_id", "") or ""),
+        "actor_ref": str(getattr(action, "actor_ref", "") or ""),
     }
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
@@ -130,12 +132,16 @@ class ExecutionPermit:
     consumed_at: datetime | None = None
     version: int = 1
     metadata: Mapping[str, object] = field(default_factory=dict)
+    tenant_id: str = ""
+    actor_ref: str = ""
 
     def __post_init__(self):
         if self.status not in PERMIT_STATUSES:
             raise ValueError(f"Invalid permit status: {self.status!r}")
         object.__setattr__(self, "capabilities", tuple(self.capabilities))
         object.__setattr__(self, "metadata", _meta(self.metadata))
+        object.__setattr__(self, "tenant_id", str(self.tenant_id or ""))
+        object.__setattr__(self, "actor_ref", str(self.actor_ref or ""))
 
     def public_view(self) -> dict:
         return {

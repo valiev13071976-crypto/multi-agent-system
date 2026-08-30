@@ -38,6 +38,7 @@ from config.pricing import (
     load_budget_limits,
     load_price_quotes,
 )
+from evals.activation import RoutingActivationService
 from finops.service import FinOpsService
 from tools.gateway import ToolGateway
 from tools.search.null_provider import NullSearchProvider
@@ -111,6 +112,7 @@ class RouterV2:
             health_tracker=self.health_tracker,
             runtime_stats=self.runtime_stats,
         )
+        self.provider_governor = None
 
         self.finops = FinOpsService(
             prices=load_price_quotes(),
@@ -141,6 +143,7 @@ class RouterV2:
         )
         expert_manager.health_tracker = self.health_tracker
         expert_manager.runtime_stats = self.runtime_stats
+        expert_manager.provider_governor = self.provider_governor
 
         self.tool_gateway = ToolGateway(NullSearchProvider())
 
@@ -159,8 +162,14 @@ class RouterV2:
         self.last_route_context = None
         self.last_task_id = None
         self.last_workflow_id = None
+        self.last_request_id = None
+        self.last_tenant_id = None
+        self.last_user_id = None
+        self.last_actor_ref = None
+        self.last_run_envelope = None
         self.task_classifier = TaskClassifier()
         self.workflow_engine = WorkflowEngine()
+        self.routing_activation = RoutingActivationService()
 
     def provider_status(self) -> dict:
         return self.provider_registry.status()
@@ -183,6 +192,11 @@ class RouterV2:
         role: str | None = None,
         task_id: str | None = None,
         lifecycle=None,
+        request_id: str | None = None,
+        tenant_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
+        envelope=None,
     ):
         if mode is None:
             resolved_mode = "both"
@@ -197,9 +211,51 @@ class RouterV2:
             if resolved_mode not in ALLOWED_MODES:
                 raise InvalidModeError(mode)
 
-            self.last_task_id = task_id or self.last_task_id or str(uuid.uuid4())
-            if lifecycle is not None:
-                self.last_workflow_id = lifecycle.workflow_id
+            # Envelope wins when present; else legacy kwargs / lifecycle locals.
+            if envelope is not None:
+                run_task_id = envelope.task_id
+                run_workflow_id = envelope.workflow_id
+                run_request_id = envelope.request_id
+                run_tenant_id = envelope.tenant_id
+                run_user_id = envelope.user_id
+                run_actor_ref = envelope.actor_ref
+            else:
+                run_task_id = task_id or str(uuid.uuid4())
+                run_workflow_id = (
+                    lifecycle.workflow_id if lifecycle is not None else None
+                )
+                run_request_id = request_id
+                run_tenant_id = tenant_id
+                run_user_id = user_id
+                run_actor_ref = actor_ref
+
+            # Diagnostic snapshot only.
+            self.last_task_id = run_task_id
+            self.last_workflow_id = run_workflow_id
+            self.last_request_id = run_request_id
+            self.last_tenant_id = run_tenant_id
+            self.last_user_id = run_user_id
+            self.last_actor_ref = run_actor_ref
+            self.last_run_envelope = envelope
+
+            # Propagate observability identity into ExpertManager / BudgetGuard / FactValidator / Governor.
+            eng_obs = getattr(getattr(self, "workflow_engine", None), "observability", None)
+            if eng_obs is not None:
+                if self.pipeline.expert_manager.observability is None:
+                    self.pipeline.expert_manager.observability = eng_obs
+                if (
+                    self.budget_guard is not None
+                    and getattr(self.budget_guard, "observability", None) is None
+                ):
+                    self.budget_guard.observability = eng_obs
+                fv = getattr(self.pipeline, "fact_validator", None)
+                if fv is not None and getattr(fv, "observability", None) is None:
+                    fv.observability = eng_obs
+                if (
+                    getattr(self, "provider_governor", None) is not None
+                    and getattr(self.provider_governor, "observability", None) is None
+                ):
+                    self.provider_governor.observability = eng_obs
 
             requested_role = DEFAULT_ROLE if role is None else role
             self.last_classification = None
@@ -247,17 +303,30 @@ class RouterV2:
                     for provider_id in self.provider_registry.available_provider_ids()
                 )
                 budget_constraints = self.budget_guard.routing_constraints(
-                    task_id=self.last_task_id,
+                    task_id=run_task_id,
                     candidates=candidates,
+                    tenant_id=run_tenant_id,
                 )
 
-            decision = self.model_router.decide(
-                mode=resolved_mode,
-                role_id=resolved_role,
-                category=routing_category,
-                requirements=self.last_requirements,
-                budget_constraints=budget_constraints,
+            self.model_router.bind_routing_audit(
+                request_id=run_request_id,
+                task_id=run_task_id,
+                tenant_id=run_tenant_id,
+                user_id=run_user_id,
+                actor_ref=run_actor_ref,
+                workflow_id=run_workflow_id,
+                observability=eng_obs if eng_obs is not None else self.model_router.observability,
             )
+            try:
+                decision = self.model_router.decide(
+                    mode=resolved_mode,
+                    role_id=resolved_role,
+                    category=routing_category,
+                    requirements=self.last_requirements,
+                    budget_constraints=budget_constraints,
+                )
+            finally:
+                self.model_router.clear_routing_audit()
             self.last_decision = decision
 
             composed = compose_prompt(decision.role_id, prompt)
@@ -272,6 +341,18 @@ class RouterV2:
                     },
                 )
 
+            exec_kwargs = dict(
+                task_id=run_task_id,
+                category=routing_category,
+                lifecycle=lifecycle,
+                workflow_id=run_workflow_id,
+                request_id=run_request_id,
+                tenant_id=run_tenant_id,
+                user_id=run_user_id,
+                actor_ref=run_actor_ref,
+                envelope=envelope,
+            )
+
             if decision.reason == "explicit_provider":
                 provider_id = decision.provider_ids[0]
                 agent = selected[0][1]
@@ -283,9 +364,7 @@ class RouterV2:
                 return await self.pipeline.execute(
                     composed,
                     selected=[(provider_id, agent)],
-                    task_id=self.last_task_id,
-                    category=routing_category,
-                    lifecycle=lifecycle,
+                    **exec_kwargs,
                 )
 
             if not selected or any(agent is None for _, agent in selected):
@@ -294,9 +373,7 @@ class RouterV2:
             return await self.pipeline.execute(
                 composed,
                 selected=selected,
-                task_id=self.last_task_id,
-                category=routing_category,
-                lifecycle=lifecycle,
+                **exec_kwargs,
             )
         except Exception as exc:
             if lifecycle is not None:

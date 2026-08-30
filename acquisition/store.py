@@ -2,8 +2,20 @@
 
 from __future__ import annotations
 
-from acquisition.models import ChangeEvent, ParsedRecord, RawArtifact, SourceDescriptor
-from security.tenant import normalize_tenant_id, tenants_match
+from acquisition.models import (
+    AcquiredResource,
+    AcquisitionJob,
+    ChangeEvent,
+    CrawlCheckpoint,
+    DatasetResult,
+    FrontierEntry,
+    IngestionBatchResult,
+    NormalizedRecord,
+    ParsedRecord,
+    RawArtifact,
+    SourceDescriptor,
+)
+from security.tenant import normalize_tenant_id, require_tenant_id, tenants_match
 
 
 class AcquisitionStore:
@@ -62,6 +74,14 @@ class InMemoryAcquisitionStore(AcquisitionStore):
         self._changes: list[ChangeEvent] = []
         self._checksum_index: dict[tuple[str, str], str] = {}
         self._fp_index: dict[tuple[str, str], str] = {}
+        self._jobs: dict[str, AcquisitionJob] = {}
+        self._frontier: dict[str, FrontierEntry] = {}
+        self._checkpoints: dict[str, CrawlCheckpoint] = {}
+        self._resources: dict[str, AcquiredResource] = {}
+        self._normalized: dict[str, NormalizedRecord] = {}
+        self._datasets: dict[str, DatasetResult] = {}
+        self._ingest_batches: dict[str, IngestionBatchResult] = {}
+        self._ingest_idem: dict[tuple[str, str], str] = {}
 
     def save_source(self, descriptor: SourceDescriptor) -> None:
         self._sources[(descriptor.tenant_id, descriptor.source_id)] = descriptor
@@ -190,3 +210,97 @@ class InMemoryAcquisitionStore(AcquisitionStore):
                 continue
             out.append(ev)
         return tuple(out)
+
+    # --- v2 scale objects (fail-closed tenant) ---
+    def save_job(self, job: AcquisitionJob) -> AcquisitionJob:
+        require_tenant_id(job.tenant_id)
+        self._jobs[job.job_id] = job
+        return job
+
+    def get_job(self, job_id: str, *, tenant_id: str) -> AcquisitionJob | None:
+        tid = require_tenant_id(tenant_id)
+        job = self._jobs.get(job_id)
+        if job is None or not tenants_match(job.tenant_id, tid):
+            return None
+        return job
+
+    def list_jobs(self, *, tenant_id: str, status: str | None = None) -> tuple[AcquisitionJob, ...]:
+        tid = require_tenant_id(tenant_id)
+        out = []
+        for job in self._jobs.values():
+            if not tenants_match(job.tenant_id, tid):
+                continue
+            if status and job.status != status:
+                continue
+            out.append(job)
+        return tuple(out)
+
+    def save_frontier_entry(self, entry: FrontierEntry) -> FrontierEntry:
+        require_tenant_id(entry.tenant_id)
+        self._frontier[entry.entry_id] = entry
+        return entry
+
+    def list_frontier(
+        self, *, job_id: str, tenant_id: str, statuses: tuple[str, ...] | None = None
+    ) -> tuple[FrontierEntry, ...]:
+        tid = require_tenant_id(tenant_id)
+        out = []
+        for entry in self._frontier.values():
+            if entry.job_id != job_id or not tenants_match(entry.tenant_id, tid):
+                continue
+            if statuses and entry.status not in statuses:
+                continue
+            out.append(entry)
+        return tuple(out)
+
+    def save_checkpoint(self, checkpoint: CrawlCheckpoint) -> CrawlCheckpoint:
+        require_tenant_id(checkpoint.tenant_id)
+        self._checkpoints[checkpoint.job_id] = checkpoint
+        return checkpoint
+
+    def get_checkpoint(self, job_id: str, *, tenant_id: str) -> CrawlCheckpoint | None:
+        tid = require_tenant_id(tenant_id)
+        cp = self._checkpoints.get(job_id)
+        if cp is None or not tenants_match(cp.tenant_id, tid):
+            return None
+        return cp
+
+    def save_resource(self, resource: AcquiredResource) -> AcquiredResource:
+        require_tenant_id(resource.tenant_id)
+        self._resources[resource.resource_id] = resource
+        return resource
+
+    def list_resources(self, *, job_id: str, tenant_id: str) -> tuple[AcquiredResource, ...]:
+        tid = require_tenant_id(tenant_id)
+        return tuple(
+            r
+            for r in self._resources.values()
+            if r.job_id == job_id and tenants_match(r.tenant_id, tid)
+        )
+
+    def save_normalized_record(self, record: NormalizedRecord) -> NormalizedRecord:
+        require_tenant_id(record.tenant_id)
+        self._normalized[record.record_id] = record
+        return record
+
+    def save_dataset(self, dataset: DatasetResult) -> DatasetResult:
+        require_tenant_id(dataset.tenant_id)
+        self._datasets[dataset.dataset_id] = dataset
+        return dataset
+
+    def get_dataset(self, dataset_id: str, *, tenant_id: str) -> DatasetResult | None:
+        tid = require_tenant_id(tenant_id)
+        ds = self._datasets.get(dataset_id)
+        if ds is None or not tenants_match(ds.tenant_id, tid):
+            return None
+        return ds
+
+    def save_ingest_batch(self, batch: IngestionBatchResult) -> IngestionBatchResult:
+        tid = require_tenant_id(batch.tenant_id)
+        if batch.idempotency_key:
+            existing_id = self._ingest_idem.get((tid, batch.idempotency_key))
+            if existing_id and existing_id in self._ingest_batches:
+                return self._ingest_batches[existing_id]
+            self._ingest_idem[(tid, batch.idempotency_key)] = batch.batch_id
+        self._ingest_batches[batch.batch_id] = batch
+        return batch

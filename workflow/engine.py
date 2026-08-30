@@ -12,6 +12,7 @@ from workflow.models import (
 )
 from workflow.state_manager import StateManager
 
+import uuid
 
 ERROR_CODES = {
     "InvalidModeError": "invalid_mode",
@@ -90,6 +91,7 @@ class WorkflowEngine:
         self.last_task_id = None
         self.last_approval_id = None
         self.last_permit_id = None
+        self.last_run_envelope = None
 
     def retrieve_memory_context(self, query, *, requesting_scope=None):
         """Optional DI: request scoped memory via MemoryService (no auto-write)."""
@@ -122,15 +124,33 @@ class WorkflowEngine:
             request_id, requesting_scope=requesting_scope, **kwargs
         )
 
-    def _obs_ctx(self, workflow_id: str = "", task_id: str = ""):
+    def _obs_ctx(
+        self,
+        workflow_id: str = "",
+        task_id: str = "",
+        *,
+        correlation_id: str | None = None,
+        actor_ref: str = "",
+        tenant_id: str = "",
+    ):
         obs = self.observability
         if obs is None:
             return None
         if workflow_id:
             existing = obs.context_for_workflow(workflow_id)
             if existing is not None:
-                return existing
-        return obs.create_context(workflow_id=workflow_id, task_id=task_id)
+                return existing.child(
+                    task_id=task_id or existing.task_id,
+                    actor_ref=actor_ref or None,
+                    tenant_id=tenant_id or None,
+                )
+        return obs.create_context(
+            correlation_id=correlation_id,
+            workflow_id=workflow_id,
+            task_id=task_id,
+            actor_ref=actor_ref,
+            tenant_id=tenant_id,
+        )
 
     def _obs_emit(self, event_type: str, ctx, **kwargs) -> None:
         if self.observability is None:
@@ -139,11 +159,37 @@ class WorkflowEngine:
             event_type, context=ctx, component="workflow", **kwargs
         )
 
-    def create(self, task_id: str, *, tenant_id: str | None = None) -> str:
-        state = self.state_manager.create(task_id=task_id, tenant_id=tenant_id)
+    def create(
+        self,
+        task_id: str,
+        *,
+        tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
+        require_tenant: bool = False,
+    ) -> str:
+        resolved_tenant = tenant_id
+        if require_tenant:
+            from security.tenant import require_tenant_id
+
+            resolved_tenant = require_tenant_id(tenant_id)
+        state = self.state_manager.create(
+            task_id=task_id,
+            tenant_id=resolved_tenant,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=actor_ref,
+        )
         self.last_workflow_id = state.workflow_id
         self.last_task_id = task_id
-        ctx = self._obs_ctx(state.workflow_id, task_id)
+        ctx = self._obs_ctx(
+            state.workflow_id,
+            task_id,
+            correlation_id=request_id,
+            actor_ref=actor_ref or "",
+            tenant_id=resolved_tenant or "",
+        )
         if self.observability is not None and ctx is not None:
             self.observability.bind_workflow_context(state.workflow_id, ctx)
         self._obs_emit("workflow.created", ctx, status="created")
@@ -250,12 +296,63 @@ class WorkflowEngine:
         run_router,
         task_id: str,
         tenant_id: str | None = None,
+        request_id: str | None = None,
+        user_id: str | None = None,
+        actor_ref: str | None = None,
     ):
-        workflow_id = self.create(task_id, tenant_id=tenant_id)
+        from security.tenant import require_tenant_id
+
+        resolved_tenant = require_tenant_id(tenant_id)
+        resolved_actor = actor_ref or (
+            f"{resolved_tenant}:{user_id}" if user_id else ""
+        )
+        workflow_id = self.create(
+            task_id,
+            tenant_id=resolved_tenant,
+            request_id=request_id,
+            user_id=user_id,
+            actor_ref=resolved_actor or None,
+            require_tenant=True,
+        )
         manager = self.state_manager
         manager.plan(workflow_id)
         manager.start(workflow_id)
-        ctx = self._obs_ctx(workflow_id, task_id)
+        ctx = self._obs_ctx(
+            workflow_id,
+            task_id,
+            correlation_id=request_id,
+            actor_ref=resolved_actor,
+            tenant_id=resolved_tenant,
+        )
+        from workflow.run_envelope import RunEnvelope
+
+        # One envelope per execute(); identity SoT for Router → Pipeline → Expert.
+        if ctx is None:
+            # Observability disabled: still build a valid envelope with local ids.
+            corr = str(request_id or "").strip() or str(uuid.uuid4())
+            trace = str(uuid.uuid4())
+        else:
+            corr = str(ctx.correlation_id or "").strip() or str(request_id or "").strip()
+            if not corr:
+                corr = str(uuid.uuid4())
+            trace = str(ctx.trace_id or "").strip() or str(uuid.uuid4())
+        resolved_request = str(request_id or "").strip() or corr
+        envelope = RunEnvelope.create(
+            workflow_id=workflow_id,
+            task_id=task_id,
+            tenant_id=resolved_tenant,
+            request_id=resolved_request,
+            correlation_id=corr,
+            trace_id=trace,
+            user_id=str(user_id or ""),
+            actor_ref=str(resolved_actor or ""),
+        )
+        self.last_run_envelope = envelope
+        try:
+            manager.set_metadata(workflow_id, {"run_envelope": envelope.as_dict()})
+        except Exception:
+            # Metadata persistence is best-effort; envelope still propagates in-memory.
+            pass
         mono0 = (
             self.observability.monotonic_ms() if self.observability is not None else None
         )
@@ -278,6 +375,11 @@ class WorkflowEngine:
                 role=role,
                 task_id=task_id,
                 lifecycle=lifecycle,
+                request_id=resolved_request,
+                tenant_id=resolved_tenant,
+                user_id=user_id,
+                actor_ref=resolved_actor,
+                envelope=envelope,
             )
             manager.complete_workflow(workflow_id)
             manager.checkpoint(workflow_id)

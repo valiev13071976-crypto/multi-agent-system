@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime
 
 from autonomy.models import sanitize_metadata
-from knowledge.access import OP_INGEST, OP_READ, OP_REFRESH, KnowledgeAccessDenied, KnowledgeAccessPolicy
+from knowledge.access import OP_DELETE, OP_INGEST, OP_READ, OP_REFRESH, KnowledgeAccessDenied, KnowledgeAccessPolicy
 from knowledge.freshness import expires_at_for, freshness_label, is_stale
 from knowledge.models import (
     DEFAULT_MAX_CONTEXT_BYTES,
@@ -16,6 +16,7 @@ from knowledge.models import (
     DEFAULT_MAX_RESULTS,
     FRESHNESS_TTL,
     STATUS_ACTIVE,
+    STATUS_SUPERSEDED,
     TRUST_RANK,
     TRUST_UNVERIFIED,
     FreshnessPolicy,
@@ -34,6 +35,11 @@ from knowledge.rag_context import RAGContextBuilder
 from knowledge.registry import KnowledgeSourceRegistry, KnowledgeSourceRegistryError
 from knowledge.validator import KnowledgeValidationError, KnowledgeValidator
 from knowledge.write_policy import KnowledgeWritePolicy
+from knowledge.platform_models import DeletionRequest
+from knowledge.lifecycle import KnowledgeLifecycleService
+from knowledge.ingestion import KnowledgeIngestionPipeline
+from knowledge.retrieval import KnowledgeRetrievalService
+from knowledge.planner import assert_sync_ingest_allowed, plan_knowledge_job
 from memory.models import (
     MEMORY_SEMANTIC,
     MEMORY_WORKING_REFERENCE,
@@ -86,6 +92,8 @@ class KnowledgeService:
         document_service=None,
         tool_gateway=None,
         observability=None,
+        store=None,
+        index=None,
         max_item_bytes: int = DEFAULT_MAX_ITEM_BYTES,
         max_results: int = DEFAULT_MAX_RESULTS,
         max_context_bytes: int = DEFAULT_MAX_CONTEXT_BYTES,
@@ -100,6 +108,11 @@ class KnowledgeService:
         self.document_service = document_service
         self.tool_gateway = tool_gateway
         self.observability = observability
+        self.store = store
+        self.index = index
+        self._ingestion = KnowledgeIngestionPipeline(store, index) if store is not None else None
+        self._retrieval = KnowledgeRetrievalService(store, index) if store is not None and index is not None else None
+        self._lifecycle = KnowledgeLifecycleService(store, index) if store is not None else None
         self.max_item_bytes = int(max_item_bytes)
         self.max_results = int(max_results)
         self.max_context_bytes = int(max_context_bytes)
@@ -152,6 +165,18 @@ class KnowledgeService:
             raise KnowledgeDenied(exc.reason) from exc
 
         content = normalize_knowledge_text(request.content)
+        try:
+            assert_sync_ingest_allowed(
+                byte_size=len(content.encode("utf-8")),
+                bulk=bool((request.metadata_safe or {}).get("bulk")),
+            )
+        except Exception as exc:
+            from knowledge.errors import KnowledgeBatchRequired
+
+            if isinstance(exc, KnowledgeBatchRequired):
+                self._emit("knowledge.denied", status="denied", metadata={"reason": "batch_required"})
+                raise KnowledgeDenied("batch_required") from exc
+            raise
         if self._looks_like_secret(content):
             self._emit("knowledge.denied", status="denied", metadata={"reason": "secret_denied"})
             self._metric("knowledge_denied_total", source.source_type, "denied", request.trust_level)
@@ -178,7 +203,7 @@ class KnowledgeService:
 
         digest = content_hash_text(content)
         # Dedup within scope+source
-        for existing in self._items.values():
+        for existing in list(self._items.values()):
             if (
                 existing.scope.key() == request.scope.key()
                 and existing.source_id == request.source_id
@@ -187,6 +212,32 @@ class KnowledgeService:
             ):
                 self._emit("knowledge.ingested", status="dedup", metadata={"source_type": source.source_type})
                 return existing
+            if (
+                existing.scope.key() == request.scope.key()
+                and existing.source_id == request.source_id
+                and existing.content_hash != digest
+                and existing.status == STATUS_ACTIVE
+            ):
+                self._items[existing.knowledge_id] = KnowledgeItem(
+                    knowledge_id=existing.knowledge_id,
+                    scope=existing.scope,
+                    source_id=existing.source_id,
+                    content=existing.content,
+                    content_hash=existing.content_hash,
+                    trust_level=existing.trust_level,
+                    provenance=existing.provenance,
+                    sensitivity=existing.sensitivity,
+                    status=STATUS_SUPERSEDED,
+                    created_at=existing.created_at,
+                    updated_at=stamp,
+                    summary_safe=existing.summary_safe,
+                    confidence=existing.confidence,
+                    freshness=existing.freshness,
+                    expires_at=existing.expires_at,
+                    version=existing.version + 1,
+                    metadata_safe=dict(existing.metadata_safe),
+                    memory_id=existing.memory_id,
+                )
 
         freshness = request.freshness or source.refresh_policy or FreshnessPolicy()
         expires = expires_at_for(freshness, now=stamp)
@@ -295,6 +346,19 @@ class KnowledgeService:
                 memory_id=memory_id,
             )
         self._items[item.knowledge_id] = item
+        if self._ingestion is not None:
+            try:
+                self._ingestion.ingest_text(
+                    content=content,
+                    scope=request.scope,
+                    source_id=request.source_id,
+                    knowledge_id=kid,
+                    bulk=bool((request.metadata_safe or {}).get("bulk")),
+                )
+                self._emit("knowledge.indexed", status="ok", metadata={"knowledge_id": kid})
+            except Exception:
+                if str((request.metadata_safe or {}).get("bulk")) == "True":
+                    raise
         self._cache.clear()
         self._emit(
             "knowledge.ingested",
@@ -334,6 +398,16 @@ class KnowledgeService:
             sources = tuple(s for s in sources if s.source_type in types)
 
         collected: list[KnowledgeResult] = []
+        if self._retrieval is not None:
+            platform = self._retrieval.retrieve(
+                query_text=query.query_text,
+                scope=query.scope,
+                limit=query.limit,
+            )
+            if platform.candidates:
+                collected.extend(self._retrieval.to_knowledge_results(platform))
+            elif not self._items:
+                self._emit("knowledge.retrieval.no_results", status="empty", metadata={})
         # Local ingested items
         for item in self._items.values():
             if item.scope.key() != query.scope.key() or item.status != STATUS_ACTIVE:
@@ -460,6 +534,64 @@ class KnowledgeService:
         results = self.retrieve(query, requesting_scope=requesting_scope)
         return self.build_rag_context(results)
 
+    def delete_knowledge(
+        self,
+        *,
+        knowledge_id: str | None = None,
+        source_id: str | None = None,
+        version_id: str | None = None,
+        requesting_scope: MemoryScope,
+    ) -> dict:
+        if self._lifecycle is None:
+            raise KnowledgeDenied("persistence_unavailable")
+        self._require_access(requesting_scope, requesting_scope, OP_DELETE)
+        receipt = self._lifecycle.delete(
+            DeletionRequest(
+                tenant_ref=str(requesting_scope.tenant_ref or ""),
+                target_knowledge_id=knowledge_id,
+                target_source_id=source_id,
+                target_version_id=version_id,
+                scope=requesting_scope,
+            ),
+            requesting_scope=requesting_scope,
+        )
+        for kid in list(self._items.keys()):
+            row = self._items[kid]
+            if knowledge_id and row.knowledge_id == knowledge_id:
+                self._items.pop(kid, None)
+            elif source_id and row.source_id == source_id:
+                self._items.pop(kid, None)
+        self._cache.clear()
+        self._emit(
+            "knowledge.deletion.completed",
+            status="tombstoned",
+            metadata={
+                "affected_versions": receipt.affected_versions,
+                "affected_chunks": receipt.affected_chunks,
+            },
+        )
+        return {
+            "deletion_id": receipt.deletion_id,
+            "status": receipt.status,
+            "affected_versions": receipt.affected_versions,
+            "affected_chunks": receipt.affected_chunks,
+            "affected_index_records": receipt.affected_index_records,
+        }
+
+    def plan_ingestion_job(self, *, tenant_id: str, source_id: str, byte_size: int, bulk: bool = False) -> dict:
+        planned = plan_knowledge_job(
+            tenant_id=tenant_id,
+            source_id=source_id,
+            byte_size=byte_size,
+            bulk=bulk,
+        )
+        return {
+            "enqueue": planned.enqueue,
+            "execution_lane": planned.execution_lane,
+            "workload_class": planned.workload_class,
+            "trusted_metadata": dict(planned.trusted_metadata),
+        }
+
     def refresh_source(
         self,
         source_id: str,
@@ -496,6 +628,7 @@ class KnowledgeService:
     def _cache_key(self, query: KnowledgeQuery) -> str:
         raw = "|".join(
             [
+                str(query.scope.tenant_ref or ""),
                 query.scope.scope_type,
                 query.scope.scope_id,
                 query.query_text,

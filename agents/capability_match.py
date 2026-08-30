@@ -1,9 +1,11 @@
 """Deterministic ModelProfile ↔ TaskRequirements capability matching.
 
-Search is intentionally unresolved: ModelProfile has no dedicated
-``supports_search`` (or equivalent) field. Matching never treats
-``supports_tools=true`` as web-search ability. A required ``search``
-capability therefore cannot be satisfied by any current profile.
+Model web-search ability is represented by ``ModelProfile.supports_search``
+(``{PREFIX}_SUPPORTS_SEARCH``). Matching never treats ``supports_tools=true``
+as search ability.
+
+ToolGateway search is a separate tool path (e.g. FactValidator); it is not
+inferred from model-profile search capability and vice versa.
 """
 
 from __future__ import annotations
@@ -24,7 +26,7 @@ from agents.routing_requirements import (
 LONG_CONTEXT_WINDOW_MIN = 100_000
 
 # Capabilities with no trustworthy profile representation.
-UNRESOLVED_CAPABILITIES = frozenset({CAPABILITY_SEARCH})
+UNRESOLVED_CAPABILITIES = frozenset()
 
 MATCH_PASS = "pass"
 MATCH_FAIL = "fail"
@@ -54,7 +56,6 @@ def match_capability(profile: ModelProfile | None, capability: str) -> str:
     if not cap:
         return MATCH_PASS
     if cap in UNRESOLVED_CAPABILITIES:
-        # Documented: search is not represented on ModelProfile; never invent.
         return MATCH_UNRESOLVED
     if profile is None:
         return MATCH_FAIL
@@ -64,6 +65,8 @@ def match_capability(profile: ModelProfile | None, capability: str) -> str:
         return MATCH_PASS if profile.supports_reasoning else MATCH_FAIL
     if cap == CAPABILITY_VISION:
         return MATCH_PASS if profile.supports_vision else MATCH_FAIL
+    if cap == CAPABILITY_SEARCH:
+        return MATCH_PASS if getattr(profile, "supports_search", False) else MATCH_FAIL
     if cap == CAPABILITY_LONG_CONTEXT:
         return MATCH_PASS if profile_supports_long_context(profile) else MATCH_FAIL
     # Unknown capability tokens are not inventable → unresolved (not silent pass).

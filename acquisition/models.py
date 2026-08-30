@@ -330,3 +330,462 @@ class ValidationResult:
     def __post_init__(self):
         object.__setattr__(self, "errors", tuple(self.errors or ()))
         object.__setattr__(self, "warnings", tuple(self.warnings or ()))
+
+
+# ---------------------------------------------------------------------------
+# Scale platform (5.1–5.7) — versioned job / resource / ingest contracts
+# ---------------------------------------------------------------------------
+
+# Job modes
+MODE_SINGLE = "single"
+MODE_CRAWL = "crawl"
+MODE_SCRAPE = "scrape"
+MODE_API = "api"
+ACQUISITION_MODES = (MODE_SINGLE, MODE_CRAWL, MODE_SCRAPE, MODE_API)
+
+# Job status
+JOB_PENDING = "pending"
+JOB_QUEUED = "queued"
+JOB_RUNNING = "running"
+JOB_COMPLETED = "completed"
+JOB_PARTIAL = "partial"
+JOB_FAILED = "failed"
+JOB_CANCELLED = "cancelled"
+JOB_REJECTED = "rejected"
+JOB_STATUSES = (
+    JOB_PENDING,
+    JOB_QUEUED,
+    JOB_RUNNING,
+    JOB_COMPLETED,
+    JOB_PARTIAL,
+    JOB_FAILED,
+    JOB_CANCELLED,
+    JOB_REJECTED,
+)
+
+# Resource status
+RESOURCE_PENDING = "pending"
+RESOURCE_FETCHED = "fetched"
+RESOURCE_PARSED = "parsed"
+RESOURCE_SKIPPED = "skipped"
+RESOURCE_FAILED = "failed"
+RESOURCE_DENIED = "denied"
+RESOURCE_STATUSES = (
+    RESOURCE_PENDING,
+    RESOURCE_FETCHED,
+    RESOURCE_PARSED,
+    RESOURCE_SKIPPED,
+    RESOURCE_FAILED,
+    RESOURCE_DENIED,
+)
+
+# Extraction / field status (never invent values)
+EXTRACT_OK = "ok"
+EXTRACT_MISSING = "missing"
+EXTRACT_INVALID = "invalid"
+EXTRACT_EMPTY = "empty"
+EXTRACT_UNAVAILABLE = "unavailable"
+EXTRACTION_STATUSES = (
+    EXTRACT_OK,
+    EXTRACT_MISSING,
+    EXTRACT_INVALID,
+    EXTRACT_EMPTY,
+    EXTRACT_UNAVAILABLE,
+)
+
+# Frontier states
+FRONTIER_PENDING = "pending"
+FRONTIER_CLAIMED = "claimed"
+FRONTIER_COMPLETED = "completed"
+FRONTIER_SKIPPED = "skipped"
+FRONTIER_FAILED = "failed"
+FRONTIER_RETRY = "retry"
+FRONTIER_STATUSES = (
+    FRONTIER_PENDING,
+    FRONTIER_CLAIMED,
+    FRONTIER_COMPLETED,
+    FRONTIER_SKIPPED,
+    FRONTIER_FAILED,
+    FRONTIER_RETRY,
+)
+
+# Dedupe decisions
+DEDUPE_UNIQUE = "unique"
+DEDUPE_EXACT = "exact"
+DEDUPE_SAME_SOURCE = "same_source"
+DEDUPE_CROSS_SOURCE = "cross_source"
+DEDUPE_POSSIBLE = "possible"
+DEDUPE_DECISIONS = (
+    DEDUPE_UNIQUE,
+    DEDUPE_EXACT,
+    DEDUPE_SAME_SOURCE,
+    DEDUPE_CROSS_SOURCE,
+    DEDUPE_POSSIBLE,
+)
+
+# Ingest outcomes
+INGEST_ACCEPTED = "accepted"
+INGEST_REJECTED = "rejected"
+INGEST_DUPLICATE = "duplicate"
+INGEST_FAILED = "failed"
+INGEST_OUTCOMES = (INGEST_ACCEPTED, INGEST_REJECTED, INGEST_DUPLICATE, INGEST_FAILED)
+
+POLICY_VERSION = "1.0.0"
+PARSER_CONTRACT_VERSION = "1.0.0"
+NORMALIZER_VERSION = "1.0.0"
+DEDUPE_POLICY_VERSION = "1.0.0"
+INGESTION_VERSION = "1.0.0"
+
+
+@dataclass(frozen=True)
+class CrawlPolicy:
+    """Trusted crawl limits — not overridable from untrusted payload."""
+
+    max_depth: int = 2
+    max_pages: int = 50
+    max_frontier: int = 500
+    per_host_concurrency: int = 2
+    min_interval_seconds: float = 0.0
+    max_redirects: int = 5
+    ignore_tracking_params: bool = True
+    allowed_content_types: tuple[str, ...] = (
+        "text/html",
+        "application/xhtml+xml",
+        "application/json",
+        "text/plain",
+        "text/csv",
+    )
+    path_allow: tuple[str, ...] = ()
+    path_deny: tuple[str, ...] = ()
+    respect_robots: bool = True
+    deadline_seconds: float | None = None
+    # Retries after the initial fetch attempt. Max fetch attempts = 1 + max_retries_per_url.
+    max_retries_per_url: int = 3
+
+    def __post_init__(self):
+        object.__setattr__(self, "allowed_content_types", tuple(self.allowed_content_types or ()))
+        object.__setattr__(self, "path_allow", tuple(self.path_allow or ()))
+        object.__setattr__(self, "path_deny", tuple(self.path_deny or ()))
+        if int(self.max_depth) < 0:
+            raise ValueError("max_depth_invalid")
+        if int(self.max_pages) < 1:
+            raise ValueError("max_pages_invalid")
+        if int(self.max_retries_per_url) < 0:
+            raise ValueError("max_retries_per_url_invalid")
+        object.__setattr__(self, "max_retries_per_url", int(self.max_retries_per_url))
+
+
+@dataclass(frozen=True)
+class SourceDefinition:
+    """Versioned source contract — host allowlist is trusted control-plane only."""
+
+    source_id: str
+    source_type: str
+    tenant_id: str
+    trust_level: str
+    allowed_hosts: tuple[str, ...]
+    seed_urls: tuple[str, ...] = ()
+    path_allow: tuple[str, ...] = ()
+    path_deny: tuple[str, ...] = ()
+    auth_secret_ref: str = ""
+    crawl_policy: CrawlPolicy = field(default_factory=CrawlPolicy)
+    freshness_policy: FreshnessPolicy = field(default_factory=FreshnessPolicy)
+    tool_id: str = "http.request"
+    integration_id: str = ""
+    enabled: bool = True
+    name: str = ""
+    policy_version: str = POLICY_VERSION
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        if not str(self.source_id or "").strip():
+            raise ValueError("source_id_required")
+        if self.source_type not in SOURCE_TYPES:
+            raise ValueError(f"invalid_source_type:{self.source_type}")
+        if self.trust_level not in SOURCE_TRUST_LEVELS:
+            raise ValueError(f"invalid_trust_level:{self.trust_level}")
+        hosts = tuple(h.strip().lower() for h in (self.allowed_hosts or ()) if str(h).strip())
+        if not hosts:
+            raise ValueError("allowed_hosts_required")
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "allowed_hosts", hosts)
+        object.__setattr__(self, "seed_urls", tuple(self.seed_urls or ()))
+        object.__setattr__(self, "path_allow", tuple(self.path_allow or ()))
+        object.__setattr__(self, "path_deny", tuple(self.path_deny or ()))
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+        if self.auth_secret_ref:
+            from tools.secrets_ref import ensure_secret_ref
+
+            ref = ensure_secret_ref(self.auth_secret_ref)
+            object.__setattr__(self, "auth_secret_ref", ref.secret_ref if ref else "")
+        for key in self.metadata:
+            lowered = str(key).lower()
+            if any(s in lowered for s in ("secret", "password", "token", "api_key", "credential")):
+                raise ValueError("credentials_forbidden_in_source_metadata")
+
+    def to_descriptor(self) -> SourceDescriptor:
+        return SourceDescriptor(
+            source_id=self.source_id,
+            source_type=self.source_type,
+            tenant_id=self.tenant_id,
+            trust_level=self.trust_level,
+            freshness_policy=self.freshness_policy,
+            tool_id=self.tool_id,
+            integration_id=self.integration_id,
+            enabled=self.enabled,
+            name=self.name,
+            allowed_domains=self.allowed_hosts,
+            metadata={
+                **dict(self.metadata),
+                "policy_version": self.policy_version,
+                "auth_ref": self.auth_secret_ref,
+                "seed_urls": list(self.seed_urls),
+                "path_allow": list(self.path_allow),
+                "path_deny": list(self.path_deny),
+            },
+        )
+
+    @classmethod
+    def from_descriptor(cls, descriptor: SourceDescriptor, **overrides) -> "SourceDefinition":
+        meta = dict(descriptor.metadata or {})
+        hosts = tuple(descriptor.allowed_domains or ())
+        if not hosts and overrides.get("allowed_hosts"):
+            hosts = tuple(overrides["allowed_hosts"])
+        return cls(
+            source_id=overrides.get("source_id", descriptor.source_id),
+            source_type=overrides.get("source_type", descriptor.source_type),
+            tenant_id=overrides.get("tenant_id", descriptor.tenant_id),
+            trust_level=overrides.get("trust_level", descriptor.trust_level),
+            allowed_hosts=hosts,
+            seed_urls=tuple(overrides.get("seed_urls", meta.get("seed_urls") or ())),
+            path_allow=tuple(overrides.get("path_allow", meta.get("path_allow") or ())),
+            path_deny=tuple(overrides.get("path_deny", meta.get("path_deny") or ())),
+            auth_secret_ref=str(overrides.get("auth_secret_ref", meta.get("auth_ref") or meta.get("auth_secret_ref") or "")),
+            crawl_policy=overrides.get("crawl_policy", CrawlPolicy()),
+            freshness_policy=overrides.get("freshness_policy", descriptor.freshness_policy),
+            tool_id=overrides.get("tool_id", descriptor.tool_id or "http.request"),
+            integration_id=overrides.get("integration_id", descriptor.integration_id),
+            enabled=overrides.get("enabled", descriptor.enabled),
+            name=overrides.get("name", descriptor.name),
+            policy_version=str(overrides.get("policy_version", meta.get("policy_version") or POLICY_VERSION)),
+            metadata={k: v for k, v in meta.items() if k not in {
+                "policy_version", "auth_secret_ref", "auth_ref", "seed_urls", "path_allow", "path_deny",
+            }},
+        )
+
+
+@dataclass(frozen=True)
+class AcquisitionJob:
+    job_id: str
+    tenant_id: str
+    actor_id: str
+    source_id: str
+    mode: str
+    workload_class: str
+    status: str = JOB_PENDING
+    workflow_id: str = ""
+    trusted_job_type: str = ""
+    execution_lane: str = ""
+    policy_version: str = POLICY_VERSION
+    parser_version: str = PARSER_CONTRACT_VERSION
+    normalizer_version: str = NORMALIZER_VERSION
+    dedupe_version: str = DEDUPE_POLICY_VERSION
+    ingestion_version: str = INGESTION_VERSION
+    scrape_profile_id: str = ""
+    scrape_profile_version: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    cancel_requested: bool = False
+    error_code: str = ""
+    counters: Mapping[str, object] = field(default_factory=dict)
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        if self.mode not in ACQUISITION_MODES:
+            raise ValueError(f"invalid_mode:{self.mode}")
+        if self.status not in JOB_STATUSES:
+            raise ValueError(f"invalid_job_status:{self.status}")
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "counters", _meta(self.counters))
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+
+
+@dataclass(frozen=True)
+class AcquiredResource:
+    resource_id: str
+    job_id: str
+    tenant_id: str
+    source_id: str
+    url: str
+    status: str = RESOURCE_PENDING
+    content_type: str = ""
+    content_length: int = 0
+    content_hash: str = ""
+    raw_artifact_ref: str = ""
+    canonical_url: str = ""
+    depth: int = 0
+    parent_url: str = ""
+    extraction_status: str = EXTRACT_OK
+    provenance: Mapping[str, object] = field(default_factory=dict)
+    metadata: Mapping[str, object] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        if self.status not in RESOURCE_STATUSES:
+            raise ValueError(f"invalid_resource_status:{self.status}")
+        if self.extraction_status not in EXTRACTION_STATUSES:
+            raise ValueError(f"invalid_extraction_status:{self.extraction_status}")
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "provenance", _meta(self.provenance))
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+
+
+@dataclass(frozen=True)
+class NormalizedRecord:
+    record_id: str
+    job_id: str
+    tenant_id: str
+    source_id: str
+    resource_id: str
+    normalizer_version: str
+    fields: Mapping[str, object]
+    field_status: Mapping[str, object]
+    fingerprint: str
+    warnings: tuple[str, ...] = ()
+    errors: tuple[str, ...] = ()
+    provenance: Mapping[str, object] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "fields", _meta(self.fields))
+        object.__setattr__(self, "field_status", _meta(self.field_status))
+        object.__setattr__(self, "warnings", tuple(self.warnings or ()))
+        object.__setattr__(self, "errors", tuple(self.errors or ()))
+        object.__setattr__(self, "provenance", _meta(self.provenance))
+
+
+@dataclass(frozen=True)
+class DedupeDecision:
+    decision_id: str
+    tenant_id: str
+    job_id: str
+    record_id: str
+    decision: str
+    matched_record_id: str = ""
+    layer: str = ""
+    policy_version: str = DEDUPE_POLICY_VERSION
+    provenance_refs: tuple[str, ...] = ()
+    metadata: Mapping[str, object] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        if self.decision not in DEDUPE_DECISIONS:
+            raise ValueError(f"invalid_dedupe_decision:{self.decision}")
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "provenance_refs", tuple(self.provenance_refs or ()))
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+
+
+@dataclass(frozen=True)
+class DatasetResult:
+    dataset_id: str
+    tenant_id: str
+    job_id: str
+    name: str
+    version: str
+    record_count: int
+    fingerprint: str
+    source_ids: tuple[str, ...] = ()
+    created_at: datetime = field(default_factory=utc_now)
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "source_ids", tuple(self.source_ids or ()))
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+
+
+@dataclass(frozen=True)
+class IngestionBatchResult:
+    batch_id: str
+    tenant_id: str
+    job_id: str
+    dataset_id: str
+    accepted: int = 0
+    rejected: int = 0
+    duplicate: int = 0
+    failed: int = 0
+    reason_codes: tuple[str, ...] = ()
+    idempotency_key: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "reason_codes", tuple(self.reason_codes or ()))
+        object.__setattr__(self, "metadata", _meta(self.metadata))
+
+
+@dataclass(frozen=True)
+class FrontierEntry:
+    entry_id: str
+    job_id: str
+    tenant_id: str
+    url: str
+    canonical_url: str
+    status: str = FRONTIER_PENDING
+    depth: int = 0
+    parent_url: str = ""
+    retry_count: int = 0
+    claim_token: str = ""
+    error_code: str = ""
+    created_at: datetime = field(default_factory=utc_now)
+    updated_at: datetime = field(default_factory=utc_now)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        if self.status not in FRONTIER_STATUSES:
+            raise ValueError(f"invalid_frontier_status:{self.status}")
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+
+
+@dataclass(frozen=True)
+class CrawlCheckpoint:
+    job_id: str
+    tenant_id: str
+    visited_count: int = 0
+    frontier_pending: int = 0
+    pages_fetched: int = 0
+    pages_failed: int = 0
+    pages_skipped: int = 0
+    policy_version: str = POLICY_VERSION
+    parser_version: str = PARSER_CONTRACT_VERSION
+    normalizer_version: str = NORMALIZER_VERSION
+    dedupe_version: str = DEDUPE_POLICY_VERSION
+    updated_at: datetime = field(default_factory=utc_now)
+    metadata: Mapping[str, object] = field(default_factory=dict)
+
+    def __post_init__(self):
+        from security.tenant import require_tenant_id
+
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "metadata", _meta(self.metadata))

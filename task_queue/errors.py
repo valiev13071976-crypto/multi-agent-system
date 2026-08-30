@@ -32,3 +32,11 @@ class QueueTimeoutError(QueueError):
 
 class QueueCancelledError(QueueError):
     pass
+
+
+class QueueTenantOwnershipError(QueueError):
+    """Fail-closed when tenant_id does not own the queue task."""
+
+    def __init__(self, reason: str = "tenant_mismatch"):
+        self.reason = str(reason)
+        super().__init__(self.reason)

@@ -5,6 +5,11 @@ Does not use eval scores or answer-quality signals.
 
 Persistence limitation: health state lives in-process memory only; it does not
 survive process restart and is not shared across workers.
+
+Operational contract (PATCH-MR-05): ``state_scope`` is ``process_local`` and
+``shared_backing`` is False unless a future shared store is plugged in via
+``agents.routing_state_scope.ProviderHealthStore``. See readiness capabilities
+on ``/ready`` for the machine-visible signal.
 """
 
 from __future__ import annotations
@@ -15,6 +20,8 @@ from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Deque
+
+from agents.routing_state_scope import STATE_SCOPE_PROCESS_LOCAL
 
 
 HEALTH_HEALTHY = "healthy"
@@ -202,13 +209,27 @@ def is_qualifying_provider_failure(exc: BaseException | None, *, error_code: str
 
 
 class ProviderHealthTracker:
-    """Process-local rolling health tracker used by ModelRouter / ExpertManager."""
+    """Process-local rolling health tracker used by ModelRouter / ExpertManager.
+
+    Implements ``ProviderHealthStore``. Instances do not share mutable state;
+    constructing two trackers (e.g. two workers) yields independent cooldowns.
+    """
+
+    STATE_SCOPE = STATE_SCOPE_PROCESS_LOCAL
 
     def __init__(self, policy: RoutingHealthPolicy | None = None):
         self.policy = policy or RoutingHealthPolicy()
         self._events: dict[tuple[str, str], Deque[_HealthEvent]] = {}
         self._cooldown_until: dict[tuple[str, str], datetime] = {}
         self._lock = threading.Lock()
+
+    @property
+    def state_scope(self) -> str:
+        return self.STATE_SCOPE
+
+    @property
+    def shared_backing(self) -> bool:
+        return False
 
     def _key(self, provider_id: str, model_id: str = "") -> tuple[str, str]:
         return (str(provider_id or ""), str(model_id or ""))

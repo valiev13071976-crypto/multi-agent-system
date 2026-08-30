@@ -59,6 +59,12 @@ class Pipeline:
         task_id=None,
         category=None,
         lifecycle=None,
+        workflow_id=None,
+        request_id=None,
+        tenant_id=None,
+        user_id=None,
+        actor_ref=None,
+        envelope=None,
     ):
 
         try:
@@ -67,6 +73,12 @@ class Pipeline:
                 prompt,
                 selected=selected,
                 task_id=task_id,
+                workflow_id=workflow_id,
+                request_id=request_id,
+                tenant_id=tenant_id,
+                user_id=user_id,
+                actor_ref=actor_ref,
+                envelope=envelope,
             )
             provider_errors = getattr(self.expert_manager, "last_errors", {}) or {}
             await self._end(
@@ -83,7 +95,11 @@ class Pipeline:
 
         gateway = getattr(self.fact_validator, "gateway", None)
         if gateway is not None:
-            gateway.task_id = task_id or ""
+            # Prefer envelope identity; else legacy execute kwargs.
+            if envelope is not None:
+                gateway.task_id = envelope.task_id or ""
+            else:
+                gateway.task_id = task_id or ""
             if hasattr(gateway, "reset_budget"):
                 gateway.reset_budget()
 
@@ -92,9 +108,41 @@ class Pipeline:
             structural = self.structural_validator.validate_experts(experts)
             peer = await self.peer_review.review(experts, errors=provider_errors)
             consistency = self.consistency_validator.validate(experts)
+
+            # Request-local validation lineage (envelope wins; never mutate envelope).
+            if envelope is not None:
+                run_workflow_id = envelope.workflow_id
+                run_task_id = envelope.task_id
+                run_tenant_id = envelope.tenant_id
+                run_actor_ref = envelope.actor_ref
+                run_request_id = envelope.request_id
+            else:
+                run_workflow_id = workflow_id or (
+                    lifecycle.workflow_id if lifecycle is not None else None
+                )
+                run_task_id = task_id
+                run_tenant_id = tenant_id
+                run_actor_ref = actor_ref
+                run_request_id = request_id
+
+            parent_context = None
+            if envelope is None:
+                obs = getattr(self.fact_validator, "observability", None)
+                if obs is None and gateway is not None:
+                    obs = getattr(gateway, "observability", None)
+                if obs is not None and run_workflow_id:
+                    parent_context = obs.context_for_workflow(run_workflow_id)
+
             facts = await self.fact_validator.validate(
                 experts,
                 category=category,
+                envelope=envelope,
+                parent_context=parent_context,
+                task_id=run_task_id,
+                workflow_id=run_workflow_id,
+                tenant_id=run_tenant_id,
+                actor_ref=run_actor_ref,
+                request_id=run_request_id,
             )
             self.last_validation = {
                 "structural": structural,
