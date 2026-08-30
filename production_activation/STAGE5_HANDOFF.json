@@ -46,19 +46,23 @@
   "notes": [
     "Stage 5 engineering closed: GO_LIVE_READY.",
     "GO LIVE defaults inactive; no implicit activation.",
+    "Canonical durable store: $PANDA_DATA_DIR/production_activation.sqlite (override PRODUCTION_ACTIVATION_DB_PATH).",
+    "CLI runtime must never use :memory: — cross-process rehydration required.",
     "Public/production LIVE_VERIFIED activation requires explicit operator --confirm activate plus live evidence.",
     "Stage 6 does not exist."
   ],
   "operator_cli": "python -m production_activation",
+  "durable_db": "$PANDA_DATA_DIR/production_activation.sqlite",
   "operator_live_activation_instructions": [
     "1. Confirm Stage-4 artifact: controlled_launch/STAGE4_HANDOFF.json (CONTROLLED_LAUNCH_PASS, ELIGIBLE, go_live_active=false).",
-    "2. python -m production_activation status",
-    "3. python -m production_activation validate-prerequisite --candidate-id <id>",
-    "4. python -m production_activation create-policy --release-identity <sha> --confirm",
-    "5. python -m production_activation seed-evidence --candidate-id <id> --release-identity <sha> --confirm",
-    "6. python -m production_activation evaluate --candidate-id <id>  (expect GO_LIVE_READY, go_live_active=false)",
-    "7. prepare / authorize / activate ... --confirm  (governed routing activation only)",
-    "8. Record LIVE_VERIFIED post-activation evidence before claiming GO_LIVE_PASS / PRODUCTION ACTIVE",
-    "9. Deactivate path: python -m production_activation deactivate --candidate-id <id> --confirm"
+    "2. Deploy THIS patch release; bind all policy/evidence to the NEW PATCH COMMIT SHA.",
+    "3. python -m production_activation status",
+    "4. python -m production_activation create-policy --release-identity <NEW_PATCH_SHA> --confirm",
+    "5. NEW CLI process: python -m production_activation status  (policy must still appear)",
+    "6. python -m production_activation seed-evidence --candidate-id stage5-production --release-identity <NEW_PATCH_SHA> --confirm",
+    "7. NEW CLI process: python -m production_activation evaluate --candidate-id stage5-production",
+    "8. Expect: verdict=GO_LIVE_READY, go_live_eligible=true, go_live_active=false, blocked=[]",
+    "9. Only then prepare / authorize / activate ... --confirm",
+    "10. Deactivate: python -m production_activation deactivate --candidate-id stage5-production --confirm"
   ]
 }

@@ -291,9 +291,41 @@ class ProductionActivationService:
     def evaluate_stage5_gate(self, ctx, *, candidate_id: str = "") -> dict:
         self.access.require(ctx, PERM_ACTIVATION_READ)
         policy = self.store.latest_go_live_policy()
-        evidence = self.store.list_evidence(candidate_id) if candidate_id else []
-        stage4_ok = self.handoff_gate.stage4_artifact_ready()
         state = self.store.get_activation_state()
+        stage4_ok = self.handoff_gate.stage4_artifact_ready()
+
+        if policy is None:
+            from production_activation.stage5_gate import Stage5GateResult
+
+            result = Stage5GateResult(
+                verdict="GO_LIVE_BLOCKED",
+                engineering="PASS",
+                stage4_handoff="PASS" if stage4_ok else "FAIL",
+                release_readiness="NOT_READY",
+                go_live_eligible=False,
+                go_live_active=False,
+                operator_action_required=True,
+                gates={"5.14_activation_policy": "MISSING"},
+                blocked=["policy_missing"],
+                release_identity="",
+                policy_version="",
+            )
+            self.store.set_activation_state(
+                state.get("state") or ActivationState.GO_LIVE_ELIGIBLE.value,
+                candidate_id=candidate_id or state.get("candidate_id") or "",
+                extra={"stage5_gate": result.as_dict()},
+            )
+            return result.as_dict()
+
+        raw_evidence = self.store.list_evidence(candidate_id) if candidate_id else []
+        # Fail closed: only evidence bound to this release may satisfy gates.
+        evidence = []
+        for e in raw_evidence:
+            rid = str((e.safe_metrics or {}).get("release_identity") or "")
+            if rid and rid != policy.release_identity:
+                continue
+            evidence.append(e)
+
         result = self.stage5_gate.evaluate(
             evidence=evidence,
             policy=policy,

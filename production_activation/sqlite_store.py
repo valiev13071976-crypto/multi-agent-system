@@ -23,8 +23,17 @@ class SqliteProductionActivationStore:
     def __init__(self, path: str = ":memory:"):
         self.path = path
         self._lock = threading.RLock()
+        if path != ":memory:":
+            from pathlib import Path
+
+            Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        if path != ":memory:":
+            try:
+                self._connection.execute("PRAGMA journal_mode=WAL;")
+            except sqlite3.Error:
+                pass
         self._init_schema()
 
     def _conn(self):
