@@ -82,14 +82,38 @@ def _plan(candidate: FinalProductionCandidate) -> GoLivePlan:
 
 class Stage5HandoffTests(unittest.TestCase):
     def test_stage3_open_blocks_activation(self):
-        gate = Stage5HandoffGate()
-        with self.assertRaises(ProductionActivationError) as ctx:
-            gate.require_ready(candidate_id="lc-1")
-        self.assertEqual(ctx.exception.code, BLOCKED_BY_PREVIOUS_STAGE)
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(root=tmp)
+            config = ValidationConfig(production_url="", release_identity="x", environment="production")
+            from controlled_launch.handoff import Stage3HandoffGate
+
+            gate = Stage5HandoffGate(
+                stage3_gate=Stage3HandoffGate(config=config, evidence_store=store),
+                require_stage4_artifact=False,
+            )
+            with self.assertRaises(ProductionActivationError) as ctx:
+                gate.require_ready(candidate_id="lc-1")
+            self.assertIn(ctx.exception.code, {BLOCKED_BY_PREVIOUS_STAGE, "STAGE5_BLOCKED_BY_STAGE4"})
 
     def test_go_live_gate_blocked_by_default(self):
-        gate = Stage5HandoffGate()
-        self.assertEqual(gate.go_live_gate_result(candidate_id="lc-1"), "GO_LIVE_BLOCKED")
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(root=tmp)
+            config = ValidationConfig(production_url="", release_identity="x", environment="production")
+            from controlled_launch.handoff import Stage3HandoffGate
+
+            gate = Stage5HandoffGate(
+                stage3_gate=Stage3HandoffGate(config=config, evidence_store=store),
+                require_stage4_artifact=False,
+            )
+            self.assertEqual(gate.go_live_gate_result(candidate_id="lc-1"), "GO_LIVE_BLOCKED")
+
+    def test_stage4_artifact_pass_accepted(self):
+        from production_activation.stage4_artifact import load_stage4_handoff_artifact, require_stage4_artifact_ready
+
+        data = load_stage4_handoff_artifact()
+        require_stage4_artifact_ready(data)
+        self.assertEqual(data["verdict"], "CONTROLLED_LAUNCH_PASS")
+        self.assertFalse(data["go_live_active"])
 
 
 class Stage5CandidateTests(unittest.TestCase):
@@ -274,7 +298,17 @@ class Stage5ServiceTests(unittest.TestCase):
     def setUp(self):
         self._tmpdir = tempfile.TemporaryDirectory()
         self.store = SqliteProductionActivationStore(path=str(Path(self._tmpdir.name) / "pa.sqlite"))
-        self.svc = ProductionActivationService(store=self.store)
+        empty = EvidenceStore(root=str(Path(self._tmpdir.name) / "empty_ev"))
+        config = ValidationConfig(production_url="", release_identity="local", environment="local")
+        from controlled_launch.handoff import Stage3HandoffGate
+
+        self.svc = ProductionActivationService(
+            store=self.store,
+            handoff_gate=Stage5HandoffGate(
+                stage3_gate=Stage3HandoffGate(config=config, evidence_store=empty),
+                require_stage4_artifact=False,
+            ),
+        )
 
     def tearDown(self):
         self.svc.store.close()

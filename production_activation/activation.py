@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 
 from evals.activation import ActivationError, RoutingActivationService
 from evals.promotion import STAGE_PRODUCTION_ELIGIBLE, CandidatePolicy
+from production_activation.errors import ACTIVATION_CONFLICT, ACTIVATION_FAILED, ProductionActivationError
 from production_activation.models import ActivationAttempt, ActivationState, FinalProductionCandidate, GoLivePlan
 
 
@@ -24,6 +25,12 @@ class ProductionTrafficActivator:
     @property
     def state(self) -> str:
         return self._state
+
+    def restore_state(self, state: str) -> None:
+        """Restore process state from durable store after restart (does not activate)."""
+        with self._lock:
+            if state:
+                self._state = state
 
     def _routing_candidate(self, candidate: FinalProductionCandidate) -> CandidatePolicy:
         policy_ver = candidate.routing_policy_version or "live"
@@ -54,8 +61,9 @@ class ProductionTrafficActivator:
         with self._lock:
             if idempotency_key in self._idempotency:
                 return self._idempotency[idempotency_key]
-            if self._state == ActivationState.PRODUCTION_ACTIVE.value and self.routing_activation.active_candidate_id != candidate.candidate_id:
-                raise ProductionActivationError(ACTIVATION_CONFLICT, details={"active": self.routing_activation.active_candidate_id})
+            active_id = self.routing_activation.active_candidate_id
+            if self._state == ActivationState.PRODUCTION_ACTIVE.value and active_id not in (None, candidate.candidate_id):
+                raise ProductionActivationError(ACTIVATION_CONFLICT, details={"active": active_id})
             attempt = ActivationAttempt(
                 attempt_id=f"act-{uuid.uuid4().hex[:12]}",
                 candidate_id=candidate.candidate_id,
@@ -85,14 +93,19 @@ class ProductionTrafficActivator:
             self._idempotency[idempotency_key] = attempt
             return attempt
 
-    def rollback(self, *, operator_ref: str) -> dict:
+    def deactivate(self, *, operator_ref: str, reason: str = "") -> dict:
         with self._lock:
             previous = self.routing_activation.rollback(operator_ref)
             self._state = ActivationState.ROLLED_BACK.value
             return {
                 "state": self._state,
+                "reason": reason,
+                "operator_ref": operator_ref,
                 "restored": previous.as_dict() if previous else None,
             }
+
+    def rollback(self, *, operator_ref: str) -> dict:
+        return self.deactivate(operator_ref=operator_ref, reason="rollback")
 
     def get_active_candidate_id(self) -> str | None:
         return self.routing_activation.active_candidate_id

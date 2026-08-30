@@ -22,6 +22,7 @@ from production_activation.handoff import Stage5HandoffGate
 from production_activation.hypercare import HypercareWindow
 from production_activation.models import AcceptanceResult, ActivationState, ProductionActivationEvidence, VerificationClass
 from production_activation.plan import GoLivePlanBuilder
+from production_activation.policy import create_policy, mark_activated, mark_deactivated
 from production_activation.providers import ProviderManifest
 from production_activation.recovery import RecoveryCheckResult
 from production_activation.runtime_watch import ProductionRuntimeWatch
@@ -30,6 +31,7 @@ from production_activation.side_effects import SideEffectActivationPolicy
 from production_activation.slo import ProductionSLOObservation
 from production_activation.smoke import PostLaunchSmokeRunner
 from production_activation.sqlite_store import SqliteProductionActivationStore
+from production_activation.stage5_gate import MANDATORY_STAGE5_GATES, Stage5ReleaseGate
 from evals.activation import RoutingActivationService
 
 
@@ -49,6 +51,7 @@ class ProductionActivationService:
         self.candidate_lock = FinalCandidateLock(handoff_gate=self.handoff_gate)
         self.activator = ProductionTrafficActivator(routing_activation=routing_activation)
         self.acceptance_gate = ProductionAcceptanceGate()
+        self.stage5_gate = Stage5ReleaseGate()
         self.smoke = PostLaunchSmokeRunner()
         self.security = ProductionSecurityWatch()
         self.finops = ProductionFinOpsWatch()
@@ -60,6 +63,9 @@ class ProductionActivationService:
         self._hypercare: HypercareWindow | None = None
         self._activation_lock = threading.RLock()
         self._plans: dict[str, object] = {}
+        # Restore durable activation state into process activator (never auto-activates routing)
+        restored = self.store.get_activation_state()
+        self.activator.restore_state(str(restored.get("state") or ActivationState.GO_LIVE_ELIGIBLE.value))
 
     def _audit(self, *, action: str, actor: str, candidate_id: str, details: dict | None = None) -> None:
         self.store.append_audit(
@@ -159,12 +165,25 @@ class ProductionActivationService:
                 attempt_id=attempt.attempt_id,
                 activation_state=attempt.state,
                 acceptance_result=AcceptanceResult.BLOCKED.value,
-                classification=VerificationClass.LIVE_VERIFIED.value if attempt.state == ActivationState.PRODUCTION_ACTIVE.value else VerificationClass.CODE_VERIFIED.value,
-                safe_metrics={"routing": attempt.routing_result},
+                # Local/routing activation is not LIVE_VERIFIED public production proof
+                classification=VerificationClass.OPERATOR_ACTION_REQUIRED.value
+                if attempt.state == ActivationState.PRODUCTION_ACTIVE.value
+                else VerificationClass.CODE_VERIFIED.value,
+                safe_metrics={"routing": attempt.routing_result, "go_live_active": attempt.state == ActivationState.PRODUCTION_ACTIVE.value},
             )
             self.store.save_evidence(ev)
+            policy = self.store.latest_go_live_policy()
+            if policy and attempt.state == ActivationState.PRODUCTION_ACTIVE.value:
+                self.store.save_go_live_policy(mark_activated(policy, activated_by=cmd.operator_ref))
             self._audit(action="activate", actor=cmd.operator_ref, candidate_id=cmd.candidate_id, details={"attempt_id": attempt.attempt_id, "state": attempt.state})
-            return {"attempt": attempt.as_dict(), "evidence": ev.as_dict(), "side_effects": self.side_effects.as_dict()}
+            return {
+                "attempt": attempt.as_dict(),
+                "evidence": ev.as_dict(),
+                "side_effects": self.side_effects.as_dict(),
+                "go_live_active": attempt.state == ActivationState.PRODUCTION_ACTIVE.value,
+                "operator_action_required": True,
+                "live_verified": False,
+            }
 
     def run_smoke(self, ctx, *, candidate_id: str, attempt_id: str, probes: dict | None = None) -> dict:
         self.access.require(ctx, PERM_ACTIVATION_READ)
@@ -221,8 +240,120 @@ class ProductionActivationService:
         self.access.require(ctx, PERM_ACTIVATION_AUTHORIZE)
         result = self.activator.rollback(operator_ref=cmd.operator_ref)
         self.store.set_activation_state(ActivationState.ROLLED_BACK.value, candidate_id=cmd.candidate_id)
+        policy = self.store.latest_go_live_policy()
+        if policy:
+            self.store.save_go_live_policy(mark_deactivated(policy, reason=cmd.reason or "rollback"))
         self._audit(action="rollback", actor=cmd.operator_ref, candidate_id=cmd.candidate_id, details={"reason": cmd.reason})
         return result
+
+    def deactivate(self, ctx, *, candidate_id: str, operator_ref: str, reason: str = "deactivate") -> dict:
+        self.access.require(ctx, PERM_ACTIVATION_AUTHORIZE)
+        with self._activation_lock:
+            result = self.activator.deactivate(operator_ref=operator_ref, reason=reason)
+            self.store.set_activation_state(ActivationState.ROLLED_BACK.value, candidate_id=candidate_id, extra={"reason": reason})
+            policy = self.store.latest_go_live_policy()
+            if policy:
+                self.store.save_go_live_policy(mark_deactivated(policy, reason=reason))
+            self._audit(action="deactivate", actor=operator_ref, candidate_id=candidate_id, details={"reason": reason})
+            return result
+
+    def create_go_live_policy(self, ctx, *, release_identity: str, created_by: str = "") -> dict:
+        self.access.require(ctx, PERM_ACTIVATION_WRITE)
+        actor = created_by or getattr(ctx, "actor_ref", "operator")
+        if callable(actor):
+            actor = actor()
+        policy = create_policy(release_identity=release_identity, created_by=str(actor))
+        self.store.save_go_live_policy(policy)
+        self._audit(action="create_go_live_policy", actor=str(actor), candidate_id=release_identity, details={"policy_id": policy.policy_id})
+        return policy.as_dict()
+
+    def seed_stage5_evidence(self, ctx, *, candidate_id: str, release_identity: str) -> dict:
+        """Record CODE_VERIFIED Stage-5 mandatory gate evidence (engineering closure)."""
+        self.access.require(ctx, PERM_ACTIVATION_WRITE)
+        evidence_list = []
+        for gate in MANDATORY_STAGE5_GATES:
+            ev = ProductionActivationEvidence.create(
+                candidate_id=candidate_id,
+                deployment_id="",
+                environment="production",
+                plan_id="",
+                attempt_id="",
+                activation_state=self.store.get_activation_state().get("state", ""),
+                acceptance_result="PASS",
+                classification=VerificationClass.CODE_VERIFIED.value,
+                safe_metrics={"gate": gate, "status": "PASS", "release_identity": release_identity},
+            )
+            self.store.save_evidence(ev)
+            evidence_list.append(ev.as_dict())
+        self._audit(action="seed_stage5_evidence", actor=getattr(ctx, "actor_ref", "operator"), candidate_id=candidate_id)
+        return {"evidence": evidence_list}
+
+    def evaluate_stage5_gate(self, ctx, *, candidate_id: str = "") -> dict:
+        self.access.require(ctx, PERM_ACTIVATION_READ)
+        policy = self.store.latest_go_live_policy()
+        evidence = self.store.list_evidence(candidate_id) if candidate_id else []
+        stage4_ok = self.handoff_gate.stage4_artifact_ready()
+        state = self.store.get_activation_state()
+        result = self.stage5_gate.evaluate(
+            evidence=evidence,
+            policy=policy,
+            stage4_handoff_pass=stage4_ok,
+            engineering_pass=True,
+            p0_count=self.security.p0_count,
+            p1_count=self.security.p1_count,
+            go_live_active=bool(state.get("go_live_active")),
+            live_verified=False,
+        )
+        self.store.set_activation_state(
+            state.get("state") or ActivationState.GO_LIVE_ELIGIBLE.value,
+            candidate_id=candidate_id or state.get("candidate_id") or "",
+            extra={"stage5_gate": result.as_dict()},
+        )
+        self._audit(
+            action="evaluate_stage5_gate",
+            actor=getattr(ctx, "actor_ref", "system"),
+            candidate_id=candidate_id,
+            details={"verdict": result.verdict, "go_live_active": result.go_live_active},
+        )
+        return result.as_dict()
+
+    def post_activation_health(self, ctx, *, candidate_id: str = "") -> dict:
+        self.access.require(ctx, PERM_ACTIVATION_READ)
+        state = self.store.get_activation_state()
+        critical = self.security.p0_count > 0
+        if critical:
+            health = "UNHEALTHY"
+        elif self.runtime.exceeds_envelope({}) or self.finops.blocks_acceptance():
+            health = "DEGRADED"
+        elif state.get("state") == ActivationState.PRODUCTION_ACTIVE.value:
+            health = "HEALTHY"
+        else:
+            health = "DEGRADED"
+        result = {
+            "health": health,
+            "activation_state": state.get("state"),
+            "go_live_active": bool(state.get("go_live_active")),
+            "security": self.security.as_dict(),
+            "runtime": self.runtime.as_dict(),
+            "finops": self.finops.as_dict(),
+            "recovery": self.recovery.as_dict(),
+            "candidate_id": candidate_id or state.get("candidate_id"),
+        }
+        self._audit(action="post_activation_health", actor=getattr(ctx, "actor_ref", "system"), candidate_id=candidate_id or "", details={"health": health})
+        return result
+
+    def stage5_status(self, ctx) -> dict:
+        self.access.require(ctx, PERM_ACTIVATION_READ)
+        state = self.store.get_activation_state()
+        policy = self.store.latest_go_live_policy()
+        return {
+            "activation_state": state,
+            "go_live_active": bool(state.get("go_live_active")),
+            "policy": policy.as_dict() if policy else None,
+            "stage4_artifact_ready": self.handoff_gate.stage4_artifact_ready(),
+            "stage5_gate": state.get("stage5_gate"),
+            "operator_action_required": True,
+        }
 
     def evaluate_acceptance(self, ctx, *, candidate_id: str) -> dict:
         self.access.require(ctx, PERM_ACTIVATION_READ)

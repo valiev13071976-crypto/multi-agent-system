@@ -153,11 +153,14 @@ class SqliteProductionActivationStore:
             ).fetchall()
         return [ProductionActivationEvidence(**json.loads(r["payload_json"])) for r in rows]
 
-    def set_activation_state(self, state: str, *, candidate_id: str) -> None:
+    def set_activation_state(self, state: str, *, candidate_id: str, extra: dict | None = None) -> None:
+        payload = {"state": state, "candidate_id": candidate_id, "go_live_active": state == "PRODUCTION_ACTIVE"}
+        if extra:
+            payload.update(extra)
         with self._lock:
             self._conn().execute(
                 "INSERT OR REPLACE INTO pa_state(key, payload_json) VALUES (?, ?)",
-                ("activation_state", _j({"state": state, "candidate_id": candidate_id})),
+                ("activation_state", _j(payload)),
             )
             self._conn().commit()
 
@@ -165,8 +168,40 @@ class SqliteProductionActivationStore:
         with self._lock:
             row = self._conn().execute("SELECT payload_json FROM pa_state WHERE key=?", ("activation_state",)).fetchone()
         if not row:
-            return {"state": "GO_LIVE_ELIGIBLE", "candidate_id": ""}
-        return json.loads(row["payload_json"])
+            return {"state": "GO_LIVE_ELIGIBLE", "candidate_id": "", "go_live_active": False}
+        data = json.loads(row["payload_json"])
+        data.setdefault("go_live_active", data.get("state") == "PRODUCTION_ACTIVE")
+        return data
+
+    def save_go_live_policy(self, policy) -> object:
+        from production_activation.policy import GoLivePolicy
+
+        if not isinstance(policy, GoLivePolicy):
+            raise TypeError("GoLivePolicy required")
+        with self._lock:
+            self._conn().execute(
+                "INSERT OR REPLACE INTO pa_state(key, payload_json) VALUES (?, ?)",
+                (f"go_live_policy:{policy.policy_id}", _j(policy.as_dict())),
+            )
+            self._conn().execute(
+                "INSERT OR REPLACE INTO pa_state(key, payload_json) VALUES (?, ?)",
+                ("go_live_policy_latest", _j({"policy_id": policy.policy_id})),
+            )
+            self._conn().commit()
+        return policy
+
+    def latest_go_live_policy(self):
+        from production_activation.policy import GoLivePolicy
+
+        with self._lock:
+            latest = self._conn().execute("SELECT payload_json FROM pa_state WHERE key=?", ("go_live_policy_latest",)).fetchone()
+            if not latest:
+                return None
+            pid = json.loads(latest["payload_json"]).get("policy_id")
+            row = self._conn().execute("SELECT payload_json FROM pa_state WHERE key=?", (f"go_live_policy:{pid}",)).fetchone()
+        if not row:
+            return None
+        return GoLivePolicy.from_dict(json.loads(row["payload_json"]))
 
     def append_audit(self, event: dict) -> dict:
         with self._lock:
