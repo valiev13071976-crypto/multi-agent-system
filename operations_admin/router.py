@@ -391,6 +391,37 @@ async def controlled_launch_handoff(response: Response, ctx: Annotated[RequestSe
     return _svc().controlled_launch_handoff(ctx)
 
 
+@_router.get("/controlled-launch/status")
+async def controlled_launch_status(response: Response, ctx: Annotated[RequestSecurityContext, Depends(get_security_context)]):
+    _require_admin(ctx)
+    _no_cache(response)
+    return _svc().controlled_launch_status(ctx)
+
+
+class LaunchKillRequest(BaseModel):
+    policy_id: str
+    reason: str = ""
+
+
+@_router.post("/controlled-launch/kill")
+async def controlled_launch_kill(body: LaunchKillRequest, ctx: Annotated[RequestSecurityContext, Depends(get_security_context)]):
+    _require_admin(ctx)
+    try:
+        return _svc().controlled_launch_kill(ctx, policy_id=body.policy_id, reason=body.reason)
+    except AdminError as exc:
+        raise _err(exc) from exc
+
+
+@_router.get("/controlled-launch/evaluate")
+async def controlled_launch_evaluate(response: Response, ctx: Annotated[RequestSecurityContext, Depends(get_security_context)], candidate_id: str = ""):
+    _require_admin(ctx)
+    _no_cache(response)
+    try:
+        return _svc().controlled_launch_evaluate_gate(ctx, candidate_id=candidate_id)
+    except AdminError as exc:
+        raise _err(exc) from exc
+
+
 @_router.get("/controlled-launch/{candidate_id}")
 async def controlled_launch_read(candidate_id: str, response: Response, ctx: Annotated[RequestSecurityContext, Depends(get_security_context)]):
     _require_admin(ctx)

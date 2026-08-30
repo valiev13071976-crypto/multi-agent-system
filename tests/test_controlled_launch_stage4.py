@@ -274,7 +274,12 @@ class Stage4ServiceTests(unittest.TestCase):
         self._tmpdir = tempfile.TemporaryDirectory()
         db_path = str(Path(self._tmpdir.name) / "launch.sqlite")
         self.store = SqliteControlledLaunchStore(path=db_path)
-        self.svc = ControlledLaunchService(store=self.store)
+        empty_evidence = EvidenceStore(root=str(Path(self._tmpdir.name) / "empty_evidence"))
+        config = ValidationConfig(production_url="", release_identity="local-test", environment="local")
+        self.svc = ControlledLaunchService(
+            store=self.store,
+            handoff_gate=Stage3HandoffGate(config=config, evidence_store=empty_evidence),
+        )
 
     def tearDown(self):
         self.svc.store.close()

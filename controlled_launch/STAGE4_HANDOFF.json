@@ -1,0 +1,42 @@
+{
+  "stage": 4,
+  "verdict": "CONTROLLED_LAUNCH_PASS",
+  "engineering": "PASS",
+  "controlled_launch": "PASS",
+  "go_live_eligibility": "ELIGIBLE",
+  "go_live_active": false,
+  "stage5_started": false,
+  "stage5_activated": false,
+  "p0": [],
+  "p1": [],
+  "notes": [
+    "Stage 4 Controlled Launch engineering closure.",
+    "GO_LIVE_ELIGIBLE != GO_LIVE_ACTIVE.",
+    "Stage 5 has NOT been started or activated.",
+    "Authoritative Stage 3 prerequisite: mandatory live gates PASS (PRODUCTION_VALIDATION_PASS)."
+  ],
+  "mandatory_stage4_gates": [
+    "4.1_stage3_prerequisite",
+    "4.2_policy",
+    "4.3_cohort_admission",
+    "4.4_capacity_bounds",
+    "4.5_budget_guard",
+    "4.6_security_auth",
+    "4.7_tenant_isolation",
+    "4.8_capability_restrictions",
+    "4.9_observability",
+    "4.11_kill_switch",
+    "4.12_containment",
+    "4.13_rollback",
+    "4.15_go_live_gate"
+  ],
+  "operator_cli": "python -m controlled_launch",
+  "packages": [
+    "controlled_launch.policy",
+    "controlled_launch.admission",
+    "controlled_launch.containment",
+    "controlled_launch.stage4_gate",
+    "controlled_launch.handoff",
+    "controlled_launch.service"
+  ]
+}

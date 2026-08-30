@@ -358,6 +358,24 @@ class OperationsAdminService:
             RollbackRolloutCommand(candidate_id=candidate_id, actor_ref=ctx.actor_ref(), reason=reason),
         )
 
+    def controlled_launch_status(self, ctx) -> dict:
+        self.access.require(ctx, PERM_OPS_READ)
+        if self.controlled_launch is None:
+            return {"available": False}
+        return {"available": True, **self.controlled_launch.stage4_status(ctx)}
+
+    def controlled_launch_kill(self, ctx, *, policy_id: str, reason: str = "") -> dict:
+        self.access.require(ctx, PERM_OPS_WRITE)
+        if self.controlled_launch is None:
+            raise AdminError(ADMIN_TARGET_NOT_FOUND)
+        return self.controlled_launch.kill_controlled_launch(ctx, policy_id=policy_id, reason=reason)
+
+    def controlled_launch_evaluate_gate(self, ctx, *, candidate_id: str = "") -> dict:
+        self.access.require(ctx, PERM_OPS_READ)
+        if self.controlled_launch is None:
+            raise AdminError(ADMIN_TARGET_NOT_FOUND)
+        return self.controlled_launch.evaluate_stage4_gate(ctx, candidate_id=candidate_id)
+
     def production_activation_preflight(self, ctx, candidate_id: str) -> dict:
         self.access.require(ctx, PERM_OPS_READ)
         if self.production_activation is None:

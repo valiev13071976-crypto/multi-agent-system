@@ -46,6 +46,13 @@ class SqliteControlledLaunchStore:
                     event_id INTEGER PRIMARY KEY AUTOINCREMENT,
                     candidate_id TEXT,
                     payload_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS lc_launch_policies(
+                    policy_id TEXT PRIMARY KEY,
+                    release_identity TEXT NOT NULL,
+                    payload_json TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS lc_launch_state(
+                    key TEXT PRIMARY KEY,
+                    payload_json TEXT NOT NULL);
                 """
             )
 
@@ -161,6 +168,74 @@ class SqliteControlledLaunchStore:
             else:
                 rows = self._conn().execute("SELECT payload_json FROM lc_audit ORDER BY event_id").fetchall()
         return [json.loads(r["payload_json"]) for r in rows]
+
+    def list_all_evidence(self) -> list[LaunchEvidence]:
+        with self._lock:
+            rows = self._conn().execute(
+                "SELECT payload_json FROM lc_evidence ORDER BY evidence_id"
+            ).fetchall()
+        return [LaunchEvidence(**json.loads(r["payload_json"])) for r in rows]
+
+    def save_launch_policy(self, policy) -> object:
+        from controlled_launch.policy import ControlledLaunchPolicy
+
+        if not isinstance(policy, ControlledLaunchPolicy):
+            raise TypeError("ControlledLaunchPolicy required")
+        with self._lock:
+            self._conn().execute(
+                "INSERT OR REPLACE INTO lc_launch_policies(policy_id, release_identity, payload_json) VALUES (?, ?, ?)",
+                (policy.policy_id, policy.release_identity, _j(policy.as_dict())),
+            )
+            self._conn().commit()
+        return policy
+
+    def get_launch_policy(self, policy_id: str):
+        from controlled_launch.policy import ControlledLaunchPolicy
+
+        with self._lock:
+            row = self._conn().execute(
+                "SELECT payload_json FROM lc_launch_policies WHERE policy_id=?",
+                (policy_id,),
+            ).fetchone()
+        if not row:
+            return None
+        return ControlledLaunchPolicy.from_dict(json.loads(row["payload_json"]))
+
+    def latest_launch_policy(self, release_identity: str = ""):
+        from controlled_launch.policy import ControlledLaunchPolicy
+
+        with self._lock:
+            if release_identity:
+                rows = self._conn().execute(
+                    "SELECT payload_json FROM lc_launch_policies WHERE release_identity=? ORDER BY policy_id DESC LIMIT 1",
+                    (release_identity,),
+                ).fetchall()
+            else:
+                rows = self._conn().execute(
+                    "SELECT payload_json FROM lc_launch_policies ORDER BY policy_id DESC LIMIT 1"
+                ).fetchall()
+        if not rows:
+            return None
+        return ControlledLaunchPolicy.from_dict(json.loads(rows[0]["payload_json"]))
+
+    def set_launch_state(self, key: str, payload: dict) -> dict:
+        with self._lock:
+            self._conn().execute(
+                "INSERT OR REPLACE INTO lc_launch_state(key, payload_json) VALUES (?, ?)",
+                (key, _j(payload)),
+            )
+            self._conn().commit()
+        return payload
+
+    def get_launch_state(self, key: str) -> dict | None:
+        with self._lock:
+            row = self._conn().execute(
+                "SELECT payload_json FROM lc_launch_state WHERE key=?",
+                (key,),
+            ).fetchone()
+        if not row:
+            return None
+        return json.loads(row["payload_json"])
 
     def close(self) -> None:
         with self._lock:
