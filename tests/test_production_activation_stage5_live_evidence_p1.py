@@ -58,6 +58,7 @@ def _candidate(**kwargs) -> FinalProductionCandidate:
         stage4_evidence_id="ev4",
         routing_policy_version="live",
         fingerprint="fp-cand-1",
+        backup_state="ready",
     )
     base.update(kwargs)
     return FinalProductionCandidate(**base)
@@ -131,6 +132,13 @@ class LiveEvidenceP1Tests(unittest.TestCase):
     def tearDown(self):
         self.svc.store.close()
         self._tmpdir.cleanup()
+
+    def _seed_durable_recovery(self, *, release_identity: str = "rel-live-1") -> None:
+        self.svc.seed_stage5_evidence(
+            _admin(),
+            candidate_id=self.candidate.candidate_id,
+            release_identity=release_identity,
+        )
 
     def _issue(self, *, operator="ops", idem="idem-a", ttl=900) -> ActivationAuthorization:
         authz = ActivationAuthorizer(ttl_seconds=ttl)
@@ -376,10 +384,11 @@ class LiveEvidenceP1Tests(unittest.TestCase):
         )
         self.svc.complete_hypercare(_admin(), candidate_id=self.candidate.candidate_id, requests=5, p0_count=0, p1_count=0)
         self.svc.providers.record_live("openai")
-        self.svc.recovery.persistent_db = "ready"
-        self.svc.recovery.workflow = "ready"
-        self.svc.recovery.audit = "ready"
-        self.svc.recovery.stage3_restore_reusable = True
+        self.svc.seed_stage5_evidence(
+            _admin(),
+            candidate_id=self.candidate.candidate_id,
+            release_identity="rel-live-1",
+        )
         decision = self.svc.evaluate_acceptance(_admin(), candidate_id=self.candidate.candidate_id)
         self.assertNotEqual(decision["result"], AcceptanceResult.PRODUCTION_ACCEPTED.value)
         self.assertFalse(decision["live_verified"])
@@ -427,10 +436,11 @@ class LiveEvidenceP1Tests(unittest.TestCase):
         )
         self.svc.complete_hypercare(_admin(), candidate_id=self.candidate.candidate_id, requests=5, p0_count=0, p1_count=0)
         self.svc.providers.record_live("openai")
-        self.svc.recovery.persistent_db = "ready"
-        self.svc.recovery.workflow = "ready"
-        self.svc.recovery.audit = "ready"
-        self.svc.recovery.stage3_restore_reusable = True
+        self.svc.seed_stage5_evidence(
+            _admin(),
+            candidate_id=self.candidate.candidate_id,
+            release_identity="rel-live-1",
+        )
         decision = self.svc.evaluate_acceptance(_admin(), candidate_id=self.candidate.candidate_id)
         self.assertNotEqual(decision["result"], AcceptanceResult.PRODUCTION_ACCEPTED.value)
 
@@ -503,10 +513,11 @@ class LiveEvidenceP1Tests(unittest.TestCase):
         )
         self.svc.complete_hypercare(_admin(), candidate_id=self.candidate.candidate_id, requests=5, p0_count=0, p1_count=0)
         self.svc.providers.record_live("openai")
-        self.svc.recovery.persistent_db = "ready"
-        self.svc.recovery.workflow = "ready"
-        self.svc.recovery.audit = "ready"
-        self.svc.recovery.stage3_restore_reusable = True
+        self.svc.seed_stage5_evidence(
+            _admin(),
+            candidate_id=self.candidate.candidate_id,
+            release_identity="rel-live-1",
+        )
         decision = self.svc.evaluate_acceptance(_admin(), candidate_id=self.candidate.candidate_id)
         self.assertNotEqual(decision["result"], AcceptanceResult.PRODUCTION_ACCEPTED.value)
 
@@ -537,10 +548,11 @@ class LiveEvidenceP1Tests(unittest.TestCase):
         )
         self.assertEqual(hyper["status"], "PASS")
         self.svc.providers.record_live("openai")
-        self.svc.recovery.persistent_db = "ready"
-        self.svc.recovery.workflow = "ready"
-        self.svc.recovery.audit = "ready"
-        self.svc.recovery.stage3_restore_reusable = True
+        self.svc.seed_stage5_evidence(
+            _admin(),
+            candidate_id=self.candidate.candidate_id,
+            release_identity="rel-live-1",
+        )
         decision = self.svc.evaluate_acceptance(_admin(), candidate_id=self.candidate.candidate_id)
         self.assertEqual(decision["result"], AcceptanceResult.PRODUCTION_ACCEPTED.value)
         self.assertTrue(decision["live_verified"])
@@ -570,10 +582,7 @@ class LiveEvidenceP1Tests(unittest.TestCase):
         )
         self.svc.complete_hypercare(_admin(), candidate_id=self.candidate.candidate_id, requests=5, p0_count=0, p1_count=0)
         self.svc.providers.record_live("openai")
-        self.svc.recovery.persistent_db = "ready"
-        self.svc.recovery.workflow = "ready"
-        self.svc.recovery.audit = "ready"
-        self.svc.recovery.stage3_restore_reusable = True
+        self._seed_durable_recovery()
         self.svc.evaluate_acceptance(_admin(), candidate_id=self.candidate.candidate_id)
         self.svc.deactivate(_admin(), candidate_id=self.candidate.candidate_id, operator_ref="ops", reason="test")
         status = self.svc.stage5_status(_admin())

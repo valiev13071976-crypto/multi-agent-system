@@ -70,6 +70,7 @@ def _final_candidate(**kwargs):
         stage4_evidence_id="ev-s4",
         routing_policy_version="live",
         fingerprint="fp-test",
+        backup_state="ready",
     )
     if kwargs:
         c = replace(base, **kwargs)
@@ -424,13 +425,12 @@ class Stage5ServiceTests(unittest.TestCase):
         )
         self.assertEqual(hyper["status"], "PASS")
         self.svc.providers.record_live("openai")
-        self.svc.recovery.persistent_db = "ready"
-        self.svc.recovery.workflow = "ready"
-        self.svc.recovery.audit = "ready"
-        self.svc.recovery.stage3_restore_reusable = True
-        # Bind release for acceptance
         self.svc.create_go_live_policy(admin, release_identity="rel-fixture", created_by="ops")
-        # Re-bind plan_id into state (activate already set it)
+        self.svc.seed_stage5_evidence(
+            admin,
+            candidate_id=candidate.candidate_id,
+            release_identity="rel-fixture",
+        )
         acceptance = self.svc.evaluate_acceptance(admin, candidate_id=candidate.candidate_id)
         self.assertEqual(acceptance["result"], AcceptanceResult.PRODUCTION_ACCEPTED.value)
         self.assertTrue(acceptance["live_verified"])

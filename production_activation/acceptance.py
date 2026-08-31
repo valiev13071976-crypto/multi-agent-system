@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from production_activation.acceptance_evidence import _is_hypercare, _is_live_smoke
 from production_activation.models import (
     AcceptanceResult,
     ActivationState,
@@ -9,20 +10,6 @@ from production_activation.models import (
     ProductionActivationEvidence,
     VerificationClass,
 )
-
-
-def _is_live_smoke(evidence: ProductionActivationEvidence) -> bool:
-    metrics = evidence.safe_metrics or {}
-    if metrics.get("evidence_kind") == "post_launch_smoke":
-        return True
-    return "checks" in metrics and metrics.get("mode") == "live"
-
-
-def _is_hypercare(evidence: ProductionActivationEvidence) -> bool:
-    metrics = evidence.safe_metrics or {}
-    if metrics.get("evidence_kind") == "hypercare":
-        return True
-    return "duration_seconds" in metrics
 
 
 class ProductionAcceptanceGate:
@@ -49,6 +36,7 @@ class ProductionAcceptanceGate:
         release_identity: str = "",
         smoke_classification: str = "",
         hypercare_classification: str = "",
+        live_block_reason: str = "",
     ) -> ProductionAcceptanceDecision:
         if activation_state == ActivationState.ROLLED_BACK.value:
             return ProductionAcceptanceDecision(
@@ -66,11 +54,21 @@ class ProductionAcceptanceGate:
             )
 
         if require_live_evidence:
+            if live_block_reason:
+                return ProductionAcceptanceDecision(
+                    candidate_id=candidate_id,
+                    result=AcceptanceResult.BLOCKED.value,
+                    reason=live_block_reason,
+                    evidence_ids=tuple(e.evidence_id for e in evidence),
+                )
             smoke_ok = (
                 smoke_status == "PASS"
                 and smoke_classification == VerificationClass.LIVE_VERIFIED.value
             )
-            hyper_ok = hypercare_status == "PASS"
+            hyper_ok = (
+                hypercare_status == "PASS"
+                and hypercare_classification == VerificationClass.LIVE_VERIFIED.value
+            )
             if plan_id or release_identity:
                 bound_smoke = False
                 bound_hyper = False
@@ -82,7 +80,11 @@ class ProductionAcceptanceGate:
                         if release_identity and str(m.get("release_identity") or "") != release_identity:
                             continue
                         bound_smoke = True
-                    if _is_hypercare(e) and m.get("status") == "PASS":
+                    if (
+                        _is_hypercare(e)
+                        and e.classification == VerificationClass.LIVE_VERIFIED.value
+                        and m.get("status") == "PASS"
+                    ):
                         if plan_id and str(e.plan_id or m.get("plan_id") or "") != plan_id:
                             continue
                         if release_identity and str(m.get("release_identity") or "") != release_identity:
@@ -99,7 +101,7 @@ class ProductionAcceptanceGate:
                     return ProductionAcceptanceDecision(
                         candidate_id=candidate_id,
                         result=AcceptanceResult.BLOCKED.value,
-                        reason="hypercare_missing_or_unbound",
+                        reason="live_hypercare_missing_or_unbound",
                         evidence_ids=tuple(e.evidence_id for e in evidence),
                     )
             elif not smoke_ok:
@@ -113,7 +115,14 @@ class ProductionAcceptanceGate:
                 return ProductionAcceptanceDecision(
                     candidate_id=candidate_id,
                     result=AcceptanceResult.BLOCKED.value,
-                    reason="hypercare_required",
+                    reason="hypercare_not_live_verified",
+                    evidence_ids=tuple(e.evidence_id for e in evidence),
+                )
+            if not recovery_ready:
+                return ProductionAcceptanceDecision(
+                    candidate_id=candidate_id,
+                    result=AcceptanceResult.BLOCKED.value,
+                    reason="recovery_evidence_missing",
                     evidence_ids=tuple(e.evidence_id for e in evidence),
                 )
 
@@ -124,6 +133,20 @@ class ProductionAcceptanceGate:
                 reason="smoke_fail",
                 evidence_ids=tuple(e.evidence_id for e in evidence),
             )
+        if require_live_evidence and smoke_classification != VerificationClass.LIVE_VERIFIED.value:
+            return ProductionAcceptanceDecision(
+                candidate_id=candidate_id,
+                result=AcceptanceResult.BLOCKED.value,
+                reason="live_smoke_required",
+                evidence_ids=tuple(e.evidence_id for e in evidence),
+            )
+        if require_live_evidence and hypercare_classification != VerificationClass.LIVE_VERIFIED.value:
+            return ProductionAcceptanceDecision(
+                candidate_id=candidate_id,
+                result=AcceptanceResult.BLOCKED.value,
+                reason="hypercare_not_live_verified",
+                evidence_ids=tuple(e.evidence_id for e in evidence),
+            )
         if security_p0 > 0:
             return ProductionAcceptanceDecision(
                 candidate_id=candidate_id,
@@ -131,7 +154,14 @@ class ProductionAcceptanceGate:
                 reason="security_p0",
                 evidence_ids=tuple(e.evidence_id for e in evidence),
             )
-        if security_p1 > 0 or hypercare_status != "PASS" or not slo_ok or not finops_ok or not runtime_ok or not recovery_ready or not providers_ok or not side_effects_ok:
+        if security_p1 > 0:
+            return ProductionAcceptanceDecision(
+                candidate_id=candidate_id,
+                result=AcceptanceResult.PRODUCTION_UNSTABLE.value,
+                reason="hypercare_security_p1",
+                evidence_ids=tuple(e.evidence_id for e in evidence),
+            )
+        if hypercare_status != "PASS" or not slo_ok or not finops_ok or not runtime_ok or not recovery_ready or not providers_ok or not side_effects_ok:
             return ProductionAcceptanceDecision(
                 candidate_id=candidate_id,
                 result=AcceptanceResult.PRODUCTION_UNSTABLE.value,

@@ -6,6 +6,11 @@ import threading
 from datetime import datetime, timezone
 
 from production_activation.acceptance import ProductionAcceptanceGate
+from production_activation.acceptance_evidence import (
+    build_live_acceptance_inputs,
+    evaluate_providers_from_smoke,
+    select_bound_live_smoke,
+)
 from production_activation.access import (
     ActivationAuthorizationPolicy,
     PERM_ACTIVATION_AUTHORIZE,
@@ -590,35 +595,91 @@ class ProductionActivationService:
         policy = self.store.latest_go_live_policy()
         release_identity = policy.release_identity if policy else str(state.get("release_identity") or "")
         plan_id = str(state.get("plan_id") or "")
+        attempt_id = str(state.get("attempt_id") or "")
         evidence = self.store.list_evidence(candidate_id)
-        smoke_ev = None
-        hyper_ev = None
-        for e in reversed(evidence):
-            m = e.safe_metrics or {}
-            if smoke_ev is None and (m.get("evidence_kind") == "post_launch_smoke" or "checks" in m):
-                if require_live_evidence and e.classification != VerificationClass.LIVE_VERIFIED.value:
-                    continue
-                smoke_ev = e
-            if hyper_ev is None and (m.get("evidence_kind") == "hypercare" or "duration_seconds" in m):
-                hyper_ev = e
-        smoke_status = (smoke_ev.safe_metrics.get("status") if smoke_ev else "FAIL")
-        smoke_classification = smoke_ev.classification if smoke_ev else ""
-        hypercare_status = (hyper_ev.safe_metrics.get("status") if hyper_ev else "FAIL")
-        hypercare_classification = hyper_ev.classification if hyper_ev else ""
-        if not plan_id and smoke_ev:
-            plan_id = smoke_ev.plan_id or str((smoke_ev.safe_metrics or {}).get("plan_id") or "")
+        candidate = self.store.get_candidate(candidate_id)
+        hypercare_session = self.store.get_hypercare(candidate_id)
+
+        live_inputs = None
+        security_p0 = self.security.p0_count
+        security_p1 = self.security.p1_count
+        recovery_ready = self.recovery.ready()
+        smoke_status = "FAIL"
+        smoke_classification = ""
+        hypercare_status = "FAIL"
+        hypercare_classification = ""
+        live_block_reason = ""
+        providers_ok = not self.providers.blocks_acceptance()
+
+        if require_live_evidence:
+            live_inputs = build_live_acceptance_inputs(
+                evidence,
+                candidate_id=candidate_id,
+                plan_id=plan_id,
+                release_identity=release_identity,
+                attempt_id=attempt_id,
+                candidate=candidate,
+                hypercare_session=hypercare_session,
+            )
+            smoke_status = live_inputs.smoke_status
+            smoke_classification = live_inputs.smoke_classification
+            hypercare_status = live_inputs.hypercare_status
+            hypercare_classification = live_inputs.hypercare_classification
+            security_p0 = live_inputs.security_p0
+            security_p1 = live_inputs.security_p1
+            recovery_ready = live_inputs.recovery_ready
+            live_block_reason = live_inputs.block_reason
+            selected_smoke = select_bound_live_smoke(
+                evidence,
+                candidate_id=candidate_id,
+                plan_id=plan_id,
+                release_identity=release_identity,
+                attempt_id=attempt_id,
+            )
+            plan = self.store.get_plan(plan_id) if plan_id else None
+            providers_ok = evaluate_providers_from_smoke(
+                selected_smoke,
+                tuple(plan.launch_required_providers) if plan else (),
+            )
+        else:
+            smoke_ev = None
+            hyper_ev = None
+            for e in reversed(evidence):
+                m = e.safe_metrics or {}
+                if smoke_ev is None and (m.get("evidence_kind") == "post_launch_smoke" or "checks" in m):
+                    smoke_ev = e
+                if hyper_ev is None and (m.get("evidence_kind") == "hypercare" or "duration_seconds" in m):
+                    hyper_ev = e
+            smoke_status = (smoke_ev.safe_metrics.get("status") if smoke_ev else "FAIL")
+            smoke_classification = smoke_ev.classification if smoke_ev else ""
+            hypercare_status = (hyper_ev.safe_metrics.get("status") if hyper_ev else "FAIL")
+            hypercare_classification = hyper_ev.classification if hyper_ev else ""
+
+        if not plan_id and live_inputs and live_inputs.bound_smoke:
+            smoke = next(
+                (
+                    e
+                    for e in reversed(evidence)
+                    if e.candidate_id == candidate_id
+                    and (e.safe_metrics or {}).get("evidence_kind") == "post_launch_smoke"
+                ),
+                None,
+            )
+            if smoke:
+                plan_id = smoke.plan_id or str((smoke.safe_metrics or {}).get("plan_id") or "")
+
         decision = self.acceptance_gate.evaluate(
             candidate_id=candidate_id,
             activation_state=state.get("state", ""),
             smoke_status=smoke_status,
             hypercare_status=hypercare_status,
             slo_ok=self.slo.within_envelope({}),
-            security_p0=self.security.p0_count,
-            security_p1=self.security.p1_count,
+            security_p0=security_p0,
+            security_p1=security_p1,
             finops_ok=not self.finops.blocks_acceptance(),
             runtime_ok=not self.runtime.exceeds_envelope({}),
-            recovery_ready=self.recovery.ready(),
-            providers_ok=not self.providers.blocks_acceptance(),
+            recovery_ready=recovery_ready,
+            providers_ok=providers_ok,
             side_effects_ok=not self.side_effects.blocks_unauthorized_live(),
             evidence=evidence,
             require_live_evidence=require_live_evidence,
@@ -626,6 +687,7 @@ class ProductionActivationService:
             release_identity=release_identity,
             smoke_classification=smoke_classification,
             hypercare_classification=hypercare_classification,
+            live_block_reason=live_block_reason,
         )
         live_verified = decision.result == AcceptanceResult.PRODUCTION_ACCEPTED.value
         extra = {
