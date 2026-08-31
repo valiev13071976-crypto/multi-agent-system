@@ -581,6 +581,41 @@ class ProductPlatformRepository:
             conn.execute("COMMIT")
             return reservation_id
 
+    def release_reservation(self, tenant_id: str, reservation_id: str) -> bool:
+        tenant = require_tenant_id(tenant_id)
+        with self._lock:
+            conn = self._conn()
+            conn.execute("BEGIN IMMEDIATE")
+            row = conn.execute(
+                "SELECT product_id, location_id, quantity, status FROM pp_reservations WHERE tenant_id=? AND reservation_id=?",
+                (tenant, reservation_id),
+            ).fetchone()
+            if row is None or str(row["status"]) != "active":
+                conn.execute("ROLLBACK")
+                return False
+            qty = Decimal(row["quantity"])
+            product_id = str(row["product_id"])
+            location_id = str(row["location_id"])
+            inv = conn.execute(
+                "SELECT reserved, version FROM pp_inventory WHERE tenant_id=? AND product_id=? AND location_id=?",
+                (tenant, product_id, location_id),
+            ).fetchone()
+            if inv is None:
+                conn.execute("ROLLBACK")
+                return False
+            new_reserved = max(Decimal(inv["reserved"]) - qty, Decimal("0"))
+            version = int(inv["version"])
+            conn.execute(
+                "UPDATE pp_inventory SET reserved=?, version=? WHERE tenant_id=? AND product_id=? AND location_id=? AND version=?",
+                (str(new_reserved), version + 1, tenant, product_id, location_id, version),
+            )
+            conn.execute(
+                "UPDATE pp_reservations SET status=? WHERE tenant_id=? AND reservation_id=?",
+                ("released", tenant, reservation_id),
+            )
+            conn.execute("COMMIT")
+            return True
+
     def save_order(self, tenant_id: str, order_id: str, external_ref: str, payload: dict, status: str) -> None:
         tenant = require_tenant_id(tenant_id)
         with self._lock:

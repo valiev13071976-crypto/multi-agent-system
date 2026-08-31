@@ -16,12 +16,15 @@ from commerce.product_platform.errors import (
     COMMERCE_APPROVAL_REPLAY,
     COMMERCE_CROSS_TENANT,
     COMMERCE_ENRICHMENT_CONFLICT,
+    COMMERCE_FACT_UNSUPPORTED,
+    COMMERCE_JOB_CANCELLED,
     COMMERCE_NOT_FOUND,
     COMMERCE_ORDER_INVALID,
     COMMERCE_ORDER_TRANSITION_INVALID,
     COMMERCE_PRICE_DENIED,
     COMMERCE_PRICE_STALE_DECISION,
     COMMERCE_STOCK_STALE,
+    COMMERCE_SYNC_LOOP_TERMINATED,
     ProductPlatformError,
 )
 from commerce.product_platform.models import (
@@ -37,15 +40,21 @@ from commerce.product_platform.models import (
     ORDER_FULFILLED,
     ORDER_NEW,
     ORDER_PROCESSING,
+    ORDER_RETURNED,
     ORDER_TRANSITIONS,
     PRICE_ALLOW,
     PRICE_DENY,
     PRICE_REQUIRE_APPROVAL,
+    TAX_UNKNOWN,
+    TAX_VAT_INCLUDED,
     TRUST_GENERATED,
     TRUST_INFERRED,
     TRUST_TRUSTED,
+    Brand,
+    Category,
     CmsOperationResult,
     CommerceJob,
+    MarketplaceExportView,
     MoneyAmount,
     PlatformOrder,
     PlatformOrderItem,
@@ -53,9 +62,17 @@ from commerce.product_platform.models import (
     PriceDecision,
     PricePolicy,
     ProductImportResult,
+    ProductMatchResult,
     ProductVersion,
+    SourceProductSnapshot,
+    TaxContext,
     observation_hash,
 )
+from commerce.product_platform.aspro import fixture_aspro_premier_profile, map_product_to_bitrix_payload
+from commerce.product_platform.cart import create_cart, revalidate_checkout
+from commerce.product_platform.one_c import FakeOneCAdapter
+from commerce.product_platform.ownership import default_ownership_policy
+from commerce.product_platform.sync import SyncEventLedger, plan_sync
 from commerce.product_platform.observability import CommerceObservability
 from commerce.product_platform.planner import assert_sync_commerce_allowed, classify_import_workload
 from commerce.product_platform.policy import BULK_APPLY_BATCH_SIZE, BULK_CMS_SYNC_BATCH_SIZE, PRICE_POLICY_VERSION
@@ -105,6 +122,14 @@ class ProductPlatformService:
         self.product_media = product_media_service
         self.content_intel = content_intelligence_service
         self._approvals: dict[str, dict] = {}
+        self._sync_ledger = SyncEventLedger()
+        self._one_c = FakeOneCAdapter()
+        self._ownership = None
+        self._categories: dict[str, Category] = {}
+        self._brands: dict[str, Brand] = {}
+        self._snapshots: dict[str, SourceProductSnapshot] = {}
+        self._carts: dict[str, object] = {}
+        self._reservations: dict[str, dict] = {}
 
     def create_product_version(
         self,
@@ -277,6 +302,7 @@ class ProductPlatformService:
         current = self.repo.get_product(tenant, product_id)
         if current is None:
             raise ProductPlatformError(COMMERCE_NOT_FOUND)
+        self.assert_fact_lock(text=generated_description)
         trust = dict(current.get("field_trust") or {})
         if generated_price is not None and trust.get("price") == TRUST_TRUSTED and not overwrite_trusted:
             raise ProductPlatformError(COMMERCE_ENRICHMENT_CONFLICT)
@@ -999,3 +1025,314 @@ class ProductPlatformService:
         job["status"] = "completed" if end >= len(product_specs) else "partial"
         self.repo.save_commerce_job(tenant, jid, job)
         return {"job_id": jid, "status": job["status"], "checkpoint": end, "counts": dict(job["counts"])}
+
+    # --- Expansion / handoff / sync APIs ---
+
+    def cancel_job(self, *, tenant_id: str, job_id: str) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        job = self.repo.get_commerce_job(tenant, job_id)
+        if job is None:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND, "job_not_found")
+        job["status"] = "cancelled"
+        job["cancelled"] = True
+        job["cancel_code"] = COMMERCE_JOB_CANCELLED
+        self.repo.save_commerce_job(tenant, job_id, job)
+        self.obs.emit("commerce.job.cancelled", metadata={"job_id": job_id, "checkpoint": job.get("checkpoint", 0)})
+        return {"job_id": job_id, "status": "cancelled", "checkpoint": job.get("checkpoint", 0), "code": COMMERCE_JOB_CANCELLED}
+
+    def release_stock(self, *, tenant_id: str, reservation_id: str) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        ok = self.repo.release_reservation(tenant, reservation_id)
+        if not ok:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND, "reservation_not_found")
+        self.obs.emit("commerce.stock.released", metadata={"reservation_id": reservation_id})
+        return {"reservation_id": reservation_id, "status": "released"}
+
+    def ownership_policy(self, *, tenant_id: str):
+        tenant = require_tenant_id(tenant_id)
+        if self._ownership is None or self._ownership.tenant_id != tenant:
+            self._ownership = default_ownership_policy(tenant_id=tenant)
+        return self._ownership
+
+    def ingest_source_snapshot(
+        self,
+        *,
+        tenant_id: str,
+        source: str,
+        external_id: str,
+        fields: dict,
+        artifact_ref: str = "",
+    ) -> SourceProductSnapshot:
+        import hashlib
+
+        tenant = require_tenant_id(tenant_id)
+        raw = json.dumps(fields, sort_keys=True, default=str)
+        snap = SourceProductSnapshot(
+            snapshot_id=str(uuid.uuid4()),
+            tenant_id=tenant,
+            source=source,
+            external_id=external_id,
+            raw_artifact_ref=artifact_ref,
+            observed_at=datetime.now(timezone.utc),
+            normalized_fields=fields,
+            checksum=hashlib.sha256(raw.encode()).hexdigest(),
+        )
+        self._snapshots[snap.snapshot_id] = snap
+        return snap
+
+    def match_product(
+        self,
+        *,
+        tenant_id: str,
+        sku: str = "",
+        ean: str = "",
+        title: str = "",
+    ) -> ProductMatchResult:
+        tenant = require_tenant_id(tenant_id)
+        if sku:
+            existing = self.repo.find_by_identifier(tenant, "sku", sku)
+            if existing:
+                return ProductMatchResult(
+                    match_id=str(uuid.uuid4()),
+                    tenant_id=tenant,
+                    state=MATCH_MATCHED,
+                    confidence=1.0,
+                    strategy="sku",
+                    product_id=existing,
+                    evidence=(f"sku:{sku}",),
+                )
+        if ean:
+            existing = self.repo.find_by_identifier(tenant, "ean", ean)
+            if existing:
+                return ProductMatchResult(
+                    match_id=str(uuid.uuid4()),
+                    tenant_id=tenant,
+                    state=MATCH_MATCHED,
+                    confidence=0.95,
+                    strategy="ean",
+                    product_id=existing,
+                    evidence=(f"ean:{ean}",),
+                )
+        if title:
+            candidates = [p["product_id"] for p in self.repo.list_products(tenant) if p.get("title") == title]
+            if len(candidates) > 1:
+                return ProductMatchResult(
+                    match_id=str(uuid.uuid4()),
+                    tenant_id=tenant,
+                    state=MATCH_AMBIGUOUS,
+                    confidence=0.4,
+                    strategy="title",
+                    candidate_refs=tuple(candidates),
+                    evidence=(f"title:{title}",),
+                )
+            if len(candidates) == 1:
+                return ProductMatchResult(
+                    match_id=str(uuid.uuid4()),
+                    tenant_id=tenant,
+                    state=MATCH_AMBIGUOUS,
+                    confidence=0.5,
+                    strategy="title_single",
+                    product_id=candidates[0],
+                    candidate_refs=tuple(candidates),
+                    evidence=(f"title:{title}",),
+                )
+        return ProductMatchResult(
+            match_id=str(uuid.uuid4()),
+            tenant_id=tenant,
+            state=MATCH_NEW,
+            confidence=0.0,
+            strategy="none",
+        )
+
+    def register_category(self, *, tenant_id: str, name: str, parent_id: str = "") -> Category:
+        tenant = require_tenant_id(tenant_id)
+        cat = Category(
+            category_id=str(uuid.uuid4()),
+            tenant_id=tenant,
+            name=name,
+            parent_id=parent_id,
+            slug=name.casefold().replace(" ", "-"),
+        )
+        self._categories[cat.category_id] = cat
+        return cat
+
+    def register_brand(self, *, tenant_id: str, name: str, aliases: tuple[str, ...] = ()) -> Brand:
+        tenant = require_tenant_id(tenant_id)
+        brand = Brand(
+            brand_id=str(uuid.uuid4()),
+            tenant_id=tenant,
+            name=name,
+            normalized_name=name.casefold().strip(),
+            aliases=aliases,
+        )
+        self._brands[brand.brand_id] = brand
+        return brand
+
+    def content_handoff(self, *, tenant_id: str, product_id: str) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        product = self.repo.get_product(tenant, product_id)
+        if product is None:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND)
+        ctx = {
+            "delegate_generation_to": "content_intel",
+            "product_id": product_id,
+            "title": product.get("title"),
+            "sku": product.get("sku"),
+            "brand": product.get("brand"),
+            "constraints": ("no_invented_product_facts",),
+        }
+        asset_ref = None
+        if self.content_intel is not None:
+            try:
+                asset = self.content_intel.generate_copy(
+                    tenant_id=tenant,
+                    project_id=product_id,
+                    content_type="product_description",
+                    channel="marketplace",
+                    objective=str(product.get("title") or "product"),
+                    product_facts={"sku": str(product.get("sku") or ""), "name": str(product.get("title") or "")},
+                    bulk=True,
+                )
+                asset_ref = getattr(asset, "version_id", None)
+            except Exception:
+                asset_ref = None
+        return {"context": ctx, "asset_ref": asset_ref}
+
+    def media_handoff(self, *, tenant_id: str, product_id: str, scene: str = "product hero") -> dict:
+        tenant = require_tenant_id(tenant_id)
+        product = self.repo.get_product(tenant, product_id)
+        if product is None:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND)
+        media_ref = None
+        if self.product_media is not None:
+            try:
+                result = self.product_media.generate_from_brief(
+                    tenant_id=tenant,
+                    scene_description=f"{scene}: {product.get('title')}",
+                    media_brief_id=f"commerce-{product_id}",
+                    bulk=True,
+                )
+                media_ref = (result.get("version_ids") or [None])[0]
+            except Exception:
+                media_ref = None
+        return {"product_id": product_id, "media_ref": media_ref, "delegate_to": "product_media"}
+
+    def seo_handoff(self, *, tenant_id: str, product_id: str) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        product = self.repo.get_product(tenant, product_id)
+        if product is None:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND)
+        return {
+            "delegate_to": "seo_marketing",
+            "product_id": product_id,
+            "facts": {
+                "title": product.get("title"),
+                "sku": product.get("sku"),
+                "brand": product.get("brand"),
+                "category_id": product.get("category_id"),
+            },
+            "request": "metadata_and_content_brief",
+        }
+
+    def tax_context(self, *, mode: str = TAX_VAT_INCLUDED, rate: Decimal | None = Decimal("0.20")) -> TaxContext:
+        if mode == TAX_UNKNOWN:
+            return TaxContext(mode=TAX_UNKNOWN, rate=None)
+        return TaxContext(mode=mode, rate=rate)
+
+    def create_cart_checkout(self, *, tenant_id: str, lines: list[dict], currency: str = "RUB") -> dict:
+        cart = create_cart(tenant_id=tenant_id, currency=currency, lines=lines)
+        self._carts[cart.cart_id] = cart
+        prices = {line.product_id or line.sku: line.unit_price.amount for line in cart.lines}
+        avail = {line.product_id or line.sku: line.availability for line in cart.lines}
+        check = revalidate_checkout(cart=cart, current_prices=prices, current_availability=avail)
+        return {"cart_id": cart.cart_id, "checkout": check}
+
+    def aspro_profile(self):
+        return fixture_aspro_premier_profile()
+
+    def bitrix_sync_preview(self, *, tenant_id: str, product_id: str) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        product = self.repo.get_product(tenant, product_id)
+        if product is None:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND)
+        profile = fixture_aspro_premier_profile()
+        payload = map_product_to_bitrix_payload(product=product, profile=profile)
+        causation = f"panda-{uuid.uuid4().hex[:12]}"
+        plan = plan_sync(
+            tenant_id=tenant,
+            integration="bitrix",
+            direction="PUSH",
+            changes=[{"entity_type": "product", "entity_id": product_id, "field": "title", "canonical_value": product.get("title"), "external_value": ""}],
+            policy=self.ownership_policy(tenant_id=tenant),
+            dry_run=True,
+            causation_id=causation,
+        )
+        self._sync_ledger.record_outbound(causation_id=causation, plan_id=plan.plan_id)
+        return {
+            "plan_id": plan.plan_id,
+            "dry_run": True,
+            "payload": payload,
+            "causation_id": causation,
+            "cms_write": "REQUIRES_SIDE_EFFECT_GOVERNANCE",
+        }
+
+    def acknowledge_reflected_event(self, *, causation_id: str, origin: str = "bitrix") -> dict:
+        return self._sync_ledger.acknowledge_inbound(causation_id=causation_id, origin=origin)
+
+    def one_c_pull_normalize(self) -> list[dict]:
+        return [self._one_c.normalize_product(r) for r in self._one_c.pull_nomenclature()]
+
+    def one_c_seed_and_import(self, *, tenant_id: str, guid: str, sku: str, title: str, price: str, stock: str) -> dict:
+        self._one_c.seed_product(external_id=guid, sku=sku, title=title, price=price, stock=stock)
+        row = self._one_c.normalize_product(self._one_c._nomenclature[guid])
+        snap = self.ingest_source_snapshot(
+            tenant_id=tenant_id, source="1c", external_id=guid, fields=row, artifact_ref=f"1c:{guid}"
+        )
+        match = self.match_product(tenant_id=tenant_id, sku=sku, title=title)
+        product = None
+        if match.state == MATCH_NEW:
+            product = self.create_product_version(tenant_id=tenant_id, title=title, sku=sku)
+            self.observe_stock(
+                tenant_id=tenant_id,
+                product_id=product.product_id,
+                location_id=row["location_id"],
+                on_hand=Decimal(stock),
+                source="1c",
+            )
+        return {
+            "snapshot_id": snap.snapshot_id,
+            "match_state": match.state,
+            "product_id": product.product_id if product else match.product_id,
+            "fake": True,
+            "provider_id": self._one_c.provider_id,
+        }
+
+    def one_c_push_order(self, *, order: dict, idempotency_key: str) -> dict:
+        return self._one_c.push_order(order=order, idempotency_key=idempotency_key)
+
+    def marketplace_export_view(self, *, tenant_id: str, product_id: str) -> MarketplaceExportView:
+        tenant = require_tenant_id(tenant_id)
+        product = self.repo.get_product(tenant, product_id)
+        if product is None:
+            raise ProductPlatformError(COMMERCE_NOT_FOUND)
+        price = self.repo.get_price(tenant, product_id, "RUB") or {}
+        inv = self.repo.get_inventory(tenant, product_id, "main") or {}
+        available = Decimal(str(inv.get("on_hand") or 0)) - Decimal(str(inv.get("reserved") or 0))
+        return MarketplaceExportView(
+            tenant_id=tenant,
+            product_id=product_id,
+            sku=str(product.get("sku") or ""),
+            title=str(product.get("title") or ""),
+            price=str(price.get("amount") or "0"),
+            currency=str(price.get("currency") or "RUB"),
+            stock_available=str(available),
+            category_id=str(product.get("category_id") or ""),
+            media_refs=tuple(filter(None, [product.get("primary_media_ref")])),
+            content_refs=(),
+        )
+
+    def assert_fact_lock(self, *, text: str) -> None:
+        import re
+
+        if re.search(r"(?i)\b(certified warranty|in stock now|50%\s*off|free delivery tomorrow)\b", text or ""):
+            raise ProductPlatformError(COMMERCE_FACT_UNSUPPORTED, "invented_commercial_claim")

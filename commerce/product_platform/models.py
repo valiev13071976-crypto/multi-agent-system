@@ -55,14 +55,39 @@ ORDER_TRANSITIONS = {
     ORDER_NEW: {ORDER_CONFIRMED, ORDER_CANCELLED, ORDER_FAILED},
     ORDER_CONFIRMED: {ORDER_PROCESSING, ORDER_CANCELLED},
     ORDER_PROCESSING: {ORDER_FULFILLED, ORDER_CANCELLED, ORDER_FAILED},
-    ORDER_FULFILLED: set(),
+    ORDER_FULFILLED: {ORDER_RETURNED},
     ORDER_CANCELLED: set(),
+    ORDER_RETURNED: set(),
     ORDER_FAILED: set(),
 }
 
 CATALOG_PROFILE_VERSION = "1.0.0"
 IMPORT_PROFILE_VERSION = "1.0.0"
 PRICE_POLICY_VERSION = "1.0.0"
+PLATFORM_SCHEMA_VERSION = "1.0.0"
+OWNERSHIP_POLICY_VERSION = "1.0.0"
+ASPRO_PROFILE_VERSION = "1.0.0"
+SYNC_PROFILE_VERSION = "1.0.0"
+
+OWNER_PANDA = "PANDA"
+OWNER_BITRIX = "BITRIX"
+OWNER_ONE_C = "ONE_C"
+OWNER_SUPPLIER = "SUPPLIER"
+OWNER_MANUAL = "MANUAL"
+
+MODE_AUTHORITATIVE = "AUTHORITATIVE"
+MODE_READ_ONLY = "READ_ONLY"
+MODE_WRITE_ALLOWED = "WRITE_ALLOWED"
+MODE_PROPOSE_ONLY = "PROPOSE_ONLY"
+
+TAX_VAT_INCLUDED = "VAT_INCLUDED"
+TAX_VAT_EXCLUDED = "VAT_EXCLUDED"
+TAX_UNKNOWN = "UNKNOWN"
+
+AVAIL_PREORDER = "PREORDER"
+AVAIL_BACKORDER = "BACKORDER"
+AVAIL_SUPPLIER_AVAILABLE = "SUPPLIER_AVAILABLE"
+AVAIL_UNAVAILABLE = "UNAVAILABLE"
 
 
 def _utc() -> datetime:
@@ -359,3 +384,211 @@ class CommerceJob:
 def observation_hash(*, product_id: str, source: str, price: Decimal, currency: str, observed_at: datetime) -> str:
     raw = f"{product_id}|{source}|{price}|{currency}|{observed_at.isoformat()}"
     return hashlib.sha256(raw.encode()).hexdigest()
+
+
+# --- Expansion contracts (closure) ---
+
+
+@dataclass(frozen=True)
+class SourceProductSnapshot:
+    snapshot_id: str
+    tenant_id: str
+    source: str
+    external_id: str
+    raw_artifact_ref: str
+    observed_at: datetime
+    normalized_fields: Mapping[str, object]
+    checksum: str
+    provenance: str = TRUST_TRUSTED
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "normalized_fields", _meta(self.normalized_fields))
+
+
+@dataclass(frozen=True)
+class ProductMatchResult:
+    match_id: str
+    tenant_id: str
+    state: str
+    confidence: float
+    strategy: str
+    product_id: str = ""
+    candidate_refs: tuple[str, ...] = ()
+    evidence: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "candidate_refs", tuple(self.candidate_refs))
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+
+
+@dataclass(frozen=True)
+class Category:
+    category_id: str
+    tenant_id: str
+    name: str
+    parent_id: str = ""
+    slug: str = ""
+    status: str = "active"
+    version: int = 1
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+
+
+@dataclass(frozen=True)
+class Brand:
+    brand_id: str
+    tenant_id: str
+    name: str
+    normalized_name: str
+    aliases: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "aliases", tuple(self.aliases))
+
+
+@dataclass(frozen=True)
+class AttributeDefinition:
+    attribute_id: str
+    tenant_id: str
+    name: str
+    value_type: str
+    unit: str = ""
+    required: bool = False
+    version: int = 1
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+
+
+@dataclass(frozen=True)
+class FieldOwnershipRule:
+    field: str
+    owner: str
+    mode: str
+    integration: str = ""
+
+
+@dataclass(frozen=True)
+class FieldOwnershipPolicy:
+    policy_id: str
+    tenant_id: str
+    version: str
+    rules: tuple[FieldOwnershipRule, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "rules", tuple(self.rules))
+
+
+@dataclass(frozen=True)
+class SyncConflict:
+    conflict_id: str
+    tenant_id: str
+    entity_type: str
+    entity_id: str
+    field: str
+    canonical_value: str
+    external_value: str
+    ownership: str
+    resolution_status: str = "OPEN"
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+
+
+@dataclass(frozen=True)
+class CommerceSyncPlan:
+    plan_id: str
+    tenant_id: str
+    integration: str
+    direction: str
+    dry_run: bool
+    changes: tuple[Mapping[str, object], ...]
+    conflicts: tuple[SyncConflict, ...]
+    skipped: int = 0
+    idempotency_key: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "changes", tuple(self.changes))
+        object.__setattr__(self, "conflicts", tuple(self.conflicts))
+
+
+@dataclass(frozen=True)
+class AsproPremierProfile:
+    profile_id: str
+    version: str
+    field_mappings: Mapping[str, str]
+    price_type_mapping: Mapping[str, str]
+    stock_mapping: Mapping[str, str]
+    seo_mapping: Mapping[str, str]
+    media_mapping: Mapping[str, str]
+    source_of_rules: str = "configurable"
+
+    def __post_init__(self):
+        object.__setattr__(self, "field_mappings", MappingProxyType(dict(self.field_mappings or {})))
+        object.__setattr__(self, "price_type_mapping", MappingProxyType(dict(self.price_type_mapping or {})))
+        object.__setattr__(self, "stock_mapping", MappingProxyType(dict(self.stock_mapping or {})))
+        object.__setattr__(self, "seo_mapping", MappingProxyType(dict(self.seo_mapping or {})))
+        object.__setattr__(self, "media_mapping", MappingProxyType(dict(self.media_mapping or {})))
+
+
+@dataclass(frozen=True)
+class TaxContext:
+    mode: str
+    rate: Decimal | None = None
+    profile_ref: str = ""
+
+    def __post_init__(self):
+        if self.rate is not None:
+            object.__setattr__(self, "rate", money(self.rate))
+
+
+@dataclass(frozen=True)
+class CartLine:
+    line_id: str
+    sku: str
+    product_id: str
+    quantity: Decimal
+    unit_price: MoneyAmount
+    availability: str
+
+    def __post_init__(self):
+        object.__setattr__(self, "quantity", money(self.quantity))
+
+
+@dataclass(frozen=True)
+class Cart:
+    cart_id: str
+    tenant_id: str
+    currency: str
+    lines: tuple[CartLine, ...]
+    status: str = "OPEN"
+    customer_ref: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "lines", tuple(self.lines))
+
+
+@dataclass(frozen=True)
+class MarketplaceExportView:
+    tenant_id: str
+    product_id: str
+    sku: str
+    title: str
+    price: str
+    currency: str
+    stock_available: str
+    category_id: str
+    media_refs: tuple[str, ...]
+    content_refs: tuple[str, ...]
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "media_refs", tuple(self.media_refs))
+        object.__setattr__(self, "content_refs", tuple(self.content_refs))
