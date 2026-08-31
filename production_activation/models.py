@@ -212,6 +212,11 @@ class ActivationAuthorization:
     issued_at: str
     expires_at: str
     consumed: bool = False
+    consumed_at: str = ""
+    attempt_id: str = ""
+    candidate_id: str = ""
+    plan_id: str = ""
+    release_identity: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -225,6 +230,11 @@ class ActivationAuthorization:
             "issued_at": self.issued_at,
             "expires_at": self.expires_at,
             "consumed": self.consumed,
+            "consumed_at": self.consumed_at,
+            "attempt_id": self.attempt_id,
+            "candidate_id": self.candidate_id,
+            "plan_id": self.plan_id,
+            "release_identity": self.release_identity,
         }
 
 
@@ -240,6 +250,8 @@ class ActivationAttempt:
     completed_at: str = ""
     routing_result: dict[str, Any] = field(default_factory=dict)
     error_code: str = ""
+    idempotency_key: str = ""
+    already_applied: bool = False
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -253,6 +265,8 @@ class ActivationAttempt:
             "completed_at": self.completed_at,
             "routing_result": dict(self.routing_result),
             "error_code": self.error_code,
+            "idempotency_key": self.idempotency_key,
+            "already_applied": self.already_applied,
         }
 
 

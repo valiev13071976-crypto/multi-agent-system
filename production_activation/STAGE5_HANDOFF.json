@@ -48,7 +48,11 @@
     "GO LIVE defaults inactive; no implicit activation.",
     "Canonical durable store: $PANDA_DATA_DIR/production_activation.sqlite (override PRODUCTION_ACTIVATION_DB_PATH).",
     "CLI runtime must never use :memory: — cross-process rehydration required.",
-    "Public/production LIVE_VERIFIED activation requires explicit operator --confirm activate plus live evidence.",
+    "PRODUCTION_ACTIVE does NOT imply LIVE_VERIFIED.",
+    "CODE_VERIFIED smoke/evidence does NOT satisfy LIVE acceptance.",
+    "Authorization consumption and activation idempotency are durable in SQLite across CLI processes.",
+    "Hypercare authority is durable (pa_hypercare), not process-local memory.",
+    "Public/production LIVE_VERIFIED requires activate + live smoke PASS + hypercare PASS + acceptance.",
     "Stage 6 does not exist."
   ],
   "operator_cli": "python -m production_activation",
@@ -62,7 +66,15 @@
     "6. python -m production_activation seed-evidence --candidate-id stage5-production --release-identity <NEW_PATCH_SHA> --confirm",
     "7. NEW CLI process: python -m production_activation evaluate --candidate-id stage5-production",
     "8. Expect: verdict=GO_LIVE_READY, go_live_eligible=true, go_live_active=false, blocked=[]",
-    "9. Only then prepare / authorize / activate ... --confirm",
-    "10. Deactivate: python -m production_activation deactivate --candidate-id stage5-production --confirm"
+    "9. prepare --candidate-id ... --production-url ... --monitoring ... --alerts ... --confirm",
+    "10. authorize --candidate-id ... --plan-id ... --idempotency-key ... --confirm",
+    "11. activate --candidate-id ... --plan-id ... --authorization-id ... --confirmation-token ... --idempotency-key ... --confirm",
+    "12. If SSH/CLI output lost: status (do NOT blindly re-activate; same idempotency key returns already_applied)",
+    "13. smoke --candidate-id ... --plan-id ... --attempt-id ... --release-identity ... --probe health=PASS ... (all mandatory probes) --confirm",
+    "14. start-hypercare --candidate-id ... --plan-id ... --release-identity ... --confirm",
+    "15. complete-hypercare --candidate-id ... --requests N --p0-count 0 --p1-count 0 --confirm",
+    "16. acceptance --candidate-id ...  (requires LIVE smoke + hypercare; ACTIVE alone is insufficient)",
+    "17. evaluate / status — live_verified=true and GO_LIVE_PASS only after acceptance",
+    "18. Deactivate: deactivate --candidate-id stage5-production --reason ... --confirm"
   ]
 }

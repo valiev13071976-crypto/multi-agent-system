@@ -9,10 +9,12 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 from production_activation.commands import ActivateProductionCommand, AuthorizeActivationCommand, PrepareActivationCommand, RollbackProductionCommand
 from production_activation.runtime import get_production_activation_runtime
+from production_activation.smoke import REQUIRED_CHECKS
 
 
 def _admin(actor: str = "cli-operator"):
@@ -28,12 +30,25 @@ def _print(data) -> int:
     return 0
 
 
+def _load_observed(args) -> dict:
+    observed: dict = {}
+    if getattr(args, "observed_json", None):
+        path = Path(args.observed_json)
+        observed.update(json.loads(path.read_text(encoding="utf-8")))
+    for item in getattr(args, "probe", None) or []:
+        if "=" not in item:
+            raise SystemExit(f"Invalid --probe {item!r}; expected name=PASS|FAIL")
+        name, value = item.split("=", 1)
+        observed[name.strip()] = value.strip()
+    return observed
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Stage-5 production activation harness")
     parser.add_argument("--actor", default="cli-operator")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
-    sub.add_parser("status", help="Inspect Stage-5 status")
+    sub.add_parser("status", help="Inspect Stage-5 status / recovery after timeout")
 
     p_preflight = sub.add_parser("validate-prerequisite", help="Verify Stage-3/4 handoff")
     p_preflight.add_argument("--candidate-id", required=True)
@@ -70,7 +85,35 @@ def main(argv: list[str] | None = None) -> int:
     p_health = sub.add_parser("post-activation-health", help="Post-activation health classification")
     p_health.add_argument("--candidate-id", default="")
 
-    p_accept = sub.add_parser("acceptance", help="Evaluate production acceptance")
+    p_smoke = sub.add_parser("smoke", help="Record real post-activation live smoke evidence")
+    p_smoke.add_argument("--candidate-id", required=True)
+    p_smoke.add_argument("--plan-id", required=True)
+    p_smoke.add_argument("--attempt-id", required=True)
+    p_smoke.add_argument("--release-identity", required=True)
+    p_smoke.add_argument("--observed-json", default="", help="JSON file of observed probe results")
+    p_smoke.add_argument(
+        "--probe",
+        action="append",
+        default=[],
+        help=f"Observed probe name=PASS|FAIL (required live checks: {', '.join(REQUIRED_CHECKS)})",
+    )
+    p_smoke.add_argument("--confirm", action="store_true")
+
+    p_hstart = sub.add_parser("start-hypercare", help="Start durable hypercare window")
+    p_hstart.add_argument("--candidate-id", required=True)
+    p_hstart.add_argument("--plan-id", required=True)
+    p_hstart.add_argument("--release-identity", required=True)
+    p_hstart.add_argument("--min-requests", type=int, default=1)
+    p_hstart.add_argument("--confirm", action="store_true")
+
+    p_hcomplete = sub.add_parser("complete-hypercare", help="Complete durable hypercare with observed metrics")
+    p_hcomplete.add_argument("--candidate-id", required=True)
+    p_hcomplete.add_argument("--requests", type=int, required=True)
+    p_hcomplete.add_argument("--p0-count", type=int, required=True)
+    p_hcomplete.add_argument("--p1-count", type=int, required=True)
+    p_hcomplete.add_argument("--confirm", action="store_true")
+
+    p_accept = sub.add_parser("acceptance", help="Evaluate production acceptance (requires LIVE smoke + hypercare)")
     p_accept.add_argument("--candidate-id", required=True)
 
     p_seed = sub.add_parser("seed-evidence", help="Seed CODE_VERIFIED Stage-5 mandatory gates")
@@ -147,8 +190,51 @@ def main(argv: list[str] | None = None) -> int:
         return _print(svc.deactivate(ctx, candidate_id=args.candidate_id, operator_ref=ctx.actor_ref(), reason=args.reason))
     if args.cmd == "post-activation-health":
         return _print(svc.post_activation_health(ctx, candidate_id=args.candidate_id))
+    if args.cmd == "smoke":
+        if not args.confirm:
+            print("Refusing: smoke requires --confirm", file=sys.stderr)
+            return 2
+        observed = _load_observed(args)
+        return _print(
+            svc.run_smoke(
+                ctx,
+                candidate_id=args.candidate_id,
+                attempt_id=args.attempt_id,
+                plan_id=args.plan_id,
+                release_identity=args.release_identity,
+                mode="live",
+                observed=observed,
+            )
+        )
+    if args.cmd == "start-hypercare":
+        if not args.confirm:
+            print("Refusing: start-hypercare requires --confirm", file=sys.stderr)
+            return 2
+        return _print(
+            svc.start_hypercare(
+                ctx,
+                candidate_id=args.candidate_id,
+                plan_id=args.plan_id,
+                release_identity=args.release_identity,
+                policy={"min_requests": args.min_requests, "max_window_seconds": 3600},
+            )
+        )
+    if args.cmd == "complete-hypercare":
+        if not args.confirm:
+            print("Refusing: complete-hypercare requires --confirm", file=sys.stderr)
+            return 2
+        return _print(
+            svc.complete_hypercare(
+                ctx,
+                candidate_id=args.candidate_id,
+                requests=args.requests,
+                p0_count=args.p0_count,
+                p1_count=args.p1_count,
+                require_metrics=True,
+            )
+        )
     if args.cmd == "acceptance":
-        return _print(svc.evaluate_acceptance(ctx, candidate_id=args.candidate_id))
+        return _print(svc.evaluate_acceptance(ctx, candidate_id=args.candidate_id, require_live_evidence=True))
     if args.cmd == "seed-evidence":
         if not args.confirm:
             print("Refusing: seed-evidence requires --confirm", file=sys.stderr)

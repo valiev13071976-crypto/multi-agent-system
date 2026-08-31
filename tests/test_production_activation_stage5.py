@@ -26,7 +26,14 @@ from production_activation.errors import (
     ProductionActivationError,
 )
 from production_activation.handoff import Stage5HandoffGate
-from production_activation.models import AcceptanceResult, ActivationState, FinalProductionCandidate, GoLivePlan, Stage5Handoff
+from production_activation.models import (
+    AcceptanceResult,
+    ActivationState,
+    FinalProductionCandidate,
+    GoLivePlan,
+    Stage5Handoff,
+    VerificationClass as PAVerificationClass,
+)
 from production_activation.plan import GoLivePlanBuilder
 from production_activation.providers import ProviderManifest
 from production_activation.service import ProductionActivationService
@@ -387,19 +394,46 @@ class Stage5ServiceTests(unittest.TestCase):
             ),
         )
         self.assertEqual(out["attempt"]["state"], ActivationState.PRODUCTION_ACTIVE.value)
-        smoke = self.svc.run_smoke(admin, candidate_id=candidate.candidate_id, attempt_id=out["attempt"]["attempt_id"])
+        self.assertFalse(out["live_verified"])
+        from production_activation.smoke import REQUIRED_CHECKS
+
+        observed = {name: True for name in REQUIRED_CHECKS}
+        smoke = self.svc.run_smoke(
+            admin,
+            candidate_id=candidate.candidate_id,
+            attempt_id=out["attempt"]["attempt_id"],
+            mode="live",
+            observed=observed,
+            plan_id=plan.plan_id,
+            release_identity="rel-fixture",
+        )
         self.assertEqual(smoke["status"], "PASS")
-        self.svc.start_hypercare(admin, candidate_id=candidate.candidate_id)
-        self._svc_hypercare_requests()
-        hyper = self.svc.complete_hypercare(admin, candidate_id=candidate.candidate_id)
+        self.assertEqual(smoke["classification"], PAVerificationClass.LIVE_VERIFIED.value)
+        self.svc.start_hypercare(
+            admin,
+            candidate_id=candidate.candidate_id,
+            plan_id=plan.plan_id,
+            release_identity="rel-fixture",
+        )
+        hyper = self.svc.complete_hypercare(
+            admin,
+            candidate_id=candidate.candidate_id,
+            requests=5,
+            p0_count=0,
+            p1_count=0,
+        )
         self.assertEqual(hyper["status"], "PASS")
         self.svc.providers.record_live("openai")
         self.svc.recovery.persistent_db = "ready"
         self.svc.recovery.workflow = "ready"
         self.svc.recovery.audit = "ready"
         self.svc.recovery.stage3_restore_reusable = True
+        # Bind release for acceptance
+        self.svc.create_go_live_policy(admin, release_identity="rel-fixture", created_by="ops")
+        # Re-bind plan_id into state (activate already set it)
         acceptance = self.svc.evaluate_acceptance(admin, candidate_id=candidate.candidate_id)
         self.assertEqual(acceptance["result"], AcceptanceResult.PRODUCTION_ACCEPTED.value)
+        self.assertTrue(acceptance["live_verified"])
 
     def _svc_hypercare_requests(self):
         if self.svc._hypercare:

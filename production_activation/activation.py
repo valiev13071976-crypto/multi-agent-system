@@ -71,6 +71,7 @@ class ProductionTrafficActivator:
                 authorization_id="",
                 operator_ref=operator_ref,
                 state=ActivationState.ACTIVATING.value,
+                idempotency_key=idempotency_key,
             )
             self._state = ActivationState.ACTIVATING.value
             try:
@@ -91,6 +92,38 @@ class ProductionTrafficActivator:
                 raise ProductionActivationError(ACTIVATION_FAILED, details={"reason": exc.reason_code}) from exc
             self._attempts[attempt.attempt_id] = attempt
             self._idempotency[idempotency_key] = attempt
+            return attempt
+
+    def apply_routing(
+        self,
+        *,
+        candidate: FinalProductionCandidate,
+        operator_ref: str,
+        expected_policy_version: str,
+        attempt: ActivationAttempt,
+    ) -> ActivationAttempt:
+        """Apply routing side effect for a durable-reserved attempt (no local idempotency)."""
+        with self._lock:
+            self._state = ActivationState.ACTIVATING.value
+            try:
+                record = self.routing_activation.activate(
+                    self._routing_candidate(candidate),
+                    actor_ref=operator_ref,
+                    expected_policy_version=expected_policy_version or candidate.routing_policy_version or "live",
+                )
+                attempt.state = ActivationState.PRODUCTION_ACTIVE.value
+                attempt.routing_result = record.as_dict()
+                attempt.completed_at = datetime.now(timezone.utc).isoformat()
+                self._state = ActivationState.PRODUCTION_ACTIVE.value
+            except ActivationError as exc:
+                attempt.state = ActivationState.ACTIVATION_FAILED.value
+                attempt.error_code = exc.reason_code
+                attempt.completed_at = datetime.now(timezone.utc).isoformat()
+                self._state = ActivationState.ACTIVATION_FAILED.value
+                raise ProductionActivationError(ACTIVATION_FAILED, details={"reason": exc.reason_code}) from exc
+            self._attempts[attempt.attempt_id] = attempt
+            if attempt.idempotency_key:
+                self._idempotency[attempt.idempotency_key] = attempt
             return attempt
 
     def deactivate(self, *, operator_ref: str, reason: str = "") -> dict:
