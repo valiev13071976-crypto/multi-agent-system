@@ -51,6 +51,11 @@ def _version_payload(version: MediaAssetVersion) -> dict:
         "artifact_id": version.artifact_id,
         "created_at": version.created_at.isoformat(),
         "metadata_safe": dict(version.metadata_safe),
+        "rights_status": version.rights_status,
+        "source_content_hash": version.source_content_hash,
+        "recipe_id": version.recipe_id,
+        "recipe_version": version.recipe_version,
+        "target_profile_id": version.target_profile_id,
     }
 
 
@@ -152,6 +157,11 @@ class SqliteMediaStore(MediaStore):
             artifact_id=version.artifact_id,
             created_at=version.created_at,
             metadata_safe=dict(version.metadata_safe),
+            rights_status=version.rights_status,
+            source_content_hash=version.source_content_hash,
+            recipe_id=version.recipe_id,
+            recipe_version=version.recipe_version,
+            target_profile_id=version.target_profile_id,
         )
         blob = self.get_blob(version_id, tenant_id=tenant_id) or b""
         self.save_version(updated, blob=blob)

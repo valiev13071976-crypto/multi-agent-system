@@ -85,3 +85,45 @@ def strip_metadata(data: bytes) -> tuple[bytes, ImageMetadata]:
 
 def thumbnail_image(data: bytes, *, max_edge: int = 256) -> tuple[bytes, ImageMetadata]:
     return resize_image(data, width=max_edge, height=max_edge, fit="contain", output_format="jpeg")
+
+
+def replace_background(
+    data: bytes,
+    *,
+    mode: str = "solid",
+    color: tuple[int, int, int] = (255, 255, 255),
+) -> tuple[bytes, ImageMetadata]:
+    """Replace transparent/subject background. Does not alter product geometry."""
+    validated = validate_and_extract_image(data)
+    with Image.open(io.BytesIO(validated.canonical_data)) as img:
+        rgba = img.convert("RGBA")
+        if mode == "transparent":
+            out_img = rgba
+            save_fmt = "PNG"
+            out_fmt, mime = "png", "image/png"
+        else:
+            canvas = Image.new("RGB", rgba.size, color)
+            canvas.paste(rgba, mask=rgba.split()[-1])
+            out_img = canvas
+            save_fmt = "JPEG"
+            out_fmt, mime = "jpeg", "image/jpeg"
+        buf = io.BytesIO()
+        out_img.save(buf, format=save_fmt)
+        out = buf.getvalue()
+        return out, _meta_from_image(out_img if out_img.mode != "RGBA" else rgba, out_fmt, mime, out)
+
+
+def enhance_image(data: bytes, *, strength: float = 1.0) -> tuple[bytes, ImageMetadata]:
+    """Deterministic local enhancement (contrast/sharpen). Marks as non-generative."""
+    from PIL import ImageEnhance, ImageFilter
+
+    validated = validate_and_extract_image(data)
+    fmt, mime = detect_image_type(validated.data)
+    with Image.open(io.BytesIO(validated.canonical_data)) as img:
+        enhanced = ImageEnhance.Contrast(img.convert("RGB")).enhance(1.0 + 0.1 * max(0.0, min(strength, 2.0)))
+        enhanced = enhanced.filter(ImageFilter.SHARPEN)
+        buf = io.BytesIO()
+        save_fmt = {"jpeg": "JPEG", "png": "PNG", "webp": "WEBP"}[fmt]
+        enhanced.save(buf, format=save_fmt)
+        out = buf.getvalue()
+        return out, _meta_from_image(enhanced, fmt, mime, out)

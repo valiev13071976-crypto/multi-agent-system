@@ -17,11 +17,17 @@ QUALITY_PROFILE_VERSION = "1.0.0"
 SIMILARITY_PROFILE_VERSION = "1.0.0"
 TRANSFORM_PROFILE_VERSION = "1.0.0"
 GENERATION_PROFILE_VERSION = "1.0.0"
+RECIPE_PROFILE_VERSION = "1.0.0"
+TARGET_PROFILE_VERSION = "1.0.0"
+TEMPLATE_PROFILE_VERSION = "1.0.0"
+VIDEO_PROFILE_VERSION = "1.0.0"
 
 STATUS_ACTIVE = "active"
 STATUS_TOMBSTONED = "tombstoned"
 STATUS_DELETED = "deleted"
 STATUS_FAILED = "failed"
+STATUS_REVIEW_REQUIRED = "review_required"
+STATUS_CANCELLED = "cancelled"
 
 LINK_CONFIRMED = "CONFIRMED"
 LINK_CANDIDATE = "CANDIDATE"
@@ -33,6 +39,27 @@ ROLE_FRONT = "front"
 ROLE_BACK = "back"
 ROLE_DETAIL = "detail"
 ROLE_LIFESTYLE = "lifestyle"
+ROLE_MAIN = "main"
+ROLE_GALLERY = "gallery"
+ROLE_INFOGRAPHIC = "infographic"
+ROLE_PACKAGE = "package"
+
+RIGHTS_UNKNOWN = "UNKNOWN"
+RIGHTS_OWNED = "OWNED"
+RIGHTS_LICENSED = "LICENSED"
+RIGHTS_USER_PROVIDED = "USER_PROVIDED"
+RIGHTS_GENERATED = "GENERATED"
+RIGHTS_THIRD_PARTY_RESTRICTED = "THIRD_PARTY_RESTRICTED"
+
+SOURCE_UPLOAD = "UPLOAD"
+SOURCE_FILE_ARTIFACT = "FILE_ARTIFACT"
+SOURCE_GENERATED = "GENERATED"
+SOURCE_CONTENT_FACTORY = "CONTENT_FACTORY"
+SOURCE_PRODUCT_CATALOG = "PRODUCT_CATALOG"
+
+MAX_GENERATION_ATTEMPTS = 3
+MAX_QUALITY_RETRIES = 2
+MAX_VARIANTS_HARD = 4
 
 
 def _meta(value) -> Mapping[str, object]:
@@ -89,6 +116,11 @@ class MediaAssetVersion:
     artifact_id: str = ""
     created_at: datetime = field(default_factory=_utc_now)
     metadata_safe: Mapping[str, object] = field(default_factory=dict)
+    rights_status: str = RIGHTS_UNKNOWN
+    source_content_hash: str = ""
+    recipe_id: str = ""
+    recipe_version: str = ""
+    target_profile_id: str = ""
 
     def __post_init__(self):
         object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
@@ -195,3 +227,170 @@ class MediaDeletionResult:
 
     def __post_init__(self):
         object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+
+
+@dataclass(frozen=True)
+class MediaRights:
+    rights_id: str
+    tenant_id: str
+    status: str = RIGHTS_UNKNOWN
+    rights_holder: str = ""
+    license_ref: str = ""
+    allowed_uses: tuple[str, ...] = ()
+    expiry: str = ""
+    source_provenance: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "allowed_uses", tuple(self.allowed_uses or ()))
+
+
+@dataclass(frozen=True)
+class MediaSource:
+    source_id: str
+    tenant_id: str
+    source_kind: str
+    media_type: str
+    mime: str
+    content_hash: str
+    byte_size: int
+    artifact_id: str = ""
+    filename: str = ""
+    product_id: str = ""
+    project_id: str = ""
+    rights_status: str = RIGHTS_UNKNOWN
+    created_at: datetime = field(default_factory=_utc_now)
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+
+
+@dataclass(frozen=True)
+class MediaOperation:
+    name: str
+    version: str = "1.0.0"
+    parameters: Mapping[str, object] = field(default_factory=dict)
+    deterministic: bool = True
+    provider_required: bool = False
+
+    def __post_init__(self):
+        object.__setattr__(self, "parameters", _meta(self.parameters))
+
+
+@dataclass(frozen=True)
+class MediaRecipe:
+    recipe_id: str
+    version: str
+    tenant_id: str
+    operations: tuple[MediaOperation, ...]
+    target_profile_id: str = ""
+    profile_version: str = RECIPE_PROFILE_VERSION
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "operations", tuple(self.operations or ()))
+
+
+@dataclass(frozen=True)
+class TargetMediaProfile:
+    profile_id: str
+    channel: str
+    asset_role: str
+    width: int
+    height: int
+    format: str = "jpeg"
+    max_bytes: int = 5 * 1024 * 1024
+    allow_alpha: bool = False
+    background: str = "white"
+    version: str = TARGET_PROFILE_VERSION
+    source_of_rules: str = "configurable"
+    effective_at: str = ""
+    safe_margin_pct: float = 0.05
+
+    @property
+    def aspect_ratio(self) -> float:
+        return round(self.width / max(self.height, 1), 4)
+
+
+@dataclass(frozen=True)
+class MediaTemplate:
+    template_id: str
+    tenant_id: str
+    version: str
+    canvas_width: int
+    canvas_height: int
+    product_zone: Mapping[str, int]
+    text_zones: tuple[Mapping[str, object], ...]
+    profile_version: str = TEMPLATE_PROFILE_VERSION
+    channel: str = "marketplace"
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "product_zone", dict(self.product_zone or {}))
+        object.__setattr__(self, "text_zones", tuple(self.text_zones or ()))
+
+
+@dataclass(frozen=True)
+class ProductMediaContext:
+    tenant_id: str
+    product_id: str
+    sku: str = ""
+    brand: str = ""
+    category: str = ""
+    product_facts: Mapping[str, str] = field(default_factory=dict)
+    source_version_ids: tuple[str, ...] = ()
+    target_channels: tuple[str, ...] = ()
+    media_brief_id: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "product_facts", dict(self.product_facts or {}))
+        object.__setattr__(self, "source_version_ids", tuple(self.source_version_ids or ()))
+        object.__setattr__(self, "target_channels", tuple(self.target_channels or ()))
+
+
+@dataclass(frozen=True)
+class VideoScene:
+    scene_id: str
+    start_sec: float
+    end_sec: float
+    source_version_id: str = ""
+    text_overlay: str = ""
+    transition: str = "cut"
+
+
+@dataclass(frozen=True)
+class VideoRecipe:
+    recipe_id: str
+    tenant_id: str
+    version: str
+    scenes: tuple[VideoScene, ...]
+    aspect_ratio: str = "9:16"
+    duration_sec: float = 15.0
+    target_profile_id: str = "video_short_9x16"
+    audio_refs: tuple[str, ...] = ()
+    rights_status: str = RIGHTS_UNKNOWN
+    profile_version: str = VIDEO_PROFILE_VERSION
+    media_brief_id: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "scenes", tuple(self.scenes or ()))
+        object.__setattr__(self, "audio_refs", tuple(self.audio_refs or ()))
+
+
+@dataclass(frozen=True)
+class MediaQualityResult:
+    result_id: str
+    tenant_id: str
+    version_id: str
+    profile_id: str
+    passed: bool
+    issues: tuple[MediaQualityIssue, ...]
+    rights_status: str = RIGHTS_UNKNOWN
+    fidelity_review_required: bool = False
+    profile_version: str = QUALITY_PROFILE_VERSION
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "issues", tuple(self.issues or ()))
