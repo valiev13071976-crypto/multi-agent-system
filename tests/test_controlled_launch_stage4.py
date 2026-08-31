@@ -68,7 +68,7 @@ class Stage4HandoffTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(root=tmp)
             config = ValidationConfig(production_url="", release_identity="abc", environment="production")
-            gate = Stage3HandoffGate(config=config, evidence_store=store)
+            gate = Stage3HandoffGate(config=config, evidence_store=store, require_stage3_artifact=False)
             with self.assertRaises(ControlledLaunchError) as ctx:
                 gate.require_ready()
             self.assertEqual(ctx.exception.code, BLOCKED_BY_STAGE_3)
@@ -84,7 +84,7 @@ class Stage4HandoffTests(unittest.TestCase):
                 g = ReleaseEvidence.begin(gate=gate_name, environment="production", mode=ExecutionMode.LIVE_SAFE)
                 g.complete(status=GateStatus.PASS, classification=VerificationClass.LIVE_VERIFIED.value)
                 store.save(g)
-            gate = Stage3HandoffGate(config=config, evidence_store=store)
+            gate = Stage3HandoffGate(config=config, evidence_store=store, require_stage3_artifact=False)
             handoff = gate.evaluate()
             self.assertEqual(handoff.release_readiness, "READY")
             with self.assertRaises(ControlledLaunchError) as ctx:
@@ -278,7 +278,7 @@ class Stage4ServiceTests(unittest.TestCase):
         config = ValidationConfig(production_url="", release_identity="local-test", environment="local")
         self.svc = ControlledLaunchService(
             store=self.store,
-            handoff_gate=Stage3HandoffGate(config=config, evidence_store=empty_evidence),
+            handoff_gate=Stage3HandoffGate(config=config, evidence_store=empty_evidence, require_stage3_artifact=False),
         )
 
     def tearDown(self):

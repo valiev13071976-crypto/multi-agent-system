@@ -70,7 +70,7 @@ class Stage4PrerequisiteAuthoritativeTests(unittest.TestCase):
                 safe_metrics={"blocked_gates": [], "p0_count": 0, "p1_count": 0, "commit_sha": config.release_identity},
             )
             store.save(noisy)
-            gate = Stage3HandoffGate(config=config, evidence_store=store)
+            gate = Stage3HandoffGate(config=config, evidence_store=store, require_stage3_artifact=False)
             handoff = gate.evaluate()
             self.assertEqual(handoff.stage3_status, "CLOSED")
             self.assertEqual(handoff.release_readiness, "READY")
@@ -80,7 +80,7 @@ class Stage4PrerequisiteAuthoritativeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             store = EvidenceStore(root=tmp)
             config = ValidationConfig(production_url="", release_identity="x", environment="production")
-            gate = Stage3HandoffGate(config=config, evidence_store=store)
+            gate = Stage3HandoffGate(config=config, evidence_store=store, require_stage3_artifact=False)
             with self.assertRaises(ControlledLaunchError) as ctx:
                 gate.require_ready()
             self.assertEqual(ctx.exception.code, BLOCKED_BY_STAGE_3)
@@ -341,7 +341,7 @@ class Stage4ServiceIntegrationTests(unittest.TestCase):
         empty = EvidenceStore(root=str(Path(self._tmpdir.name) / "empty"))
         svc = ControlledLaunchService(
             store=SqliteControlledLaunchStore(),
-            handoff_gate=Stage3HandoffGate(config=self.config, evidence_store=empty),
+            handoff_gate=Stage3HandoffGate(config=self.config, evidence_store=empty, require_stage3_artifact=False),
         )
         with self.assertRaises(ControlledLaunchError) as ctx:
             svc.create_launch_policy(self.admin, release_identity="x", tenant_allowlist=["t"], created_by="ops")

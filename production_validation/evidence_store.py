@@ -9,9 +9,27 @@ from pathlib import Path
 from production_validation.models import ReleaseEvidence
 
 
+def resolve_release_evidence_root(env: dict | None = None) -> str:
+    """Resolve durable Stage-3/ongoing release evidence root.
+
+    Precedence:
+    1. PANDA_RELEASE_EVIDENCE_ROOT (explicit)
+    2. $PANDA_DATA_DIR/release_evidence (or DATA_DIR)
+    3. ./data/release_evidence (local fallback when no data dir)
+    """
+    source = env if env is not None else os.environ
+    explicit = str(source.get("PANDA_RELEASE_EVIDENCE_ROOT") or "").strip()
+    if explicit:
+        return explicit
+    data_dir = str(source.get("PANDA_DATA_DIR") or source.get("DATA_DIR") or "").strip()
+    if data_dir:
+        return os.path.join(data_dir, "release_evidence")
+    return os.path.join("data", "release_evidence")
+
+
 class EvidenceStore:
-    def __init__(self, *, root: str | None = None):
-        self.root = Path(root or os.environ.get("PANDA_RELEASE_EVIDENCE_ROOT") or "data/release_evidence")
+    def __init__(self, *, root: str | None = None, env: dict | None = None):
+        self.root = Path(root if root is not None else resolve_release_evidence_root(env))
         self.root.mkdir(parents=True, exist_ok=True)
         self._index_path = self.root / "index.jsonl"
 

@@ -88,7 +88,7 @@ class Stage5HandoffTests(unittest.TestCase):
             from controlled_launch.handoff import Stage3HandoffGate
 
             gate = Stage5HandoffGate(
-                stage3_gate=Stage3HandoffGate(config=config, evidence_store=store),
+                stage3_gate=Stage3HandoffGate(config=config, evidence_store=store, require_stage3_artifact=False),
                 require_stage4_artifact=False,
             )
             with self.assertRaises(ProductionActivationError) as ctx:
@@ -102,7 +102,7 @@ class Stage5HandoffTests(unittest.TestCase):
             from controlled_launch.handoff import Stage3HandoffGate
 
             gate = Stage5HandoffGate(
-                stage3_gate=Stage3HandoffGate(config=config, evidence_store=store),
+                stage3_gate=Stage3HandoffGate(config=config, evidence_store=store, require_stage3_artifact=False),
                 require_stage4_artifact=False,
             )
             self.assertEqual(gate.go_live_gate_result(candidate_id="lc-1"), "GO_LIVE_BLOCKED")
@@ -305,7 +305,7 @@ class Stage5ServiceTests(unittest.TestCase):
         self.svc = ProductionActivationService(
             store=self.store,
             handoff_gate=Stage5HandoffGate(
-                stage3_gate=Stage3HandoffGate(config=config, evidence_store=empty),
+                stage3_gate=Stage3HandoffGate(config=config, evidence_store=empty, require_stage3_artifact=False),
                 require_stage4_artifact=False,
             ),
         )
