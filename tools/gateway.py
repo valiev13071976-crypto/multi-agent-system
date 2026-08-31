@@ -69,6 +69,7 @@ from tools.models import (
 from tools.observability import ToolMetrics
 from tools.registry import ToolRegistry
 from tools.router import ToolRouter
+from tools.side_effect_semantics import enforce_side_effect_policy
 from tools.search.http_provider import SearchUnavailableError
 from tools.search.null_provider import NullSearchProvider
 from tools.trust import trust_for_domain
@@ -432,6 +433,7 @@ class ToolGateway:
                 raise ToolPolicyDeniedError("tool_policy_denied")
             if descriptor.trust_level == TOOL_TRUST_WRITE_EXTERNAL_IRREVERSIBLE:
                 raise ToolPolicyDeniedError("tool_policy_denied")
+            enforce_side_effect_policy(descriptor, request.operation)
             self.audit.record(
                 EVENT_TOOL_STARTED,
                 request_id=request.request_id,
