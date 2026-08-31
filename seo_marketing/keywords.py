@@ -126,16 +126,20 @@ def classify_intent(text: str, *, model_output: dict | None = None) -> tuple[str
 
 
 def cluster_keywords(keywords: list[Keyword], *, tenant_id: str, site_id: str) -> list[KeywordCluster]:
+    import hashlib
+
     buckets: dict[str, list[str]] = {}
     for kw in keywords:
         prefix = kw.normalized.split(" ")[0] if kw.normalized else "misc"
         buckets.setdefault(prefix, []).append(kw.keyword_id)
     clusters: list[KeywordCluster] = []
-    for label, kids in buckets.items():
+    for label, kids in sorted(buckets.items()):
         intent, trust, _ = classify_intent(label)
+        # Stable identity: hash(site + label) — reprocessing preserves cluster_id
+        stable = hashlib.sha256(f"{tenant_id}|{site_id}|{label}".encode("utf-8")).hexdigest()[:32]
         clusters.append(
             KeywordCluster(
-                cluster_id=str(uuid.uuid4()),
+                cluster_id=f"cl_{stable}",
                 tenant_id=tenant_id,
                 site_id=site_id,
                 label=label,

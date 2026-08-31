@@ -34,6 +34,7 @@ def capture_meta_snapshot(
     description: str,
     canonical: str = "",
     robots: str = "",
+    h1: str = "",
     source: str = "crawl",
 ) -> MetaSnapshot:
     issues: list[str] = []
@@ -41,6 +42,8 @@ def capture_meta_snapshot(
         issues.append("missing_title")
     if not description.strip():
         issues.append("missing_description")
+    if not str(h1 or "").strip():
+        issues.append("missing_h1")
     return MetaSnapshot(
         snapshot_id=str(uuid.uuid4()),
         tenant_id=tenant_id,

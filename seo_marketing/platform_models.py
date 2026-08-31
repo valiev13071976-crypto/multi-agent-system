@@ -294,3 +294,204 @@ class SeoJob:
     payload: dict
     created_at: str = field(default_factory=_utc)
     updated_at: str = field(default_factory=_utc)
+
+
+# --- Expansion contracts (closure) ---
+
+PLATFORM_SCHEMA_VERSION = "1.0.0"
+SEMANTIC_CORE_VERSION = "1.0.0"
+CWV_BUDGET_VERSION = "1.0.0"
+RANK_PROFILE_VERSION = "1.0.0"
+
+# SeoSite is the canonical SEO project/site identity (SEOProject equivalent).
+SEOProject = SeoSite
+
+PAGE_TYPE_HOME = "HOME"
+PAGE_TYPE_CATEGORY = "CATEGORY"
+PAGE_TYPE_PRODUCT = "PRODUCT"
+PAGE_TYPE_LANDING = "LANDING"
+PAGE_TYPE_ARTICLE = "ARTICLE"
+PAGE_TYPE_OTHER = "OTHER"
+PAGE_TYPE_UNKNOWN = "UNKNOWN"
+
+RANK_GAINED = "gained"
+RANK_LOST = "lost"
+RANK_IMPROVED = "improved"
+RANK_DECLINED = "declined"
+RANK_NEW = "new"
+RANK_DROPPED = "dropped"
+RANK_UNCHANGED = "unchanged"
+RANK_UNKNOWN = "unknown"
+
+OBSERVED_RANK = "OBSERVED_RANK"
+ESTIMATED_VISIBILITY = "ESTIMATED_VISIBILITY"
+INFERRED_OPPORTUNITY = "INFERRED_OPPORTUNITY"
+
+SEVERITY_CRITICAL = "CRITICAL"
+SEVERITY_HIGH = "HIGH"
+SEVERITY_MEDIUM = "MEDIUM"
+SEVERITY_LOW = "LOW"
+SEVERITY_INFO = "INFO"
+
+MAX_RECOMMENDATIONS = 50
+MAX_FEEDBACK_ACTIONS_PER_RUN = 1
+MAX_LLM_CLUSTER_SAMPLE = 20
+
+
+@dataclass(frozen=True)
+class SEOEvidence:
+    evidence_id: str
+    tenant_id: str
+    project_id: str
+    source_kind: str
+    source_ref: str
+    observed_at: str
+    payload_normalized: dict
+    trust_level: str
+    freshness: str = "current"
+    warnings: tuple[str, ...] = ()
+
+
+@dataclass
+class SemanticCore:
+    core_id: str
+    tenant_id: str
+    site_id: str
+    version: int
+    keyword_ids: tuple[str, ...]
+    cluster_ids: tuple[str, ...]
+    language: str
+    country: str
+    search_engine: str
+    source_period: str
+    generated_at: str = field(default_factory=_utc)
+    parent_version: int | None = None
+
+
+@dataclass
+class SEOContentBrief:
+    brief_id: str
+    tenant_id: str
+    site_id: str
+    target_page_id: str
+    page_type: str
+    primary_cluster_id: str
+    primary_keyword: str
+    supporting_keywords: tuple[str, ...]
+    intent: str
+    title_recommendation: str
+    h1_recommendation: str
+    meta_recommendation: str
+    topics: tuple[str, ...]
+    internal_link_suggestions: tuple[dict, ...]
+    product_facts_refs: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+    constraints: tuple[str, ...]
+    status: str = "DRAFT"
+    created_at: str = field(default_factory=_utc)
+
+
+@dataclass
+class RankObservation:
+    observation_id: str
+    tenant_id: str
+    site_id: str
+    keyword: str
+    page_url: str
+    position: float | None
+    search_engine: str
+    country: str
+    device: str
+    observed_at: str
+    provider: str
+    status: str  # OBSERVED_RANK | NOT_AVAILABLE
+    trust_level: str = TRUSTED_EXTERNAL
+
+
+@dataclass
+class SERPObservation:
+    observation_id: str
+    tenant_id: str
+    query: str
+    country: str
+    language: str
+    search_engine: str
+    observed_at: str
+    results: tuple[dict, ...]
+    provider: str
+    trust_level: str = TRUSTED_EXTERNAL
+
+
+@dataclass
+class CWVBudget:
+    budget_id: str
+    version: str
+    measurement_type: str  # LAB | FIELD
+    thresholds: dict  # metric -> limit
+    effective_at: str = field(default_factory=_utc)
+
+
+@dataclass
+class InternalLinkRecommendation:
+    recommendation_id: str
+    tenant_id: str
+    site_id: str
+    source_url: str
+    target_url: str
+    suggested_anchor: str
+    reason: str
+    confidence: float
+    status: str = "RECOMMENDATION_ONLY"
+
+
+@dataclass
+class StructuredDataFinding:
+    finding_id: str
+    url: str
+    schema_type: str
+    present: bool
+    issues: tuple[str, ...]
+    severity: str = SEVERITY_INFO
+
+
+@dataclass
+class SEOLearningSignal:
+    signal_id: str
+    tenant_id: str
+    site_id: str
+    what_changed: str
+    metric_moved: str
+    direction: str
+    confidence: str
+    limitations: tuple[str, ...]
+    evidence_refs: tuple[str, ...]
+    applicable_scope: str
+    created_at: str = field(default_factory=_utc)
+
+
+@dataclass
+class SEOChangeEvent:
+    change_id: str
+    tenant_id: str
+    site_id: str
+    page_id: str
+    change_type: str
+    before_ref: str
+    after_ref: str
+    approved_at: str
+    applied_at: str
+    source_tool: str
+    idempotency_key: str
+    experiment_ref: str = ""
+
+
+@dataclass
+class SEOActionPlan:
+    plan_id: str
+    tenant_id: str
+    site_id: str
+    version: int
+    recommendations: tuple[dict, ...]
+    status: str
+    measurement_window_days: int
+    created_at: str = field(default_factory=_utc)
