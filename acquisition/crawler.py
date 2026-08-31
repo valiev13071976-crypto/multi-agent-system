@@ -46,6 +46,7 @@ from acquisition.models import (
     new_id,
     utc_now,
 )
+from acquisition.robots import RobotsPolicy, make_robots_checker
 from acquisition.source_policy import SourcePolicy, evaluate_url, host_matches
 from tools.url_safety import UnsafeUrlError, validate_http_url
 
@@ -162,6 +163,7 @@ class ControlledCrawler:
         manager: AcquisitionManager,
         *,
         robots_allowed=None,
+        robots_policy: RobotsPolicy | None = None,
         store=None,
         fetch_fn: FetchFn | None = None,
         source_policy: SourcePolicy | None = None,
@@ -169,6 +171,7 @@ class ControlledCrawler:
     ):
         self.manager = manager
         self._robots_allowed = robots_allowed
+        self._robots_policy = robots_policy
         self.store = store
         self._fetch_fn = fetch_fn
         self.policy_engine = source_policy or SourcePolicy(robots_allowed=robots_allowed)
@@ -181,6 +184,13 @@ class ControlledCrawler:
             self.observer = get_observer()
         except Exception:
             self.observer = None
+
+    def _robots_for_tenant(self, tenant_id: str):
+        if self._robots_allowed is not None:
+            return self._robots_allowed
+        if self._robots_policy is not None:
+            return make_robots_checker(self._robots_policy, tenant_id)
+        return None
 
     def request_cancel(self, job_id: str) -> None:
         self._cancel_jobs.add(str(job_id))
@@ -502,6 +512,7 @@ class ControlledCrawler:
         pages_skipped = 0
         frontier_cache: dict[str, FrontierEntry] = {}
         observer = getattr(self, "observer", None)
+        robots_allowed = self._robots_for_tenant(tenant_id)
 
         if resume and self.store is not None:
             for entry in self._load_frontier(job_id, tenant_id):
@@ -537,7 +548,7 @@ class ControlledCrawler:
                 canon,
                 source=source if isinstance(source, SourceDefinition) else descriptor,
                 policy=policy,
-                robots_allowed=self._robots_allowed,
+                robots_allowed=robots_allowed,
             )
             if not decision.permitted:
                 raise AcquisitionDeniedError(f"seed_denied:{decision.reason}")
@@ -577,7 +588,7 @@ class ControlledCrawler:
                 url,
                 source=source if isinstance(source, SourceDefinition) else descriptor,
                 policy=policy,
-                robots_allowed=self._robots_allowed,
+                robots_allowed=robots_allowed,
             )
             if not decision.permitted:
                 pages_skipped += 1
@@ -789,7 +800,7 @@ class ControlledCrawler:
                         link,
                         source=source if isinstance(source, SourceDefinition) else descriptor,
                         policy=policy,
-                        robots_allowed=self._robots_allowed,
+                        robots_allowed=robots_allowed,
                     )
                     if not link_decision.permitted:
                         skipped.append(link)

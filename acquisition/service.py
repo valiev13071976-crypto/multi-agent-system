@@ -33,6 +33,7 @@ from acquisition.planner import AcquisitionPlanner, PlannedAcquisition
 from acquisition.registry import SourceRegistry
 from acquisition.schedule import AcquisitionScheduler
 from acquisition.scrape import ScrapePipeline, ScrapingProfile
+from acquisition.robots import RobotsPolicy, make_robots_checker
 from acquisition.source_policy import SourcePolicy
 from acquisition.store import AcquisitionStore, InMemoryAcquisitionStore
 from acquisition.trust import trust_weight
@@ -62,10 +63,14 @@ class AcquisitionService:
             tool_gateway=tool_gateway,
             store=self.store,
         )
+        self.robots = RobotsPolicy(fail_closed=False)
         self.policy = SourcePolicy()
         self.planner = AcquisitionPlanner(source_policy=self.policy)
         self.crawler = ControlledCrawler(
-            self.manager, store=self.store, source_policy=self.policy
+            self.manager,
+            store=self.store,
+            source_policy=self.policy,
+            robots_policy=self.robots,
         )
         self.scraper = ScrapePipeline(self.manager)
         self.pipeline = AcquisitionPipeline(service=self)
