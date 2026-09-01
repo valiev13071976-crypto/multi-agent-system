@@ -18,6 +18,8 @@ def _chat_upload_limit() -> int:
 def _effective_limit(path: str) -> int:
     if path.startswith("/api/chat/attachments") or path.startswith("/api/chat/voice/transcribe"):
         return _chat_upload_limit()
+    if path.startswith("/api/v1/voice/"):
+        return _chat_upload_limit()
     return max_request_body_bytes()
 
 

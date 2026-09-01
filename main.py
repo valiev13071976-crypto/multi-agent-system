@@ -253,6 +253,9 @@ from business_assistant_api.router import configure_business_assistant_api_route
 from telegram_interface.config import telegram_interface_enabled
 from telegram_interface.runtime import build_telegram_interface_runtime
 from telegram_interface.router import configure_telegram_interface_router
+from voice_interface.config import voice_interface_enabled
+from voice_interface.runtime import build_voice_interface_runtime
+from voice_interface.router import configure_voice_interface_router
 from ui_chat.runtime import build_ui_chat_runtime
 from ui_chat.router import configure_ui_chat_router
 from operations_admin.runtime import build_operations_admin_runtime
@@ -284,6 +287,9 @@ if telegram_interface_enabled():
         ba_api=ba_api_runtime.service,
         upload_dir=ba_api_runtime.upload_dir,
     )
+voice_interface_runtime = None
+if voice_interface_enabled():
+    voice_interface_runtime = build_voice_interface_runtime(ba_api=ba_api_runtime.service)
 ops_admin_runtime = build_operations_admin_runtime(
     side_effect_runtime=side_effect_runtime,
     router=router,
@@ -425,6 +431,8 @@ if tg_interface_runtime is not None:
             webhook_secret=tg_interface_runtime.webhook_secret,
         )
     )
+if voice_interface_runtime is not None:
+    app.include_router(configure_voice_interface_router(voice_interface_runtime.service))
 _stripe_provider = _production_bundle.billing_provider if getattr(_production_bundle.billing_provider, "name", "") == "stripe" else None
 app.include_router(
     configure_production_integration_router(
