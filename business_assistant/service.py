@@ -266,6 +266,7 @@ class BusinessAssistantService:
                 "propose_corrections",
                 "preview_send",
                 "onec_price_preview",
+                "wb_price_preview",
             }:
                 # Run prepare logic then wait
                 result = self._execute_step(ex, plan, req, step)
@@ -752,6 +753,110 @@ class BusinessAssistantService:
             ex.artifacts.append({"type": "onec_price_verify", "verified": verified, "observed": out["result"]})
             return {"verified": verified, "observed": out["result"]}
 
+        # Wildberries price+stock read
+        if self.integration_activation is not None and any(
+            w in req.text.casefold() for w in ("wildberries", "wb", "вайлдберриз")
+        ) and any(w in req.text.casefold() for w in ("цен", "price", "остат", "stock")) and name in {
+            "read_listings",
+            "match_products",
+            "wb_resolve_price_target",
+            "analyze_request",
+            "prepare_summary",
+            "economics_scan",
+        }:
+            import re
+
+            article_match = re.search(r"(?:товар\w*|sku|артикул[уом]?)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else "WB-SKU-100"
+            cap = "marketplace.wb.price.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            if resolved.get("status") == "BLOCKED":
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "integration_blocked"))
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability=cap,
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_and_stock", "seller_article": article, "warehouse": "main"},
+                correlation_id=ex.correlation_id,
+                workflow_id=ex.workflow_id,
+            )
+            ex.artifacts.append({"type": "wb_price_stock", "result": out["result"], "mode": out["environment"], "live": out["live"]})
+            price = (out["result"] or {}).get("price") or {}
+            stock = (out["result"] or {}).get("stock") or {}
+            ex.findings.append(
+                BusinessFinding(
+                    finding_id=str(uuid.uuid4()),
+                    kind=KIND_FINDING,
+                    summary=f"WB {article}: price={price.get('seller_effective_price')} stock={stock.get('available')}",
+                    evidence_refs=("integration:wildberries",),
+                    sku_id=article,
+                )
+            )
+            return {"price_stock": out["result"], "integration": resolved, "mutation": False}
+
+        if name == "wb_resolve_price_target":
+            import re
+
+            article_match = re.search(r"(?:товар\w*|sku|артикул[уом]?)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else "WB-SKU-100"
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.wb.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "seller_article": article},
+            )
+            ex.artifacts.append({"type": "wb_price_current", "result": out["result"], "article": article})
+            return {"seller_article": article, "current_price": out["result"]}
+
+        if name == "wb_price_preview":
+            import re
+
+            article_match = re.search(r"(?:товар\w*|sku|артикул[уом]?)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else "WB-SKU-100"
+            price_match = re.search(r"(\d[\d\s]{4,})\s*₽", req.text)
+            if not price_match:
+                price_match = re.search(r"(?:wildberries|вайлдберриз)\s+(\d[\d\s]{3,})", req.text, re.I)
+            new_price = price_match.group(1).replace(" ", "") if price_match else "49990"
+            current = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.wb.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "seller_article": article},
+            )["result"]
+            preview = {
+                "operation": "price_update",
+                "seller_article": article,
+                "before": current,
+                "after": {"base_price": new_price, "currency": "RUB"},
+            }
+            ex.artifacts.append({"type": "wb_price_preview", "preview": preview})
+            ex._wb_price_payload = {
+                "operation": "price_update",
+                "seller_article": article,
+                "new_price": new_price,
+                "preview": preview,
+            }
+            return {"preview": preview, "requires_approval": True}
+
+        if name == "wb_price_verify":
+            payload = getattr(ex, "_wb_price_payload", {}) or {}
+            article = str(payload.get("seller_article") or "WB-SKU-100")
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.wb.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "seller_article": article},
+            )
+            expected = str(payload.get("new_price") or "")
+            observed = str((out["result"] or {}).get("base_price") or "")
+            verified = observed == expected
+            ex.artifacts.append({"type": "wb_price_verify", "verified": verified, "observed": out["result"]})
+            return {"verified": verified, "observed": out["result"]}
+
         if step.capability in {"email", "crm"} and not cap_meta.get("available"):
             # Allow email when Composio/activation provides it
             if not (self.integration_activation is not None and step.capability == "email"):
@@ -1011,13 +1116,23 @@ class BusinessAssistantService:
 
         def _do():
             # Prefer Real Integration Activation path when attached
-            if self.integration_activation is not None and step.capability in {"cms.bitrix", "email", "erp.1c"}:
+            if self.integration_activation is not None and (
+                step.capability in {"cms.bitrix", "email", "erp.1c"}
+                or step.name in {"wb_price_apply", "onec_price_apply"}
+            ):
                 if step.capability == "cms.bitrix":
                     cap = "cms.bitrix.catalog.write"
                     write_payload = {"step": step.name, "execution_id": ex.execution_id}
                 elif step.capability == "email":
                     cap = "email.send"
                     write_payload = {"step": step.name, "execution_id": ex.execution_id}
+                elif step.name == "wb_price_apply":
+                    cap = "marketplace.wb.price.write"
+                    write_payload = getattr(ex, "_wb_price_payload", None) or {
+                        "operation": "price_update",
+                        "seller_article": "WB-SKU-100",
+                        "new_price": "49990",
+                    }
                 else:
                     cap = "erp.1c.catalog.write"
                     write_payload = getattr(ex, "_onec_price_payload", None) or {

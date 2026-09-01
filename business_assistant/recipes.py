@@ -22,6 +22,7 @@ from business_assistant.models import (
     RECIPE_GENERIC,
     RECIPE_MARKETPLACE_PROFIT,
     RECIPE_ONEC_PRICE,
+    RECIPE_WB_PRICE,
     RECIPE_PRODUCT_LAUNCH,
     RECIPE_SEO_REVIEW,
     RECIPE_SUPPLIER_PRICE,
@@ -134,6 +135,19 @@ def daily_report_steps() -> list[BusinessPlanStep]:
     ]
 
 
+def wb_price_steps(*, constraints: BusinessConstraint) -> list[BusinessPlanStep]:
+    steps = [
+        _step("w1", "wb_resolve_price_target", CAP_MARKETPLACE, STEP_READ),
+        _step("w2", "wb_price_preview", CAP_MARKETPLACE, STEP_PREPARE_WRITE, ("w1",), requires_approval=True, risk_level="HIGH"),
+    ]
+    if not constraints.read_only:
+        steps.append(
+            _step("w3", "wb_price_apply", CAP_MARKETPLACE, STEP_WRITE, ("w2",), requires_approval=True, risk_level="CRITICAL")
+        )
+        steps.append(_step("w4", "wb_price_verify", CAP_MARKETPLACE, STEP_VERIFY, ("w3",)))
+    return steps
+
+
 def onec_price_steps(*, constraints: BusinessConstraint) -> list[BusinessPlanStep]:
     steps = [
         _step("c1", "onec_resolve_price_target", CAP_ERP_1C, STEP_READ),
@@ -151,6 +165,8 @@ def select_recipe(intent: str, text: str, constraints: BusinessConstraint) -> st
     tl = (text or "").casefold()
     if any(w in tl for w in ("1с", "1c", "onec")) and any(w in tl for w in ("цен", "price", "стоим")):
         return RECIPE_ONEC_PRICE
+    if any(w in tl for w in ("wildberries", "wb", "вайлдберриз")) and any(w in tl for w in ("цен", "price", "стоим", "постав")):
+        return RECIPE_WB_PRICE
     if any(w in tl for w in ("договор", "document", "pdf", "docx", "сравни два")):
         return RECIPE_DOCUMENT_COMPARE
     if any(w in tl for w in ("письм", "email", "ответ поставщик", "перед отправкой")) and "прайс" not in tl:
@@ -191,6 +207,8 @@ def steps_for_recipe(recipe: str, *, constraints: BusinessConstraint, publish: b
         return daily_report_steps()
     if recipe == RECIPE_ONEC_PRICE:
         return onec_price_steps(constraints=constraints)
+    if recipe == RECIPE_WB_PRICE:
+        return wb_price_steps(constraints=constraints)
     return [
         _step("g1", "analyze_request", CAP_COMMERCE, STEP_ANALYZE),
         _step("g2", "prepare_summary", CAP_CONTENT, STEP_GENERATE, ("g1",)),

@@ -15,6 +15,8 @@ from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtu
 from integrations.bitrix.live_adapter import LiveBitrixAdapter
 from integrations.onec.fixture_adapter import OneCFixtureAdapter
 from integrations.onec.live_adapter import LiveOneCAdapter
+from integrations.wildberries.fixture_adapter import WildberriesFixtureAdapter
+from integrations.wildberries.live_adapter import LiveWildberriesAdapter
 from integrations.activation.errors import (
     IntegrationAuthFailedError,
     IntegrationCapabilityUnavailableError,
@@ -103,8 +105,10 @@ class IntegrationActivationService:
         self._adapters["aspro"] = self._aspro_fixture
         self._onec_fixture = OneCFixtureAdapter()
         self._adapters["onec"] = self._onec_fixture
+        self._wb_fixture = WildberriesFixtureAdapter()
+        self._adapters["wildberries"] = self._wb_fixture
         for pid in PROVIDER_CATALOG:
-            if pid not in {"composio", "bitrix", "aspro", "onec"}:
+            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries"}:
                 self._adapters[pid] = FixtureProviderAdapter(pid)
 
     # --- providers ---
@@ -690,6 +694,8 @@ class IntegrationActivationService:
             return LiveBitrixAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         if conn.environment == ENV_LIVE and conn.provider_id == "onec":
             return LiveOneCAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "wildberries":
+            return LiveWildberriesAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         return self._adapter_for_provider(conn.provider_id)
 
     def _resolve_secret(self, tenant_id: str, secret_ref: str) -> str | None:
