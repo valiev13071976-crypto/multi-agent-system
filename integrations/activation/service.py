@@ -15,6 +15,8 @@ from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtu
 from integrations.bitrix.live_adapter import LiveBitrixAdapter
 from integrations.onec.fixture_adapter import OneCFixtureAdapter
 from integrations.onec.live_adapter import LiveOneCAdapter
+from integrations.ozon.fixture_adapter import OzonFixtureAdapter
+from integrations.ozon.live_adapter import LiveOzonAdapter
 from integrations.wildberries.fixture_adapter import WildberriesFixtureAdapter
 from integrations.wildberries.live_adapter import LiveWildberriesAdapter
 from integrations.activation.errors import (
@@ -107,8 +109,10 @@ class IntegrationActivationService:
         self._adapters["onec"] = self._onec_fixture
         self._wb_fixture = WildberriesFixtureAdapter()
         self._adapters["wildberries"] = self._wb_fixture
+        self._ozon_fixture = OzonFixtureAdapter()
+        self._adapters["ozon"] = self._ozon_fixture
         for pid in PROVIDER_CATALOG:
-            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries"}:
+            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries", "ozon"}:
                 self._adapters[pid] = FixtureProviderAdapter(pid)
 
     # --- providers ---
@@ -696,6 +700,8 @@ class IntegrationActivationService:
             return LiveOneCAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         if conn.environment == ENV_LIVE and conn.provider_id == "wildberries":
             return LiveWildberriesAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "ozon":
+            return LiveOzonAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         return self._adapter_for_provider(conn.provider_id)
 
     def _resolve_secret(self, tenant_id: str, secret_ref: str) -> str | None:

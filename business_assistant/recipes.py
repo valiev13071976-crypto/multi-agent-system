@@ -22,6 +22,7 @@ from business_assistant.models import (
     RECIPE_GENERIC,
     RECIPE_MARKETPLACE_PROFIT,
     RECIPE_ONEC_PRICE,
+    RECIPE_OZON_PRICE,
     RECIPE_WB_PRICE,
     RECIPE_PRODUCT_LAUNCH,
     RECIPE_SEO_REVIEW,
@@ -135,6 +136,19 @@ def daily_report_steps() -> list[BusinessPlanStep]:
     ]
 
 
+def ozon_price_steps(*, constraints: BusinessConstraint) -> list[BusinessPlanStep]:
+    steps = [
+        _step("o1", "ozon_resolve_price_target", CAP_MARKETPLACE, STEP_READ),
+        _step("o2", "ozon_price_preview", CAP_MARKETPLACE, STEP_PREPARE_WRITE, ("o1",), requires_approval=True, risk_level="HIGH"),
+    ]
+    if not constraints.read_only:
+        steps.append(
+            _step("o3", "ozon_price_apply", CAP_MARKETPLACE, STEP_WRITE, ("o2",), requires_approval=True, risk_level="CRITICAL")
+        )
+        steps.append(_step("o4", "ozon_price_verify", CAP_MARKETPLACE, STEP_VERIFY, ("o3",)))
+    return steps
+
+
 def wb_price_steps(*, constraints: BusinessConstraint) -> list[BusinessPlanStep]:
     steps = [
         _step("w1", "wb_resolve_price_target", CAP_MARKETPLACE, STEP_READ),
@@ -165,6 +179,8 @@ def select_recipe(intent: str, text: str, constraints: BusinessConstraint) -> st
     tl = (text or "").casefold()
     if any(w in tl for w in ("1с", "1c", "onec")) and any(w in tl for w in ("цен", "price", "стоим")):
         return RECIPE_ONEC_PRICE
+    if any(w in tl for w in ("ozon", "озон")) and any(w in tl for w in ("цен", "price", "стоим", "постав")):
+        return RECIPE_OZON_PRICE
     if any(w in tl for w in ("wildberries", "wb", "вайлдберриз")) and any(w in tl for w in ("цен", "price", "стоим", "постав")):
         return RECIPE_WB_PRICE
     if any(w in tl for w in ("договор", "document", "pdf", "docx", "сравни два")):
@@ -207,6 +223,8 @@ def steps_for_recipe(recipe: str, *, constraints: BusinessConstraint, publish: b
         return daily_report_steps()
     if recipe == RECIPE_ONEC_PRICE:
         return onec_price_steps(constraints=constraints)
+    if recipe == RECIPE_OZON_PRICE:
+        return ozon_price_steps(constraints=constraints)
     if recipe == RECIPE_WB_PRICE:
         return wb_price_steps(constraints=constraints)
     return [
