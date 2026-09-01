@@ -593,6 +593,85 @@ class BusinessAssistantService:
         name = step.name
         cap_meta = self.capabilities.get(step.capability, {})
 
+        if self.integration_activation is not None and name == "crm_lead_read":
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="crm.lead.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "lead_read", "lead_id": "lead-1"},
+            )
+            ex.artifacts.append({"type": "crm_lead", "result": out["result"]})
+            return {"lead": out["result"], "mutation": False}
+
+        if self.integration_activation is not None and name == "crm_contact_read":
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="crm.contact.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "contact_read", "contact_id": "cnt-3"},
+            )
+            ex.artifacts.append({"type": "crm_contact", "result": out["result"]})
+            return {"contact": out["result"], "mutation": False}
+
+        if self.integration_activation is not None and name == "crm_lead_to_email_draft":
+            lead = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="crm.lead.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "lead_read", "lead_id": "lead-1"},
+            )["result"]
+            draft = {"to": [lead.get("email")], "subject": f"Follow up: {lead.get('title')}", "body": "CRM follow-up via Panda"}
+            ex._email_send_payload = {"operation": "send", **draft}
+            ex.artifacts.append({"type": "crm_to_email_draft", "lead": lead, "draft": draft})
+            return {"draft": draft, "orchestration": "crm→email", "mutation": False}
+
+        if self.integration_activation is not None and name == "crm_contact_to_calendar_prep":
+            contact = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="crm.contact.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "contact_read", "contact_id": "cnt-1"},
+            )["result"]
+            event_prep = {
+                "operation": "event_create",
+                "title": f"Meeting with {contact.get('name')}",
+                "start": "2026-03-01T14:00:00+03:00",
+                "end": "2026-03-01T15:00:00+03:00",
+                "timezone": "Europe/Moscow",
+                "attendees": [contact.get("email")],
+            }
+            ex._calendar_event_payload = event_prep
+            ex.artifacts.append({"type": "crm_to_calendar_prep", "contact": contact, "event_prep": event_prep})
+            return {"event_prep": event_prep, "orchestration": "crm→calendar", "mutation": False}
+
+        if self.integration_activation is not None and name == "email_to_crm_update_prep":
+            msg = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="email.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "message_read", "message_id": "msg-1001"},
+            )["result"]
+            update_prep = {"operation": "contact_update", "contact_id": "cnt-3", "patch": {"company": "Acme (from email)"}}
+            ex._crm_update_payload = update_prep
+            ex.artifacts.append({"type": "email_to_crm_prep", "message": msg, "update_prep": update_prep})
+            return {"update_prep": update_prep, "orchestration": "email→crm", "mutation": False}
+
+        if self.integration_activation is not None and name == "calendar_event_read":
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="calendar.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "event_list", "calendar_id": "cal-primary"},
+            )
+            ex.artifacts.append({"type": "calendar_events", "result": out["result"]})
+            return {"events": out["result"], "mutation": False}
+
         # Real Integration Activation: Ozon orders read path
         if self.integration_activation is not None and (
             "ozon" in req.text.casefold() or "заказ" in req.text.casefold()
@@ -1143,18 +1222,41 @@ class BusinessAssistantService:
             ex.artifacts.append({"type": "ozon_card_prepare", "payload": ex._ozon_card_payload})
             return {"prepared": True, "requires_approval": True}
 
+        if self.integration_activation is not None and step.capability == "email":
+            if name == "retrieve_email_context":
+                out = self.integration_activation.execute_via_gateway(
+                    tenant_id=ex.tenant_id,
+                    capability="email.read",
+                    environment=self.integration_environment,
+                    operation_class="READ",
+                    payload={"operation": "message_search", "query": ""},
+                )
+                ex.artifacts.append({"type": "email_search", "result": out["result"], "mode": out["environment"], "live": out["live"]})
+                msg = (out["result"] or {}).get("items") or []
+                if any("Ignore previous rules" in str(m.get("body", "")) for m in msg):
+                    ex.findings.append(
+                        BusinessFinding(
+                            finding_id=str(uuid.uuid4()),
+                            kind=KIND_FINDING,
+                            summary="Untrusted email content — no policy override",
+                            evidence_refs=("email:untrusted",),
+                        )
+                    )
+                return {"messages": out["result"], "mutation": False}
+            if name == "preview_send":
+                draft_payload = getattr(ex, "_email_send_payload", None) or {
+                    "operation": "send",
+                    "to": ["supplier@example.com"],
+                    "subject": "Reply",
+                    "body": "Draft prepared by Panda",
+                }
+                ex._email_send_payload = draft_payload
+                ex.artifacts.append({"type": "email_draft_preview", "preview": draft_payload, "sent": False})
+                return {"preview": draft_payload, "requires_approval": True, "sent": False}
+
         if step.capability in {"email", "crm"} and not cap_meta.get("available"):
-            # Allow email when Composio/activation provides it
             if not (self.integration_activation is not None and step.capability == "email"):
                 raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, step.capability)
-            if self.integration_activation is not None:
-                resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability="email.send" if "send" in name or "preview" in name else "email.read", operation_class="READ")
-                if name == "retrieve_email_context":
-                    if resolved.get("status") == "BLOCKED":
-                        raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "email"))
-                    return {"status": "OK", "integration": resolved, "mode": "FIXTURE"}
-                if name == "preview_send":
-                    return {"preview": True, "requires_approval": True, "integration": resolved}
 
         if name == "ingest_supplier_price":
             if len(self._fixture_rows) >= BATCH_ROW_THRESHOLD:
@@ -1403,15 +1505,31 @@ class BusinessAssistantService:
         def _do():
             # Prefer Real Integration Activation path when attached
             if self.integration_activation is not None and (
-                step.capability in {"cms.bitrix", "email", "erp.1c"}
-                or step.name in {"wb_price_apply", "onec_price_apply", "ozon_price_apply", "yandex_price_apply"}
+                step.capability in {"cms.bitrix", "email", "erp.1c", "calendar", "crm"}
+                or step.name in {"wb_price_apply", "onec_price_apply", "ozon_price_apply", "yandex_price_apply", "calendar_event_apply", "crm_contact_apply"}
             ):
                 if step.capability == "cms.bitrix":
                     cap = "cms.bitrix.catalog.write"
                     write_payload = {"step": step.name, "execution_id": ex.execution_id}
                 elif step.capability == "email":
                     cap = "email.send"
-                    write_payload = {"step": step.name, "execution_id": ex.execution_id}
+                    write_payload = getattr(ex, "_email_send_payload", None) or {"operation": "send", "to": ["supplier@example.com"], "subject": "Reply", "body": "Hello"}
+                elif step.name == "calendar_event_apply":
+                    cap = "calendar.event.create"
+                    write_payload = getattr(ex, "_calendar_event_payload", None) or {
+                        "operation": "event_create",
+                        "title": "Meeting",
+                        "start": "2026-03-01T14:00:00+03:00",
+                        "end": "2026-03-01T15:00:00+03:00",
+                        "timezone": "Europe/Moscow",
+                    }
+                elif step.name == "crm_contact_apply":
+                    cap = "crm.contact.write"
+                    write_payload = getattr(ex, "_crm_update_payload", None) or {
+                        "operation": "contact_update",
+                        "contact_id": "cnt-1",
+                        "patch": {"phone": "+79001111111"},
+                    }
                 elif step.name == "wb_price_apply":
                     cap = "marketplace.wb.price.write"
                     write_payload = getattr(ex, "_wb_price_payload", None) or {

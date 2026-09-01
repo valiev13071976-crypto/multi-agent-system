@@ -15,6 +15,12 @@ from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtu
 from integrations.bitrix.live_adapter import LiveBitrixAdapter
 from integrations.onec.fixture_adapter import OneCFixtureAdapter
 from integrations.onec.live_adapter import LiveOneCAdapter
+from integrations.crm.fixture_adapter import CrmFixtureAdapter
+from integrations.crm.live_adapter import LiveCrmAdapter
+from integrations.calendar.fixture_adapter import CalendarFixtureAdapter
+from integrations.calendar.live_adapter import LiveCalendarAdapter
+from integrations.email.fixture_adapter import EmailFixtureAdapter
+from integrations.email.live_adapter import LiveEmailAdapter
 from integrations.ozon.fixture_adapter import OzonFixtureAdapter
 from integrations.ozon.live_adapter import LiveOzonAdapter
 from integrations.wildberries.fixture_adapter import WildberriesFixtureAdapter
@@ -115,8 +121,14 @@ class IntegrationActivationService:
         self._adapters["ozon"] = self._ozon_fixture
         self._ym_fixture = YandexMarketFixtureAdapter()
         self._adapters["yandex_market"] = self._ym_fixture
+        self._email_fixture = EmailFixtureAdapter()
+        self._adapters["email"] = self._email_fixture
+        self._calendar_fixture = CalendarFixtureAdapter()
+        self._adapters["calendar"] = self._calendar_fixture
+        self._crm_fixture = CrmFixtureAdapter()
+        self._adapters["crm"] = self._crm_fixture
         for pid in PROVIDER_CATALOG:
-            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries", "ozon", "yandex_market"}:
+            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries", "ozon", "yandex_market", "email", "calendar", "crm"}:
                 self._adapters[pid] = FixtureProviderAdapter(pid)
 
     # --- providers ---
@@ -708,6 +720,12 @@ class IntegrationActivationService:
             return LiveOzonAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         if conn.environment == ENV_LIVE and conn.provider_id == "yandex_market":
             return LiveYandexMarketAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "email":
+            return LiveEmailAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "calendar":
+            return LiveCalendarAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "crm":
+            return LiveCrmAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         return self._adapter_for_provider(conn.provider_id)
 
     def _resolve_secret(self, tenant_id: str, secret_ref: str) -> str | None:

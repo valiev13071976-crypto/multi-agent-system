@@ -110,10 +110,10 @@ EMAIL = IntegrationProvider(
     provider_id="email",
     provider_type="productivity",
     display_name="Email",
-    capabilities=("email", "email.send", "email.read"),
+    capabilities=("email", "email.send", "email.read", "email.draft.write"),
     auth_types=(AUTH_OAUTH2, AUTH_API_KEY),
     read_capabilities=("email", "email.read"),
-    write_capabilities=("email.send",),
+    write_capabilities=("email.draft.write", "email.send"),
     adapter_id="email",
 )
 
@@ -121,10 +121,18 @@ CALENDAR = IntegrationProvider(
     provider_id="calendar",
     provider_type="productivity",
     display_name="Calendar",
-    capabilities=("calendar", "calendar.read", "calendar.write"),
+    capabilities=(
+        "calendar",
+        "calendar.read",
+        "calendar.availability.read",
+        "calendar.event.create",
+        "calendar.event.update",
+        "calendar.event.cancel",
+        "calendar.write",
+    ),
     auth_types=(AUTH_OAUTH2,),
-    read_capabilities=("calendar", "calendar.read"),
-    write_capabilities=("calendar.write",),
+    read_capabilities=("calendar", "calendar.read", "calendar.availability.read"),
+    write_capabilities=("calendar.event.create", "calendar.event.update", "calendar.event.cancel", "calendar.write"),
     adapter_id="calendar",
 )
 
@@ -132,10 +140,19 @@ CRM = IntegrationProvider(
     provider_id="crm",
     provider_type="crm",
     display_name="CRM",
-    capabilities=("crm", "crm.read", "crm.write"),
+    capabilities=(
+        "crm",
+        "crm.read",
+        "crm.contact.read",
+        "crm.contact.write",
+        "crm.lead.read",
+        "crm.deal.read",
+        "crm.activity.write",
+        "crm.write",
+    ),
     auth_types=(AUTH_OAUTH2, AUTH_API_KEY),
-    read_capabilities=("crm", "crm.read"),
-    write_capabilities=("crm.write",),
+    read_capabilities=("crm", "crm.read", "crm.contact.read", "crm.lead.read", "crm.deal.read"),
+    write_capabilities=("crm.contact.write", "crm.activity.write", "crm.write"),
     adapter_id="crm",
 )
 
