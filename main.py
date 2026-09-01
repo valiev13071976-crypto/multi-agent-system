@@ -248,6 +248,8 @@ if workflow_runtime is not None:
     workflow_runtime.platform.register_handler(STEP_TYPE_HANDLER, _default_handler)
     workflow_runtime.platform.register_handler(STEP_TYPE_BRANCH, _default_handler)
 
+from business_assistant_api.runtime import build_business_assistant_api_runtime
+from business_assistant_api.router import configure_business_assistant_api_router
 from ui_chat.runtime import build_ui_chat_runtime
 from ui_chat.router import configure_ui_chat_router
 from operations_admin.runtime import build_operations_admin_runtime
@@ -272,6 +274,7 @@ ui_chat_runtime = build_ui_chat_runtime(
     production_bundle=_production_bundle,
 )
 saas_runtime = build_saas_product_runtime(finops=getattr(router, "finops", None), production_bundle=_production_bundle)
+ba_api_runtime = build_business_assistant_api_runtime()
 ops_admin_runtime = build_operations_admin_runtime(
     side_effect_runtime=side_effect_runtime,
     router=router,
@@ -403,6 +406,7 @@ app.add_middleware(PublicRateLimitMiddleware)
 app.include_router(configure_ui_chat_router(ui_chat_runtime.service))
 app.include_router(configure_operations_admin_router(ops_admin_runtime.service, ops_admin_runtime.policy))
 app.include_router(configure_saas_product_router(saas_runtime.service))
+app.include_router(configure_business_assistant_api_router(ba_api_runtime.service))
 _stripe_provider = _production_bundle.billing_provider if getattr(_production_bundle.billing_provider, "name", "") == "stripe" else None
 app.include_router(
     configure_production_integration_router(
