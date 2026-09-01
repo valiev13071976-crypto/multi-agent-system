@@ -406,7 +406,9 @@ app.add_middleware(PublicRateLimitMiddleware)
 app.include_router(configure_ui_chat_router(ui_chat_runtime.service))
 app.include_router(configure_operations_admin_router(ops_admin_runtime.service, ops_admin_runtime.policy))
 app.include_router(configure_saas_product_router(saas_runtime.service))
-app.include_router(configure_business_assistant_api_router(ba_api_runtime.service))
+app.include_router(
+    configure_business_assistant_api_router(ba_api_runtime.service, upload_dir=ba_api_runtime.upload_dir)
+)
 _stripe_provider = _production_bundle.billing_provider if getattr(_production_bundle.billing_provider, "name", "") == "stripe" else None
 app.include_router(
     configure_production_integration_router(
@@ -972,6 +974,12 @@ async def resume_workflow(
     include_in_schema=False,
 )
 async def home() -> str:
+    with open("static/panda/index.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/legacy-chat", response_class=HTMLResponse, include_in_schema=False)
+async def legacy_chat_ui() -> str:
     with open("static/chat/index.html", encoding="utf-8") as fh:
         return fh.read()
 

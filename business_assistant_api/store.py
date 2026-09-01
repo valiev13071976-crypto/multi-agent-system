@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 from business_assistant_api.models import (
@@ -266,6 +267,47 @@ class SqliteBusinessAssistantApiStore:
             created_at=row["created_at"],
             updated_at=row["updated_at"],
             metadata=json.loads(row["metadata_json"] or "{}"),
+        )
+
+    def list_conversations(self, *, tenant_id: str, owner_id: str, limit: int = 50) -> list[ConversationRecord]:
+        rows = self._conn.execute(
+            """
+            SELECT * FROM ba_api_conversations
+            WHERE tenant_id=? AND owner_id=?
+            ORDER BY updated_at DESC LIMIT ?
+            """,
+            (tenant_id, owner_id, limit),
+        ).fetchall()
+        return [
+            ConversationRecord(
+                conversation_id=r["conversation_id"],
+                tenant_id=r["tenant_id"],
+                owner_id=r["owner_id"],
+                created_at=r["created_at"],
+                updated_at=r["updated_at"],
+                metadata=json.loads(r["metadata_json"] or "{}"),
+            )
+            for r in rows
+        ]
+
+    def touch_conversation(
+        self, *, conversation_id: str, tenant_id: str, owner_id: str, title: str | None = None
+    ) -> None:
+        row = self.get_conversation(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
+        if not row:
+            return
+        meta = dict(row.metadata)
+        if title:
+            meta["title"] = title
+        self.save_conversation(
+            ConversationRecord(
+                conversation_id=row.conversation_id,
+                tenant_id=row.tenant_id,
+                owner_id=row.owner_id,
+                created_at=row.created_at,
+                updated_at=datetime.now(timezone.utc).isoformat(),
+                metadata=meta,
+            )
         )
 
     def save_message(self, msg: MessageRecord) -> None:

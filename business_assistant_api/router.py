@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 
 from business_assistant_api.errors import BusinessAssistantApiError
@@ -16,11 +16,15 @@ from security.rbac import PERM_ANALYZE_EXECUTE, PERM_HITL_APPROVE, PERM_WORKFLOW
 
 _router = APIRouter(prefix=f"/api/{API_VERSION}/business-assistant", tags=["business-assistant"])
 _service: BusinessAssistantApiService | None = None
+_upload_dir: str = ""
 
 
-def configure_business_assistant_api_router(service: BusinessAssistantApiService) -> APIRouter:
-    global _service
+def configure_business_assistant_api_router(
+    service: BusinessAssistantApiService, *, upload_dir: str = ""
+) -> APIRouter:
+    global _service, _upload_dir
     _service = service
+    _upload_dir = upload_dir or getattr(service, "upload_dir", "")
     return _router
 
 
@@ -97,6 +101,112 @@ def _summary(rec) -> RequestSummaryResponse:
         approval_id=rec.approval_id,
         preview_id=rec.preview_id,
         conversation_id=rec.conversation_id,
+    )
+
+
+class ConversationResponse(BaseModel):
+    conversation_id: str
+    title: str
+    created_at: str
+    updated_at: str
+
+
+class MessageItemResponse(BaseModel):
+    message_id: str
+    role: str
+    content: str
+    request_id: str = ""
+    created_at: str
+    artifact_refs: list[str] = Field(default_factory=list)
+
+
+class UploadResponse(BaseModel):
+    artifact_ref: str
+    filename: str
+    size_bytes: int
+    mime_type: str
+
+
+class CreateConversationBody(BaseModel):
+    title: str | None = Field(default=None, max_length=200)
+
+
+@_router.get("/conversations", response_model=list[ConversationResponse])
+async def list_conversations(
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
+    return [
+        ConversationResponse(**c)
+        for c in _svc().list_conversations(tenant_id=ctx.tenant_id, owner_id=ctx.user_id)
+    ]
+
+
+@_router.post("/conversations", response_model=ConversationResponse)
+async def create_conversation(
+    body: CreateConversationBody | None,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_ANALYZE_EXECUTE)
+    conv = _svc().create_conversation(
+        tenant_id=ctx.tenant_id,
+        owner_id=ctx.user_id,
+        title=(body.title if body and body.title else "New chat"),
+    )
+    return ConversationResponse(
+        conversation_id=conv.conversation_id,
+        title=str(conv.metadata.get("title") or "New chat"),
+        created_at=conv.created_at,
+        updated_at=conv.updated_at,
+    )
+
+
+@_router.get("/conversations/{conversation_id}/messages", response_model=list[MessageItemResponse])
+async def list_conversation_messages(
+    conversation_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
+    try:
+        msgs = _svc().get_conversation_messages(
+            tenant_id=ctx.tenant_id, owner_id=ctx.user_id, conversation_id=conversation_id
+        )
+    except BusinessAssistantApiError as exc:
+        raise _err(exc) from exc
+    return [MessageItemResponse(**m) for m in msgs]
+
+
+@_router.post("/attachments", response_model=UploadResponse)
+async def upload_attachment(
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+    file: UploadFile = File(...),
+):
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_ANALYZE_EXECUTE)
+    data = await file.read()
+    try:
+        out = _svc().upload_attachment(
+            tenant_id=ctx.tenant_id,
+            owner_id=ctx.user_id,
+            filename=file.filename or "upload.bin",
+            content=data,
+            mime_type=file.content_type or "application/octet-stream",
+            upload_base_dir=_upload_dir,
+        )
+    except BusinessAssistantApiError as exc:
+        raise _err(exc) from exc
+    return UploadResponse(
+        artifact_ref=out["artifact_ref"],
+        filename=out["filename"],
+        size_bytes=out["size_bytes"],
+        mime_type=out["mime_type"],
     )
 
 

@@ -304,8 +304,12 @@ class UIChatHTTPTests(unittest.TestCase):
     def test_home_serves_chat_ui(self):
         r = self.client.get("/")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("Panda Chat", r.text)
-        self.assertIn("/static/chat/chat.js", r.text)
+        self.assertIn("Panda", r.text)
+        self.assertIn("/static/panda/js/app.js", r.text)
+        legacy = self.client.get("/legacy-chat")
+        self.assertEqual(legacy.status_code, 200)
+        self.assertIn("Panda Chat", legacy.text)
+        self.assertIn("/static/chat/chat.js", legacy.text)
 
     def test_static_chat_js_served(self):
         r = self.client.get("/static/chat/chat.js")

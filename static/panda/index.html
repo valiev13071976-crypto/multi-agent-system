@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panda — Business Assistant</title>
+  <link rel="stylesheet" href="/static/panda/panda.css">
+</head>
+<body>
+  <div id="auth-gate" class="auth-gate hidden" role="dialog" aria-labelledby="auth-title">
+    <div class="auth-card">
+      <h1 id="auth-title">Sign in to Panda</h1>
+      <p class="muted">Use your workspace API key. Keys are kept in this browser session only.</p>
+      <label for="api-key-input">API key</label>
+      <input id="api-key-input" type="password" autocomplete="off" aria-required="true">
+      <p id="auth-error" class="error-text" role="alert"></p>
+      <button id="auth-submit" type="button">Continue</button>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <aside id="sidebar" class="sidebar" aria-label="Conversations">
+      <header class="sidebar-header">
+        <div class="brand">Panda</div>
+        <button id="new-chat-btn" type="button">New Chat</button>
+      </header>
+      <div id="conv-loading" class="empty-state hidden">Loading conversations…</div>
+      <div id="conv-empty" class="empty-state hidden">No conversations yet</div>
+      <ul id="conversation-list" class="conversation-list" role="list"></ul>
+      <footer class="sidebar-footer">
+        <div id="account-label" class="account-label"></div>
+        <button id="logout-btn" type="button">Sign out</button>
+        <a href="/product" class="account-link">Account settings</a>
+      </footer>
+    </aside>
+
+    <main class="main" aria-label="Business assistant workspace">
+      <header class="main-header">
+        <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Toggle sidebar">☰</button>
+        <h2 id="chat-title">New chat</h2>
+        <span id="request-status" class="status-pill" role="status" aria-live="polite"></span>
+      </header>
+
+      <section id="timeline" class="timeline" role="log" aria-live="polite"></section>
+
+      <section id="progress-panel" class="panel hidden" aria-label="Execution progress">
+        <h3>Progress</h3>
+        <ul id="progress-list"></ul>
+      </section>
+
+      <section id="plan-panel" class="panel hidden" aria-label="Plan summary">
+        <details>
+          <summary>Plan</summary>
+          <div id="plan-content"></div>
+        </details>
+      </section>
+
+      <section id="approval-panel" class="approval-card hidden" aria-label="Approval required">
+        <h3>Approval required</h3>
+        <div id="preview-content"></div>
+        <div class="approval-actions">
+          <button id="approve-btn" type="button" class="primary">Approve</button>
+          <button id="reject-btn" type="button" class="danger">Reject</button>
+          <button id="cancel-btn" type="button">Cancel request</button>
+        </div>
+      </section>
+
+      <section id="result-panel" class="panel hidden" aria-label="Result">
+        <h3>Result</h3>
+        <div id="result-content"></div>
+        <div id="artifact-list" class="artifact-list"></div>
+      </section>
+
+      <footer class="composer">
+        <div id="attachment-chips" class="attachment-chips" aria-label="Attachments"></div>
+        <div class="composer-row">
+          <label class="file-label" aria-label="Attach file">
+            📎
+            <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
+          </label>
+          <textarea id="composer-input" rows="1" placeholder="Ask Panda to analyze, prepare, or publish…" aria-label="Message"></textarea>
+          <button id="send-btn" type="button" class="primary">Send</button>
+        </div>
+        <p id="composer-error" class="error-text" role="alert"></p>
+      </footer>
+    </main>
+  </div>
+
+  <script src="/static/panda/js/sanitize.js"></script>
+  <script src="/static/panda/js/api-client.js"></script>
+  <script src="/static/panda/js/components.js"></script>
+  <script src="/static/panda/js/app.js"></script>
+</body>
+</html>

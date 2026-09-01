@@ -17,6 +17,7 @@ from marketplace.service import MarketplacePlatformService
 class BusinessAssistantApiRuntime:
     service: BusinessAssistantApiService
     store: SqliteBusinessAssistantApiStore
+    upload_dir: str
 
     def close(self) -> None:
         self.service.close()
@@ -32,6 +33,10 @@ def build_business_assistant_api_runtime(
     path = db_path or env.get("BA_API_DB_PATH") or os.path.join(
         os.environ.get("PANDA_DATA_DIR", "."), "ba_api.sqlite"
     )
+    upload_dir = env.get("BA_API_UPLOAD_DIR") or os.path.join(
+        os.environ.get("PANDA_DATA_DIR", "."), "ba_uploads"
+    )
+    os.makedirs(upload_dir, exist_ok=True)
     store = SqliteBusinessAssistantApiStore(path)
     activation = IntegrationActivationService() if with_integration else None
     ba = BusinessAssistantService(
@@ -40,4 +45,5 @@ def build_business_assistant_api_runtime(
         integration_environment=ENV_FIXTURE,
     )
     svc = BusinessAssistantApiService(store=store, ba_service=ba)
-    return BusinessAssistantApiRuntime(service=svc, store=store)
+    svc.upload_dir = upload_dir
+    return BusinessAssistantApiRuntime(service=svc, store=store, upload_dir=upload_dir)

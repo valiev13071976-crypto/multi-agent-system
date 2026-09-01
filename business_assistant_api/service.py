@@ -129,6 +129,7 @@ class BusinessAssistantApiService:
     ):
         self.store = store
         self.ba = ba_service or BusinessAssistantService()
+        self.upload_dir = ""
 
     def close(self) -> None:
         self.store.close()
@@ -179,6 +180,13 @@ class BusinessAssistantApiService:
         if norm.conversation_id:
             self._append_message(
                 tenant, norm.conversation_id, role="user", content=norm.message, request_id=request_id
+            )
+            title = norm.message[:80].strip() or "Conversation"
+            self.store.touch_conversation(
+                conversation_id=norm.conversation_id,
+                tenant_id=tenant,
+                owner_id=owner_id,
+                title=title,
             )
         rec = ApiRequestRecord(
             request_id=request_id,
@@ -242,6 +250,9 @@ class BusinessAssistantApiService:
                     role="assistant",
                     content=self._safe_summary(rec),
                     request_id=request_id,
+                )
+                self.store.touch_conversation(
+                    conversation_id=norm.conversation_id, tenant_id=tenant, owner_id=owner_id
                 )
             return rec
         except BusinessAssistantError as exc:
@@ -434,6 +445,78 @@ class BusinessAssistantApiService:
     def reload_from_store(self) -> "BusinessAssistantApiService":
         """Create fresh BA service hydrated from empty — per-request hydration on access."""
         return BusinessAssistantApiService(store=self.store, ba_service=BusinessAssistantService())
+
+    def create_conversation(self, *, tenant_id: str, owner_id: str, title: str = "New chat") -> ConversationRecord:
+        tenant = require_tenant_id(tenant_id)
+        cid = str(uuid.uuid4())
+        now = _utc_iso()
+        conv = ConversationRecord(
+            conversation_id=cid,
+            tenant_id=tenant,
+            owner_id=owner_id,
+            created_at=now,
+            updated_at=now,
+            metadata={"title": title[:200]},
+        )
+        self.store.save_conversation(conv)
+        return conv
+
+    def list_conversations(self, *, tenant_id: str, owner_id: str, limit: int = 50) -> list[dict]:
+        rows = self.store.list_conversations(tenant_id=require_tenant_id(tenant_id), owner_id=owner_id, limit=limit)
+        return [
+            {
+                "conversation_id": c.conversation_id,
+                "title": str(c.metadata.get("title") or "Conversation"),
+                "created_at": c.created_at,
+                "updated_at": c.updated_at,
+            }
+            for c in rows
+        ]
+
+    def get_conversation_messages(self, *, tenant_id: str, owner_id: str, conversation_id: str) -> list[dict]:
+        conv = self.store.get_conversation(
+            tenant_id=require_tenant_id(tenant_id), owner_id=owner_id, conversation_id=conversation_id
+        )
+        if conv is None:
+            raise BusinessAssistantApiError(BAA_NOT_FOUND, http_status=404)
+        msgs = self.store.list_messages(tenant_id=tenant_id, conversation_id=conversation_id)
+        return [
+            {
+                "message_id": m.message_id,
+                "role": m.role,
+                "content": m.content,
+                "request_id": m.request_id,
+                "created_at": m.created_at,
+                "artifact_refs": list(m.artifact_refs),
+            }
+            for m in msgs
+        ]
+
+    def upload_attachment(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        filename: str,
+        content: bytes,
+        mime_type: str,
+        upload_base_dir: str,
+    ) -> dict:
+        from business_assistant_api.uploads import save_upload
+
+        try:
+            return save_upload(
+                base_dir=upload_base_dir,
+                tenant_id=require_tenant_id(tenant_id),
+                owner_id=owner_id,
+                filename=filename,
+                content=content,
+                mime_type=mime_type,
+            )
+        except ValueError as exc:
+            code = str(exc)
+            status = 413 if "too_large" in code else 422
+            raise BusinessAssistantApiError(code, http_status=status) from exc
 
     # --- internals ---
 
