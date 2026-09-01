@@ -59,7 +59,7 @@ class FixtureProviderAdapter:
             return {"status": "UNHEALTHY", "error_category": "INTEGRATION_AUTH_FAILED"}
         return {"status": "HEALTHY", "error_category": ""}
 
-    def read(self, *, capability: str, params: dict | None = None) -> dict:
+    def read(self, *, capability: str, params: dict | None = None, tenant_id: str = "", credential_ref: str = "") -> dict:
         self._raise_if_bad()
         params = params or {}
         page = int(params.get("page") or 1)
@@ -78,7 +78,7 @@ class FixtureProviderAdapter:
             "live": False,
         }
 
-    def write(self, *, capability: str, payload: dict, idempotency_key: str) -> dict:
+    def write(self, *, capability: str, payload: dict, idempotency_key: str, tenant_id: str = "", credential_ref: str = "") -> dict:
         self._raise_if_bad()
         if idempotency_key in self.state.writes:
             return {**self.state.writes[idempotency_key], "idempotent": True}

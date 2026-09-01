@@ -616,6 +616,41 @@ class BusinessAssistantService:
             )
             return {"orders": out["result"], "integration": resolved, "mutation": False}
 
+        # Real Integration Activation: Bitrix product read by article
+        if self.integration_activation is not None and (
+            "bitrix" in req.text.casefold() or "битрикс" in req.text.casefold()
+        ) and name in {"read_listings", "match_products", "prepare_content"}:
+            import re
+
+            article_match = re.search(r"(?:артикул[уом]?|sku)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else ""
+            cap = "cms.bitrix.catalog.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            if resolved.get("status") == "BLOCKED":
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "integration_blocked"))
+            payload = {"operation": "product_lookup", "article": article} if article else {"page": 1}
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability=cap,
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload=payload,
+                correlation_id=ex.correlation_id,
+                workflow_id=ex.workflow_id,
+            )
+            ex.artifacts.append({"type": "bitrix_product", "result": out["result"], "mode": out["environment"], "live": out["live"]})
+            product = out["result"].get("product") or {}
+            ex.findings.append(
+                BusinessFinding(
+                    finding_id=str(uuid.uuid4()),
+                    kind=KIND_FINDING,
+                    summary=f"Bitrix product: {product.get('name') or 'catalog'} ({product.get('article') or 'list'})",
+                    evidence_refs=("integration:bitrix",),
+                    sku_id=str(product.get("article") or ""),
+                )
+            )
+            return {"product": out["result"], "integration": resolved, "mutation": False}
+
         if step.capability in {"email", "crm"} and not cap_meta.get("available"):
             # Allow email when Composio/activation provides it
             if not (self.integration_activation is not None and step.capability == "email"):

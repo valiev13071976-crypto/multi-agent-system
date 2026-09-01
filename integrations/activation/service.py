@@ -11,6 +11,8 @@ from security.tenant import require_tenant_id
 
 from integrations.activation.adapters import FixtureAdapterState, FixtureProviderAdapter
 from integrations.activation.composio import ComposioFixtureAdapter
+from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtureAdapter
+from integrations.bitrix.live_adapter import LiveBitrixAdapter
 from integrations.activation.errors import (
     IntegrationAuthFailedError,
     IntegrationCapabilityUnavailableError,
@@ -93,8 +95,12 @@ class IntegrationActivationService:
         self._usage: list[dict] = []
         self._composio = ComposioFixtureAdapter()
         self._adapters["composio"] = self._composio
+        self._bitrix_fixture = BitrixFixtureAdapter()
+        self._aspro_fixture = AsproFixtureAdapter()
+        self._adapters["bitrix"] = self._bitrix_fixture
+        self._adapters["aspro"] = self._aspro_fixture
         for pid in PROVIDER_CATALOG:
-            if pid != "composio":
+            if pid not in {"composio", "bitrix", "aspro"}:
                 self._adapters[pid] = FixtureProviderAdapter(pid)
 
     # --- providers ---
@@ -519,6 +525,7 @@ class IntegrationActivationService:
 
         adapter = self._adapter_for(resolved.connection)
         started = _utc()
+        cred_ref = resolved.connection.credential_ref
         try:
             if operation_class == OP_WRITE:
                 if not approved_write:
@@ -529,9 +536,16 @@ class IntegrationActivationService:
                     capability=capability,
                     payload=payload or {},
                     idempotency_key=idempotency_key,
+                    tenant_id=tenant_id,
+                    credential_ref=cred_ref,
                 )
             else:
-                result = adapter.read(capability=capability, params={"page": page, **(payload or {})})
+                result = adapter.read(
+                    capability=capability,
+                    params={"page": page, **(payload or {})},
+                    tenant_id=tenant_id,
+                    credential_ref=cred_ref,
+                )
         except Exception as exc:
             category = getattr(exc, "code", type(exc).__name__)
             self._emit(
@@ -668,7 +682,12 @@ class IntegrationActivationService:
     # --- internals ---
 
     def _adapter_for(self, conn: IntegrationConnection) -> FixtureProviderAdapter:
+        if conn.environment == ENV_LIVE and conn.provider_id in {"bitrix", "aspro"}:
+            return LiveBitrixAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         return self._adapter_for_provider(conn.provider_id)
+
+    def _resolve_secret(self, tenant_id: str, secret_ref: str) -> str | None:
+        return self._secret_values.get((tenant_id, secret_ref))
 
     def _adapter_for_provider(self, provider_id: str) -> FixtureProviderAdapter:
         if provider_id not in self._adapters:
