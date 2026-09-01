@@ -19,6 +19,8 @@ from integrations.ozon.fixture_adapter import OzonFixtureAdapter
 from integrations.ozon.live_adapter import LiveOzonAdapter
 from integrations.wildberries.fixture_adapter import WildberriesFixtureAdapter
 from integrations.wildberries.live_adapter import LiveWildberriesAdapter
+from integrations.yandex_market.fixture_adapter import YandexMarketFixtureAdapter
+from integrations.yandex_market.live_adapter import LiveYandexMarketAdapter
 from integrations.activation.errors import (
     IntegrationAuthFailedError,
     IntegrationCapabilityUnavailableError,
@@ -111,8 +113,10 @@ class IntegrationActivationService:
         self._adapters["wildberries"] = self._wb_fixture
         self._ozon_fixture = OzonFixtureAdapter()
         self._adapters["ozon"] = self._ozon_fixture
+        self._ym_fixture = YandexMarketFixtureAdapter()
+        self._adapters["yandex_market"] = self._ym_fixture
         for pid in PROVIDER_CATALOG:
-            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries", "ozon"}:
+            if pid not in {"composio", "bitrix", "aspro", "onec", "wildberries", "ozon", "yandex_market"}:
                 self._adapters[pid] = FixtureProviderAdapter(pid)
 
     # --- providers ---
@@ -702,6 +706,8 @@ class IntegrationActivationService:
             return LiveWildberriesAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         if conn.environment == ENV_LIVE and conn.provider_id == "ozon":
             return LiveOzonAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "yandex_market":
+            return LiveYandexMarketAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         return self._adapter_for_provider(conn.provider_id)
 
     def _resolve_secret(self, tenant_id: str, secret_ref: str) -> str | None:

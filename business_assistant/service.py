@@ -268,6 +268,7 @@ class BusinessAssistantService:
                 "onec_price_preview",
                 "wb_price_preview",
                 "ozon_price_preview",
+                "yandex_price_preview",
             }:
                 # Run prepare logic then wait
                 result = self._execute_step(ex, plan, req, step)
@@ -993,6 +994,141 @@ class BusinessAssistantService:
             ex.artifacts.append({"type": "ozon_price_verify", "verified": verified, "observed": out["result"]})
             return {"verified": verified, "observed": out["result"]}
 
+        # Yandex Market price+stock read
+        if self.integration_activation is not None and any(
+            w in req.text.casefold() for w in ("яндекс", "yandex")
+        ) and any(w in req.text.casefold() for w in ("цен", "price", "остат", "stock")) and name in {
+            "read_listings",
+            "match_products",
+            "yandex_resolve_price_target",
+            "analyze_request",
+            "prepare_summary",
+            "economics_scan",
+        }:
+            import re
+
+            sku_match = re.search(r"(?:товар\w*|sku|артикул[уом]?|offer)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            shop_sku = sku_match.group(1) if sku_match else "YM-SKU-100"
+            cap = "marketplace.yandex.price.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            if resolved.get("status") == "BLOCKED":
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "integration_blocked"))
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability=cap,
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_and_stock", "shop_sku": shop_sku, "warehouse": "dbs_main"},
+                correlation_id=ex.correlation_id,
+                workflow_id=ex.workflow_id,
+            )
+            ex.artifacts.append({"type": "yandex_price_stock", "result": out["result"], "mode": out["environment"], "live": out["live"]})
+            price = (out["result"] or {}).get("price") or {}
+            stock = (out["result"] or {}).get("stock") or {}
+            ex.findings.append(
+                BusinessFinding(
+                    finding_id=str(uuid.uuid4()),
+                    kind=KIND_FINDING,
+                    summary=f"Yandex Market {shop_sku}: price={price.get('seller_effective_price')} stock={stock.get('available')}",
+                    evidence_refs=("integration:yandex_market",),
+                    sku_id=shop_sku,
+                )
+            )
+            return {"price_stock": out["result"], "integration": resolved, "mutation": False}
+
+        if self.integration_activation is not None and any(
+            w in req.text.casefold() for w in ("яндекс", "yandex")
+        ) and any(w in req.text.casefold() for w in ("скидк", "promo", "promotion", "акци")) and name in {
+            "read_listings",
+            "economics_scan",
+            "analyze_request",
+        }:
+            import re
+
+            sku_match = re.search(r"(?:товар\w*|sku|артикул[уом]?)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            shop_sku = sku_match.group(1) if sku_match else "YM-SKU-200"
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.yandex.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "promotion_analysis", "shop_sku": shop_sku},
+            )
+            ex.artifacts.append({"type": "yandex_promotion_alert", "result": out["result"], "mutation": False})
+            if out["result"].get("alert"):
+                ex.findings.append(
+                    BusinessFinding(
+                        finding_id=str(uuid.uuid4()),
+                        kind=KIND_FINDING,
+                        summary=f"Yandex Market platform discount on {shop_sku} — no blind price rewrite",
+                        evidence_refs=("integration:yandex_market", "promotion:platform"),
+                        sku_id=shop_sku,
+                    )
+                )
+            return {"promotion_analysis": out["result"], "mutation": False}
+
+        if name == "yandex_resolve_price_target":
+            import re
+
+            sku_match = re.search(r"(?:товар\w*|sku|артикул[уом]?|offer)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            shop_sku = sku_match.group(1) if sku_match else "YM-SKU-100"
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.yandex.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "shop_sku": shop_sku},
+            )
+            ex.artifacts.append({"type": "yandex_price_current", "result": out["result"], "shop_sku": shop_sku})
+            return {"shop_sku": shop_sku, "current_price": out["result"]}
+
+        if name == "yandex_price_preview":
+            import re
+
+            sku_match = re.search(r"(?:товар\w*|sku|артикул[уом]?|offer)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            shop_sku = sku_match.group(1) if sku_match else "YM-SKU-100"
+            price_match = re.search(r"(\d[\d\s]{4,})\s*₽", req.text)
+            if not price_match:
+                price_match = re.search(r"(?:яндекс|yandex)\s+(\d[\d\s]{3,})", req.text, re.I)
+            new_price = price_match.group(1).replace(" ", "") if price_match else "49990"
+            current = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.yandex.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "shop_sku": shop_sku},
+            )["result"]
+            preview = {
+                "operation": "price_update",
+                "shop_sku": shop_sku,
+                "before": current,
+                "after": {"seller_price": new_price, "currency": "RUB"},
+            }
+            ex.artifacts.append({"type": "yandex_price_preview", "preview": preview})
+            ex._yandex_price_payload = {
+                "operation": "price_update",
+                "shop_sku": shop_sku,
+                "new_price": new_price,
+                "preview": preview,
+            }
+            return {"preview": preview, "requires_approval": True}
+
+        if name == "yandex_price_verify":
+            payload = getattr(ex, "_yandex_price_payload", {}) or {}
+            shop_sku = str(payload.get("shop_sku") or "YM-SKU-100")
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="marketplace.yandex.price.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "shop_sku": shop_sku},
+            )
+            expected = str(payload.get("new_price") or "")
+            observed = str((out["result"] or {}).get("seller_price") or "")
+            verified = observed == expected
+            ex.artifacts.append({"type": "yandex_price_verify", "verified": verified, "observed": out["result"]})
+            return {"verified": verified, "observed": out["result"]}
+
         if name == "ozon_card_import":
             import re
 
@@ -1268,7 +1404,7 @@ class BusinessAssistantService:
             # Prefer Real Integration Activation path when attached
             if self.integration_activation is not None and (
                 step.capability in {"cms.bitrix", "email", "erp.1c"}
-                or step.name in {"wb_price_apply", "onec_price_apply", "ozon_price_apply"}
+                or step.name in {"wb_price_apply", "onec_price_apply", "ozon_price_apply", "yandex_price_apply"}
             ):
                 if step.capability == "cms.bitrix":
                     cap = "cms.bitrix.catalog.write"
@@ -1288,6 +1424,13 @@ class BusinessAssistantService:
                     write_payload = getattr(ex, "_ozon_price_payload", None) or {
                         "operation": "price_update",
                         "seller_article": "OZ-SKU-100",
+                        "new_price": "49990",
+                    }
+                elif step.name == "yandex_price_apply":
+                    cap = "marketplace.yandex.price.write"
+                    write_payload = getattr(ex, "_yandex_price_payload", None) or {
+                        "operation": "price_update",
+                        "shop_sku": "YM-SKU-100",
                         "new_price": "49990",
                     }
                 else:

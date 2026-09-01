@@ -97,11 +97,12 @@ YANDEX_MARKET = IntegrationProvider(
         "marketplace.product",
         "marketplace.yandex.orders.read",
         "marketplace.yandex.price.read",
+        "marketplace.yandex.price.write",
         "marketplace.yandex.stock.read",
     ),
     auth_types=(AUTH_API_KEY, AUTH_OAUTH2),
     read_capabilities=("marketplace.product", "marketplace.yandex.orders.read", "marketplace.yandex.price.read", "marketplace.yandex.stock.read"),
-    write_capabilities=(),  # fixture readiness: read-heavy by default
+    write_capabilities=("marketplace.yandex.price.write",),
     adapter_id="yandex_market",
 )
 
