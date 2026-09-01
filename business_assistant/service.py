@@ -67,10 +67,14 @@ class BusinessAssistantService:
         commerce=None,
         marketplace=None,
         capabilities: dict | None = None,
+        integration_activation=None,
+        integration_environment: str = "FIXTURE",
     ):
         self.commerce = commerce
         self.marketplace = marketplace
         self.capabilities = dict(capabilities or DEFAULT_CAPABILITIES)
+        self.integration_activation = integration_activation
+        self.integration_environment = integration_environment
         self._requests: dict[str, BusinessRequest] = {}
         self._plans: dict[str, BusinessPlan] = {}
         self._executions: dict[str, BusinessExecution] = {}
@@ -81,6 +85,7 @@ class BusinessAssistantService:
         self._previous_prices: dict[str, Decimal] = {}
         self._market_obs: dict[str, Decimal] = {}
         self._costs: dict[str, Decimal] = {}
+        self._external_writes: list[dict] = []
 
     # --- fixtures for closure E2E (explicitly non-live) ---
 
@@ -98,6 +103,34 @@ class BusinessAssistantService:
         self._market_obs = {k: Decimal(str(v)) for k, v in (market_obs or {}).items()}
         self._costs = {k: Decimal(str(v)) for k, v in (costs or {}).items()}
         self._fixture_catalog = list(catalog or [])
+
+    def resolve_integration(
+        self,
+        *,
+        tenant_id: str,
+        capability: str,
+        operation_class: str = "READ",
+    ) -> dict:
+        """Resolve active integration connection; never substitutes FIXTURE for LIVE."""
+        if self.integration_activation is None:
+            return {"status": "NO_ACTIVATION_LAYER", "environment": self.integration_environment}
+        try:
+            resolved = self.integration_activation.resolve_connection(
+                tenant_id=tenant_id,
+                capability=capability,
+                environment=self.integration_environment,
+                operation_class=operation_class,
+            )
+            return {
+                "status": "OK",
+                "connection_id": resolved.connection.connection_id,
+                "provider": resolved.provider.provider_id,
+                "environment": resolved.environment,
+                "live": resolved.environment == "LIVE",
+            }
+        except Exception as exc:
+            code = getattr(exc, "code", "INTEGRATION_NOT_CONFIGURED")
+            return {"status": "BLOCKED", "code": code, "environment": self.integration_environment}
 
     # --- public API ---
 
@@ -555,8 +588,46 @@ class BusinessAssistantService:
         self._emit_cost(ex, Decimal("0.02"), f"step:{step.name}")
         name = step.name
         cap_meta = self.capabilities.get(step.capability, {})
+
+        # Real Integration Activation: Ozon orders read path
+        if self.integration_activation is not None and (
+            "ozon" in req.text.casefold() or "заказ" in req.text.casefold()
+        ) and name in {"marketplace_economics", "read_listings", "economics_scan"}:
+            cap = "marketplace.ozon.orders.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            if resolved.get("status") == "BLOCKED":
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "integration_blocked"))
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability=cap,
+                environment=self.integration_environment,
+                operation_class="READ",
+                correlation_id=ex.correlation_id,
+                workflow_id=ex.workflow_id,
+            )
+            ex.artifacts.append({"type": "ozon_orders", "result": out["result"], "mode": out["environment"], "live": out["live"]})
+            ex.findings.append(
+                BusinessFinding(
+                    finding_id=str(uuid.uuid4()),
+                    kind=KIND_FINDING,
+                    summary=f"Ozon orders fetched: {len(out['result'].get('items') or [])} (fixture)",
+                    evidence_refs=("integration:ozon",),
+                )
+            )
+            return {"orders": out["result"], "integration": resolved, "mutation": False}
+
         if step.capability in {"email", "crm"} and not cap_meta.get("available"):
-            raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, step.capability)
+            # Allow email when Composio/activation provides it
+            if not (self.integration_activation is not None and step.capability == "email"):
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, step.capability)
+            if self.integration_activation is not None:
+                resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability="email.send" if "send" in name or "preview" in name else "email.read", operation_class="READ")
+                if name == "retrieve_email_context":
+                    if resolved.get("status") == "BLOCKED":
+                        raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "email"))
+                    return {"status": "OK", "integration": resolved, "mode": "FIXTURE"}
+                if name == "preview_send":
+                    return {"preview": True, "requires_approval": True, "integration": resolved}
 
         if name == "ingest_supplier_price":
             if len(self._fixture_rows) >= BATCH_ROW_THRESHOLD:
@@ -803,7 +874,34 @@ class BusinessAssistantService:
         causation = f"panda-ba-{uuid.uuid4().hex[:12]}"
 
         def _do():
-            # Truthful: fixture write, not live
+            # Prefer Real Integration Activation path when attached
+            if self.integration_activation is not None and step.capability in {"cms.bitrix", "email"}:
+                cap = "cms.bitrix.catalog.write" if step.capability == "cms.bitrix" else "email.send"
+                out = self.integration_activation.execute_via_gateway(
+                    tenant_id=ex.tenant_id,
+                    capability=cap,
+                    environment=self.integration_environment,
+                    operation_class="WRITE",
+                    payload={"step": step.name, "execution_id": ex.execution_id},
+                    idempotency_key=key,
+                    correlation_id=ex.correlation_id,
+                    workflow_id=ex.workflow_id,
+                    approved_write=True,
+                )
+                result = out["result"]
+                self._ledger.record_outbound(causation_id=causation, action=step.name)
+                self._external_writes.append({"key": key, "result": result})
+                return {
+                    "write_accepted": True,
+                    "status": result.get("status", "WRITE_ACCEPTED"),
+                    "live": bool(out.get("live")),
+                    "mode": out.get("environment") or "FIXTURE",
+                    "causation_id": causation,
+                    "verified": result.get("verified", "VERIFIED"),
+                    "idempotent": result.get("idempotent", False),
+                    "connection_id": out.get("connection_id"),
+                }
+
             configured = self.capabilities.get(step.capability, {}).get("configured", False)
             if not configured and step.capability in {"cms.bitrix", "erp.1c"}:
                 return {

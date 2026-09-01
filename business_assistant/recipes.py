@@ -137,10 +137,14 @@ def select_recipe(intent: str, text: str, constraints: BusinessConstraint) -> st
     tl = (text or "").casefold()
     if any(w in tl for w in ("договор", "document", "pdf", "docx", "сравни два")):
         return RECIPE_DOCUMENT_COMPARE
+    if any(w in tl for w in ("письм", "email", "ответ поставщик", "перед отправкой")) and "прайс" not in tl:
+        return RECIPE_COMMUNICATION
+    if any(w in tl for w in ("заказ", "orders")) and any(
+        w in tl for w in ("ozon", "wb", "wildberries", "яндекс", "yandex", "маркетплейс", "marketplace")
+    ):
+        return RECIPE_MARKETPLACE_PROFIT
     if any(w in tl for w in ("seo", "семант")) and "прайс" not in tl:
         return RECIPE_SEO_REVIEW
-    if any(w in tl for w in ("письм", "email", "ответ поставщик")) and "прайс" not in tl:
-        return RECIPE_COMMUNICATION
     if any(w in tl for w in ("profitability", "убыточ", "loss", "марж")) and "прайс" not in tl and "поставщик" not in tl:
         return RECIPE_MARKETPLACE_PROFIT
     if any(w in tl for w in ("запуск", "launch", "карточк")) and "прайс" not in tl:
