@@ -21,6 +21,7 @@ from business_assistant.models import (
     RECIPE_DOCUMENT_COMPARE,
     RECIPE_GENERIC,
     RECIPE_MARKETPLACE_PROFIT,
+    RECIPE_ONEC_PRICE,
     RECIPE_PRODUCT_LAUNCH,
     RECIPE_SEO_REVIEW,
     RECIPE_SUPPLIER_PRICE,
@@ -133,8 +134,23 @@ def daily_report_steps() -> list[BusinessPlanStep]:
     ]
 
 
+def onec_price_steps(*, constraints: BusinessConstraint) -> list[BusinessPlanStep]:
+    steps = [
+        _step("c1", "onec_resolve_price_target", CAP_ERP_1C, STEP_READ),
+        _step("c2", "onec_price_preview", CAP_ERP_1C, STEP_PREPARE_WRITE, ("c1",), requires_approval=True, risk_level="HIGH"),
+    ]
+    if not constraints.read_only:
+        steps.append(
+            _step("c3", "onec_price_apply", CAP_ERP_1C, STEP_WRITE, ("c2",), requires_approval=True, risk_level="CRITICAL")
+        )
+        steps.append(_step("c4", "onec_price_verify", CAP_ERP_1C, STEP_VERIFY, ("c3",)))
+    return steps
+
+
 def select_recipe(intent: str, text: str, constraints: BusinessConstraint) -> str:
     tl = (text or "").casefold()
+    if any(w in tl for w in ("1с", "1c", "onec")) and any(w in tl for w in ("цен", "price", "стоим")):
+        return RECIPE_ONEC_PRICE
     if any(w in tl for w in ("договор", "document", "pdf", "docx", "сравни два")):
         return RECIPE_DOCUMENT_COMPARE
     if any(w in tl for w in ("письм", "email", "ответ поставщик", "перед отправкой")) and "прайс" not in tl:
@@ -173,6 +189,8 @@ def steps_for_recipe(recipe: str, *, constraints: BusinessConstraint, publish: b
         return communication_steps()
     if recipe == RECIPE_DAILY_REPORT:
         return daily_report_steps()
+    if recipe == RECIPE_ONEC_PRICE:
+        return onec_price_steps(constraints=constraints)
     return [
         _step("g1", "analyze_request", CAP_COMMERCE, STEP_ANALYZE),
         _step("g2", "prepare_summary", CAP_CONTENT, STEP_GENERATE, ("g1",)),

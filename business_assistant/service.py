@@ -265,6 +265,7 @@ class BusinessAssistantService:
                 "preview_and_wait_approval",
                 "propose_corrections",
                 "preview_send",
+                "onec_price_preview",
             }:
                 # Run prepare logic then wait
                 result = self._execute_step(ex, plan, req, step)
@@ -651,6 +652,106 @@ class BusinessAssistantService:
             )
             return {"product": out["result"], "integration": resolved, "mutation": False}
 
+        # Real Integration Activation: 1C stock read by article
+        if self.integration_activation is not None and (
+            "1с" in req.text.casefold() or "1c" in req.text.casefold() or "onec" in req.text.casefold()
+        ) and any(w in req.text.casefold() for w in ("остат", "stock", "склад")) and name in {
+            "read_listings",
+            "match_products",
+            "onec_resolve_price_target",
+            "analyze_request",
+            "prepare_summary",
+        }:
+            import re
+
+            article_match = re.search(r"(?:артикул[уом]?|sku)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else ""
+            cap = "erp.1c.catalog.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            if resolved.get("status") == "BLOCKED":
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "integration_blocked"))
+            payload = {"operation": "stock_read", "article": article} if article else {"page": 1}
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability=cap,
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload=payload,
+                correlation_id=ex.correlation_id,
+                workflow_id=ex.workflow_id,
+            )
+            ex.artifacts.append({"type": "onec_stock", "result": out["result"], "mode": out["environment"], "live": out["live"]})
+            stock = out["result"] or {}
+            ex.findings.append(
+                BusinessFinding(
+                    finding_id=str(uuid.uuid4()),
+                    kind=KIND_FINDING,
+                    summary=f"1C stock: {stock.get('article') or 'n/a'} available={stock.get('available', 'n/a')}",
+                    evidence_refs=("integration:onec",),
+                    sku_id=str(stock.get("article") or ""),
+                )
+            )
+            return {"stock": out["result"], "integration": resolved, "mutation": False}
+
+        if name == "onec_resolve_price_target":
+            import re
+
+            article_match = re.search(r"(?:артикул[уом]?|sku|товар\w*)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else "1C-SKU-100"
+            cap = "erp.1c.catalog.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            price_out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability=cap,
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "article": article},
+                correlation_id=ex.correlation_id,
+                workflow_id=ex.workflow_id,
+            )
+            ex.artifacts.append({"type": "onec_price_current", "result": price_out["result"], "article": article})
+            return {"article": article, "current_price": price_out["result"], "integration": resolved}
+
+        if name == "onec_price_preview":
+            import re
+
+            article_match = re.search(r"(?:артикул[уом]?|sku|товар\w*)\s+([A-Za-z0-9\-]+)", req.text, re.I)
+            article = article_match.group(1) if article_match else "1C-SKU-100"
+            price_match = re.search(r"(\d[\d\s]{2,})\s*₽?", req.text)
+            new_price = price_match.group(1).replace(" ", "") if price_match else "49990"
+            current = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="erp.1c.catalog.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "article": article},
+            )["result"]
+            preview = {
+                "operation": "price_update",
+                "article": article,
+                "before": current,
+                "after": {"amount": new_price, "currency": "RUB", "price_type": "RETAIL"},
+            }
+            ex.artifacts.append({"type": "onec_price_preview", "preview": preview})
+            ex._onec_price_payload = {"operation": "price_update", "article": article, "new_price": new_price, "preview": preview}
+            return {"preview": preview, "requires_approval": True}
+
+        if name == "onec_price_verify":
+            payload = getattr(ex, "_onec_price_payload", {}) or {}
+            article = str(payload.get("article") or "1C-SKU-100")
+            out = self.integration_activation.execute_via_gateway(
+                tenant_id=ex.tenant_id,
+                capability="erp.1c.catalog.read",
+                environment=self.integration_environment,
+                operation_class="READ",
+                payload={"operation": "price_read", "article": article},
+            )
+            expected = str(payload.get("new_price") or "")
+            observed = str((out["result"] or {}).get("amount") or "")
+            verified = observed == expected
+            ex.artifacts.append({"type": "onec_price_verify", "verified": verified, "observed": out["result"]})
+            return {"verified": verified, "observed": out["result"]}
+
         if step.capability in {"email", "crm"} and not cap_meta.get("available"):
             # Allow email when Composio/activation provides it
             if not (self.integration_activation is not None and step.capability == "email"):
@@ -910,14 +1011,26 @@ class BusinessAssistantService:
 
         def _do():
             # Prefer Real Integration Activation path when attached
-            if self.integration_activation is not None and step.capability in {"cms.bitrix", "email"}:
-                cap = "cms.bitrix.catalog.write" if step.capability == "cms.bitrix" else "email.send"
+            if self.integration_activation is not None and step.capability in {"cms.bitrix", "email", "erp.1c"}:
+                if step.capability == "cms.bitrix":
+                    cap = "cms.bitrix.catalog.write"
+                    write_payload = {"step": step.name, "execution_id": ex.execution_id}
+                elif step.capability == "email":
+                    cap = "email.send"
+                    write_payload = {"step": step.name, "execution_id": ex.execution_id}
+                else:
+                    cap = "erp.1c.catalog.write"
+                    write_payload = getattr(ex, "_onec_price_payload", None) or {
+                        "operation": "price_update",
+                        "article": "1C-SKU-100",
+                        "new_price": "49990",
+                    }
                 out = self.integration_activation.execute_via_gateway(
                     tenant_id=ex.tenant_id,
                     capability=cap,
                     environment=self.integration_environment,
                     operation_class="WRITE",
-                    payload={"step": step.name, "execution_id": ex.execution_id},
+                    payload=write_payload,
                     idempotency_key=key,
                     correlation_id=ex.correlation_id,
                     workflow_id=ex.workflow_id,

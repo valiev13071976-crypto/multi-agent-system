@@ -13,6 +13,8 @@ from integrations.activation.adapters import FixtureAdapterState, FixtureProvide
 from integrations.activation.composio import ComposioFixtureAdapter
 from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtureAdapter
 from integrations.bitrix.live_adapter import LiveBitrixAdapter
+from integrations.onec.fixture_adapter import OneCFixtureAdapter
+from integrations.onec.live_adapter import LiveOneCAdapter
 from integrations.activation.errors import (
     IntegrationAuthFailedError,
     IntegrationCapabilityUnavailableError,
@@ -99,8 +101,10 @@ class IntegrationActivationService:
         self._aspro_fixture = AsproFixtureAdapter()
         self._adapters["bitrix"] = self._bitrix_fixture
         self._adapters["aspro"] = self._aspro_fixture
+        self._onec_fixture = OneCFixtureAdapter()
+        self._adapters["onec"] = self._onec_fixture
         for pid in PROVIDER_CATALOG:
-            if pid not in {"composio", "bitrix", "aspro"}:
+            if pid not in {"composio", "bitrix", "aspro", "onec"}:
                 self._adapters[pid] = FixtureProviderAdapter(pid)
 
     # --- providers ---
@@ -684,6 +688,8 @@ class IntegrationActivationService:
     def _adapter_for(self, conn: IntegrationConnection) -> FixtureProviderAdapter:
         if conn.environment == ENV_LIVE and conn.provider_id in {"bitrix", "aspro"}:
             return LiveBitrixAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
+        if conn.environment == ENV_LIVE and conn.provider_id == "onec":
+            return LiveOneCAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         return self._adapter_for_provider(conn.provider_id)
 
     def _resolve_secret(self, tenant_id: str, secret_ref: str) -> str | None:
