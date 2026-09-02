@@ -11,6 +11,7 @@ from business_assistant.errors import (
     BA_APPROVAL_REQUIRED,
     BA_APPROVAL_STALE,
     BA_CANCELLED,
+    BA_CONVERSATION_UNAVAILABLE,
     BA_CROSS_TENANT,
     BA_NOT_FOUND,
     BA_STALE_PREVIEW,
@@ -18,6 +19,7 @@ from business_assistant.errors import (
 )
 from business_assistant.models import (
     BATCH_ROW_THRESHOLD,
+    INTENT_CONVERSATIONAL,
     STATUS_BATCH_RUNNING,
     STATUS_BLOCKED,
     STATUS_CANCELLED,
@@ -33,6 +35,7 @@ from business_assistant_api.errors import (
     BAA_ACCESS_DENIED,
     BAA_APPROVAL_STALE,
     BAA_CANCELLED,
+    BAA_CONVERSATION_UNAVAILABLE,
     BAA_IDEMPOTENCY_CONFLICT,
     BAA_INVALID_STATE,
     BAA_NOT_FOUND,
@@ -134,9 +137,88 @@ class BusinessAssistantApiService:
     def close(self) -> None:
         self.store.close()
 
-    # --- submission ---
+    def _fail_conversation_unavailable(self, rec: ApiRequestRecord, exc: BusinessAssistantError) -> None:
+        rec.status = ST_FAILED
+        rec.error_code = BAA_CONVERSATION_UNAVAILABLE
+        rec.error_message = "Panda assistant is temporarily unavailable. Please try again later."
+        self._event(rec, EV_REQUEST_FAILED, message=rec.error_message, status=ST_FAILED)
+        self.store.save_request(rec)
+        self._persist(rec)
+        raise BusinessAssistantApiError(
+            BAA_CONVERSATION_UNAVAILABLE,
+            rec.error_message,
+            http_status=503,
+        ) from exc
 
-    def submit(
+    def _complete_conversational(
+        self,
+        rec: ApiRequestRecord,
+        ex,
+        *,
+        norm: NormalizedSubmission,
+        tenant: str,
+        owner_id: str,
+        request_id: str,
+    ) -> ApiRequestRecord:
+        rec.execution_id = ex.execution_id
+        rec.workflow_id = ex.workflow_id
+        rec.status = ST_COMPLETED
+        rec.updated_at = _utc_iso()
+        self._event(rec, EV_REQUEST_COMPLETED, message=ex.summary, status=ST_COMPLETED)
+        self._persist(rec)
+        if norm.conversation_id:
+            self._append_message(
+                tenant,
+                norm.conversation_id,
+                role="assistant",
+                content=ex.summary,
+                request_id=request_id,
+            )
+            self.store.touch_conversation(
+                conversation_id=norm.conversation_id, tenant_id=tenant, owner_id=owner_id
+            )
+        return rec
+
+    def _complete_business_workflow(
+        self,
+        rec: ApiRequestRecord,
+        ba_req,
+        *,
+        norm: NormalizedSubmission,
+        tenant: str,
+        owner_id: str,
+        request_id: str,
+    ) -> ApiRequestRecord:
+        plan = self.ba.build_plan(request_id=ba_req.request_id, tenant_id=tenant)
+        rec.plan_id = plan.plan_id
+        rec.plan_fingerprint = plan.fingerprint
+        self._event(
+            rec,
+            EV_PLAN_CREATED,
+            message=f"Plan created ({plan.recipe})",
+            metadata={"steps": len(plan.steps), "recipe": plan.recipe},
+        )
+        self._transition(rec, ST_RUNNING)
+        self._event(rec, EV_EXECUTION_STARTED, message="Execution started")
+        ex = self.ba.execute(plan_id=plan.plan_id, tenant_id=tenant)
+        rec.execution_id = ex.execution_id
+        rec.workflow_id = ex.workflow_id
+        self._sync_from_execution(rec, ex)
+        self._persist(rec)
+        if norm.conversation_id:
+            self._append_message(
+                tenant,
+                norm.conversation_id,
+                role="assistant",
+                content=self._safe_summary(rec),
+                request_id=request_id,
+            )
+            self.store.touch_conversation(
+                conversation_id=norm.conversation_id, tenant_id=tenant, owner_id=owner_id
+            )
+        return rec
+
+    def _submit_prepare(
         self,
         *,
         tenant_id: str,
@@ -150,7 +232,7 @@ class BusinessAssistantApiService:
         priority: str | None = None,
         metadata: dict | None = None,
         trace_id: str = "",
-    ) -> ApiRequestRecord:
+    ) -> ApiRequestRecord | tuple[ApiRequestRecord, NormalizedSubmission, str, str, str]:
         tenant = require_tenant_id(tenant_id)
         norm = normalize_submission(
             message=message,
@@ -209,7 +291,6 @@ class BusinessAssistantApiService:
         self._transition(rec, ST_VALIDATING)
         self._event(rec, EV_VALIDATION_STARTED, message="Validating request")
 
-        # Excel/batch heuristic
         if self._is_batch_request(norm):
             rec.workload_class = WORKLOAD_BATCH
             self._seed_batch_fixture(norm)
@@ -218,6 +299,41 @@ class BusinessAssistantApiService:
             rec.workload_class = WORKLOAD_INTERACTIVE
 
         self._transition(rec, ST_PLANNING)
+        return rec, norm, tenant, owner_id, request_id
+
+    # --- submission ---
+
+    def submit(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        message: str,
+        artifact_refs: list[str] | None = None,
+        requested_capability: str | None = None,
+        conversation_id: str | None = None,
+        idempotency_key: str | None = None,
+        read_only: bool = False,
+        priority: str | None = None,
+        metadata: dict | None = None,
+        trace_id: str = "",
+    ) -> ApiRequestRecord:
+        prepared = self._submit_prepare(
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            message=message,
+            artifact_refs=artifact_refs,
+            requested_capability=requested_capability,
+            conversation_id=conversation_id,
+            idempotency_key=idempotency_key,
+            read_only=read_only,
+            priority=priority,
+            metadata=metadata,
+            trace_id=trace_id,
+        )
+        if isinstance(prepared, ApiRequestRecord):
+            return prepared
+        rec, norm, tenant, owner_id, request_id = prepared
         try:
             ba_req = self.ba.submit_request(
                 tenant_id=tenant,
@@ -227,34 +343,98 @@ class BusinessAssistantApiService:
                 read_only=norm.read_only,
             )
             rec.ba_request_id = ba_req.request_id
-            plan = self.ba.build_plan(request_id=ba_req.request_id, tenant_id=tenant)
-            rec.plan_id = plan.plan_id
-            rec.plan_fingerprint = plan.fingerprint
-            self._event(
-                rec,
-                EV_PLAN_CREATED,
-                message=f"Plan created ({plan.recipe})",
-                metadata={"steps": len(plan.steps), "recipe": plan.recipe},
+
+            if ba_req.intent == INTENT_CONVERSATIONAL:
+                self._transition(rec, ST_RUNNING)
+                self._event(rec, EV_EXECUTION_STARTED, message="Conversational response")
+                try:
+                    ex = self.ba.respond_conversationally(
+                        request_id=ba_req.request_id,
+                        tenant_id=tenant,
+                        conversation_id=norm.conversation_id,
+                    )
+                except BusinessAssistantError as exc:
+                    if exc.code == BA_CONVERSATION_UNAVAILABLE:
+                        self._fail_conversation_unavailable(rec, exc)
+                    raise
+                return self._complete_conversational(
+                    rec, ex, norm=norm, tenant=tenant, owner_id=owner_id, request_id=request_id
+                )
+
+            return self._complete_business_workflow(
+                rec, ba_req, norm=norm, tenant=tenant, owner_id=owner_id, request_id=request_id
             )
-            self._transition(rec, ST_RUNNING)
-            self._event(rec, EV_EXECUTION_STARTED, message="Execution started")
-            ex = self.ba.execute(plan_id=plan.plan_id, tenant_id=tenant)
-            rec.execution_id = ex.execution_id
-            rec.workflow_id = ex.workflow_id
-            self._sync_from_execution(rec, ex)
+        except BusinessAssistantError as exc:
+            rec.status = ST_FAILED if exc.code != BA_CROSS_TENANT else ST_BLOCKED
+            rec.error_code = exc.code
+            rec.error_message = redact(str(exc))
+            self._event(rec, EV_REQUEST_FAILED, message=rec.error_message, status=rec.status)
+            self.store.save_request(rec)
             self._persist(rec)
-            if norm.conversation_id:
-                self._append_message(
-                    tenant,
-                    norm.conversation_id,
-                    role="assistant",
-                    content=self._safe_summary(rec),
-                    request_id=request_id,
+            raise BusinessAssistantApiError(exc.code, rec.error_message, http_status=422) from exc
+
+    async def submit_async(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        message: str,
+        artifact_refs: list[str] | None = None,
+        requested_capability: str | None = None,
+        conversation_id: str | None = None,
+        idempotency_key: str | None = None,
+        read_only: bool = False,
+        priority: str | None = None,
+        metadata: dict | None = None,
+        trace_id: str = "",
+    ) -> ApiRequestRecord:
+        """Async submission — conversational branch awaits Panda gateway without blocking the loop."""
+        prepared = self._submit_prepare(
+            tenant_id=tenant_id,
+            owner_id=owner_id,
+            message=message,
+            artifact_refs=artifact_refs,
+            requested_capability=requested_capability,
+            conversation_id=conversation_id,
+            idempotency_key=idempotency_key,
+            read_only=read_only,
+            priority=priority,
+            metadata=metadata,
+            trace_id=trace_id,
+        )
+        if isinstance(prepared, ApiRequestRecord):
+            return prepared
+        rec, norm, tenant, owner_id, request_id = prepared
+        try:
+            ba_req = self.ba.submit_request(
+                tenant_id=tenant,
+                user_id=owner_id,
+                text=norm.message,
+                artifact_refs=norm.artifact_refs,
+                read_only=norm.read_only,
+            )
+            rec.ba_request_id = ba_req.request_id
+
+            if ba_req.intent == INTENT_CONVERSATIONAL:
+                self._transition(rec, ST_RUNNING)
+                self._event(rec, EV_EXECUTION_STARTED, message="Conversational response")
+                try:
+                    ex = await self.ba.respond_conversationally_async(
+                        request_id=ba_req.request_id,
+                        tenant_id=tenant,
+                        conversation_id=norm.conversation_id,
+                    )
+                except BusinessAssistantError as exc:
+                    if exc.code == BA_CONVERSATION_UNAVAILABLE:
+                        self._fail_conversation_unavailable(rec, exc)
+                    raise
+                return self._complete_conversational(
+                    rec, ex, norm=norm, tenant=tenant, owner_id=owner_id, request_id=request_id
                 )
-                self.store.touch_conversation(
-                    conversation_id=norm.conversation_id, tenant_id=tenant, owner_id=owner_id
-                )
-            return rec
+
+            return self._complete_business_workflow(
+                rec, ba_req, norm=norm, tenant=tenant, owner_id=owner_id, request_id=request_id
+            )
         except BusinessAssistantError as exc:
             rec.status = ST_FAILED if exc.code != BA_CROSS_TENANT else ST_BLOCKED
             rec.error_code = exc.code

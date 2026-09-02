@@ -314,12 +314,24 @@ controlled_automation_runtime = build_controlled_automation_runtime(
     scheduled_automation=scheduled_automation_runtime.service,
 )
 scale_optimization_runtime = build_scale_optimization_runtime()
-try:
-    ba_api_runtime.service.ba.analytics_dashboard = analytics_runtime.service
-    ba_api_runtime.service.ba.scheduled_automation = scheduled_automation_runtime.service
-    ba_api_runtime.service.ba.controlled_automation = controlled_automation_runtime.service
-except AttributeError:
-    pass
+ba = ba_api_runtime.service.ba
+for _attr, _svc in (
+    ("analytics_dashboard", analytics_runtime.service),
+    ("scheduled_automation", scheduled_automation_runtime.service),
+    ("controlled_automation", controlled_automation_runtime.service),
+):
+    try:
+        setattr(ba, _attr, _svc)
+    except AttributeError:
+        pass
+from business_assistant_api.runtime import wire_panda_conversation_gateway
+
+wire_panda_conversation_gateway(
+    ba_service=ba,
+    workflow_engine=getattr(router, "workflow_engine", None),
+    run_router=getattr(router, "run", None),
+    context_manager=context_manager,
+)
 _persistence = getattr(side_effect_runtime, "persistence", None)
 _pf_connection = getattr(_persistence, "connection", None) if _persistence else None
 _pf_ready = bool(_persistence and _persistence.ready)

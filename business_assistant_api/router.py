@@ -225,7 +225,7 @@ async def submit_request(
         outcome="ok",
     )
     try:
-        rec = _svc().submit(
+        rec = await _svc().submit_async(
             tenant_id=ctx.tenant_id,
             owner_id=ctx.user_id,
             message=body.message,

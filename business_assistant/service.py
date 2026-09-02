@@ -2,12 +2,19 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
 
 from security.tenant import require_tenant_id
 
+from business_assistant.conversation_gateway import (
+    ConversationRequest,
+    ConversationResult,
+    ConversationUnavailableError,
+    PandaConversationGateway,
+)
 from business_assistant.errors import (
     BA_ACCESS_DENIED,
     BA_APPROVAL_MISMATCH,
@@ -17,9 +24,11 @@ from business_assistant.errors import (
     BA_CANCELLED,
     BA_CAPABILITY_UNAVAILABLE,
     BA_CONNECTOR_NOT_CONFIGURED,
+    BA_CONVERSATION_UNAVAILABLE,
     BA_CROSS_TENANT,
     BA_INJECTION_BLOCKED,
     BA_NOT_FOUND,
+    BA_PLAN_INVALID,
     BA_READ_ONLY_WRITE_BLOCKED,
     BA_STALE_PREVIEW,
     BusinessAssistantError,
@@ -28,6 +37,7 @@ from business_assistant.intent import classify_intent, detect_injection, extract
 from business_assistant.ledger import ActionLedger
 from business_assistant.models import (
     BATCH_ROW_THRESHOLD,
+    INTENT_CONVERSATIONAL,
     KIND_CALCULATION,
     KIND_FINDING,
     KIND_PROPOSED_ACTION,
@@ -72,6 +82,7 @@ class BusinessAssistantService:
         analytics_dashboard=None,
         scheduled_automation=None,
         controlled_automation=None,
+        conversation_gateway: PandaConversationGateway | None = None,
     ):
         self.commerce = commerce
         self.marketplace = marketplace
@@ -81,6 +92,7 @@ class BusinessAssistantService:
         self.analytics_dashboard = analytics_dashboard
         self.scheduled_automation = scheduled_automation
         self.controlled_automation = controlled_automation
+        self.conversation_gateway = conversation_gateway
         self._requests: dict[str, BusinessRequest] = {}
         self._plans: dict[str, BusinessPlan] = {}
         self._executions: dict[str, BusinessExecution] = {}
@@ -191,6 +203,89 @@ class BusinessAssistantService:
         )
         self._requests[req.request_id] = req
         return req
+
+    def _conversation_request(
+        self,
+        req: BusinessRequest,
+        *,
+        tenant_id: str,
+        conversation_id: str | None,
+    ) -> ConversationRequest:
+        return ConversationRequest(
+            text=req.text,
+            tenant_id=require_tenant_id(tenant_id),
+            user_id=req.user_id,
+            request_id=req.request_id,
+            conversation_id=conversation_id,
+            correlation_id=req.correlation_id,
+        )
+
+    def _execution_from_conversation(
+        self,
+        req: BusinessRequest,
+        *,
+        tenant_id: str,
+        result: ConversationResult,
+    ) -> BusinessExecution:
+        ex = BusinessExecution(
+            execution_id=str(uuid.uuid4()),
+            tenant_id=require_tenant_id(tenant_id),
+            request_id=req.request_id,
+            plan_id=f"conv-{req.request_id[:8]}",
+            plan_fingerprint="conversational",
+            status=STATUS_COMPLETED,
+            steps={},
+            correlation_id=req.correlation_id,
+            workflow_id=result.workflow_id or f"ba-chat-{req.request_id[:8]}",
+            mode="CONVERSATIONAL",
+            summary=result.text,
+        )
+        self._executions[ex.execution_id] = ex
+        return ex
+
+    async def respond_conversationally_async(
+        self,
+        *,
+        request_id: str,
+        tenant_id: str,
+        conversation_id: str | None = None,
+    ) -> BusinessExecution:
+        """Handle ordinary chat via Panda AI core — async path for API/event-loop callers."""
+        req = self._get_request(tenant_id=tenant_id, request_id=request_id)
+        if req.intent != INTENT_CONVERSATIONAL:
+            raise BusinessAssistantError(BA_PLAN_INVALID, "not_conversational")
+        if self.conversation_gateway is None:
+            raise BusinessAssistantError(BA_CONVERSATION_UNAVAILABLE, "conversation_gateway_unconfigured")
+        try:
+            result = await self.conversation_gateway.respond(
+                self._conversation_request(req, tenant_id=tenant_id, conversation_id=conversation_id)
+            )
+        except ConversationUnavailableError as exc:
+            raise BusinessAssistantError(BA_CONVERSATION_UNAVAILABLE, str(exc)) from exc
+        return self._execution_from_conversation(req, tenant_id=tenant_id, result=result)
+
+    def respond_conversationally(
+        self,
+        *,
+        request_id: str,
+        tenant_id: str,
+        conversation_id: str | None = None,
+    ) -> BusinessExecution:
+        """Sync entry for non-event-loop callers (tests, CLI). API path uses respond_conversationally_async."""
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.run(
+                self.respond_conversationally_async(
+                    request_id=request_id,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                )
+            )
+        raise BusinessAssistantError(
+            BA_CONVERSATION_UNAVAILABLE,
+            "use_respond_conversationally_async_under_running_event_loop",
+        )
 
     def build_plan(self, *, request_id: str, tenant_id: str) -> BusinessPlan:
         req = self._get_request(tenant_id=tenant_id, request_id=request_id)
