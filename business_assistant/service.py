@@ -69,12 +69,14 @@ class BusinessAssistantService:
         capabilities: dict | None = None,
         integration_activation=None,
         integration_environment: str = "FIXTURE",
+        analytics_dashboard=None,
     ):
         self.commerce = commerce
         self.marketplace = marketplace
         self.capabilities = dict(capabilities or DEFAULT_CAPABILITIES)
         self.integration_activation = integration_activation
         self.integration_environment = integration_environment
+        self.analytics_dashboard = analytics_dashboard
         self._requests: dict[str, BusinessRequest] = {}
         self._plans: dict[str, BusinessPlan] = {}
         self._executions: dict[str, BusinessExecution] = {}
@@ -671,6 +673,15 @@ class BusinessAssistantService:
             )
             ex.artifacts.append({"type": "calendar_events", "result": out["result"]})
             return {"events": out["result"], "mutation": False}
+
+        if self.analytics_dashboard is not None and name == "analytics_query":
+            from security.identity import RequestSecurityContext
+
+            ctx = RequestSecurityContext(tenant_id=ex.tenant_id, user_id="ba", roles=("user",), request_id=str(uuid.uuid4()))
+            qtype = getattr(ex, "_analytics_question_type", None) or "sales_week"
+            result = self.analytics_dashboard.ba_query(ctx, tenant_id=ex.tenant_id, question_type=qtype)
+            ex.artifacts.append({"type": "analytics_result", "result": result})
+            return {"analytics": result, "mutation": False}
 
         # Real Integration Activation: Ozon orders read path
         if self.integration_activation is not None and (

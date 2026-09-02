@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panda — Analytics Dashboard</title>
+  <link rel="stylesheet" href="/static/analytics/analytics.css">
+</head>
+<body>
+  <div id="auth-gate" class="auth-gate hidden">
+    <div class="auth-card">
+      <h1>Analytics Dashboard</h1>
+      <p class="muted">Sign in with your workspace API key.</p>
+      <input id="api-key-input" type="password" autocomplete="off">
+      <p id="auth-error" class="error-text"></p>
+      <button id="auth-submit" type="button">Continue</button>
+    </div>
+  </div>
+
+  <div id="app" class="app hidden">
+    <header class="header">
+      <h1>Management Dashboard</h1>
+      <nav class="nav">
+        <button data-section="overview" class="nav-btn active">Overview</button>
+        <button data-section="marketplaces" class="nav-btn">Marketplaces</button>
+        <button data-section="products" class="nav-btn">Products</button>
+        <button data-section="integrations" class="nav-btn">Integrations</button>
+        <button data-section="workflows" class="nav-btn">Workflows</button>
+        <button data-section="finops" class="nav-btn">FinOps</button>
+        <button data-section="alerts" class="nav-btn">Alerts</button>
+      </nav>
+      <button id="refresh-btn" type="button">Refresh</button>
+      <a href="/">← Back to Panda</a>
+    </header>
+    <main id="dashboard-main" aria-live="polite">
+      <div id="state-banner" class="state-banner hidden"></div>
+      <section id="overview-section" class="section"></section>
+      <section id="marketplaces-section" class="section hidden"></section>
+      <section id="products-section" class="section hidden"></section>
+      <section id="integrations-section" class="section hidden"></section>
+      <section id="workflows-section" class="section hidden"></section>
+      <section id="finops-section" class="section hidden"></section>
+      <section id="alerts-section" class="section hidden"></section>
+    </main>
+  </div>
+  <script src="/static/analytics/analytics.js"></script>
+</body>
+</html>

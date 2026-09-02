@@ -260,6 +260,8 @@ from ui_chat.runtime import build_ui_chat_runtime
 from ui_chat.router import configure_ui_chat_router
 from operations_admin.runtime import build_operations_admin_runtime
 from operations_admin.router import configure_operations_admin_router
+from analytics_dashboard.runtime import build_analytics_dashboard_runtime
+from analytics_dashboard.router import configure_analytics_dashboard_router
 from saas_product.runtime import build_saas_product_runtime
 from saas_product.router import configure_saas_product_router
 from saas_product.deployment import assert_production_safe
@@ -294,6 +296,9 @@ ops_admin_runtime = build_operations_admin_runtime(
     side_effect_runtime=side_effect_runtime,
     router=router,
     saas_store=saas_runtime.store,
+)
+analytics_runtime = build_analytics_dashboard_runtime(
+    integration_activation=getattr(ba_api_runtime.service, "integration_activation", None),
 )
 _persistence = getattr(side_effect_runtime, "persistence", None)
 _pf_connection = getattr(_persistence, "connection", None) if _persistence else None
@@ -420,6 +425,7 @@ app.add_middleware(PublicRateLimitMiddleware)
 
 app.include_router(configure_ui_chat_router(ui_chat_runtime.service))
 app.include_router(configure_operations_admin_router(ops_admin_runtime.service, ops_admin_runtime.policy))
+app.include_router(configure_analytics_dashboard_router(analytics_runtime.service, analytics_runtime.policy))
 app.include_router(configure_saas_product_router(saas_runtime.service))
 app.include_router(
     configure_business_assistant_api_router(ba_api_runtime.service, upload_dir=ba_api_runtime.upload_dir)
@@ -1017,4 +1023,10 @@ async def admin_ui() -> str:
 @app.get("/product", response_class=HTMLResponse, include_in_schema=False)
 async def product_ui() -> str:
     with open("static/product/settings.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/analytics", response_class=HTMLResponse, include_in_schema=False)
+async def analytics_ui() -> str:
+    with open("static/analytics/index.html", encoding="utf-8") as fh:
         return fh.read()
