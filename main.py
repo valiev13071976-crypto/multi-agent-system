@@ -264,6 +264,8 @@ from analytics_dashboard.runtime import build_analytics_dashboard_runtime
 from analytics_dashboard.router import configure_analytics_dashboard_router
 from scheduled_automation.runtime import build_scheduled_automation_runtime
 from scheduled_automation.router import configure_scheduled_automation_router
+from controlled_automation.runtime import build_controlled_automation_runtime
+from controlled_automation.router import configure_controlled_automation_router
 from saas_product.runtime import build_saas_product_runtime
 from saas_product.router import configure_saas_product_router
 from saas_product.deployment import assert_production_safe
@@ -305,9 +307,14 @@ analytics_runtime = build_analytics_dashboard_runtime(
 scheduled_automation_runtime = build_scheduled_automation_runtime(
     workflow_runtime=getattr(side_effect_runtime, "workflow_runtime", None),
 )
+controlled_automation_runtime = build_controlled_automation_runtime(
+    workflow_runtime=getattr(side_effect_runtime, "workflow_runtime", None),
+    scheduled_automation=scheduled_automation_runtime.service,
+)
 try:
     ba_api_runtime.service.ba.analytics_dashboard = analytics_runtime.service
     ba_api_runtime.service.ba.scheduled_automation = scheduled_automation_runtime.service
+    ba_api_runtime.service.ba.controlled_automation = controlled_automation_runtime.service
 except AttributeError:
     pass
 _persistence = getattr(side_effect_runtime, "persistence", None)
@@ -437,6 +444,7 @@ app.include_router(configure_ui_chat_router(ui_chat_runtime.service))
 app.include_router(configure_operations_admin_router(ops_admin_runtime.service, ops_admin_runtime.policy))
 app.include_router(configure_analytics_dashboard_router(analytics_runtime.service, analytics_runtime.policy))
 app.include_router(configure_scheduled_automation_router(scheduled_automation_runtime.service, scheduled_automation_runtime.policy))
+app.include_router(configure_controlled_automation_router(controlled_automation_runtime.service, controlled_automation_runtime.policy))
 app.include_router(configure_saas_product_router(saas_runtime.service))
 app.include_router(
     configure_business_assistant_api_router(ba_api_runtime.service, upload_dir=ba_api_runtime.upload_dir)

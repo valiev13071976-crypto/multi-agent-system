@@ -71,6 +71,7 @@ class BusinessAssistantService:
         integration_environment: str = "FIXTURE",
         analytics_dashboard=None,
         scheduled_automation=None,
+        controlled_automation=None,
     ):
         self.commerce = commerce
         self.marketplace = marketplace
@@ -79,6 +80,7 @@ class BusinessAssistantService:
         self.integration_environment = integration_environment
         self.analytics_dashboard = analytics_dashboard
         self.scheduled_automation = scheduled_automation
+        self.controlled_automation = controlled_automation
         self._requests: dict[str, BusinessRequest] = {}
         self._plans: dict[str, BusinessPlan] = {}
         self._executions: dict[str, BusinessExecution] = {}
@@ -694,6 +696,18 @@ class BusinessAssistantService:
             created = self.scheduled_automation.create_schedule(ctx, {"tenant_id": ex.tenant_id, **proposal["proposal"]})
             ex.artifacts.append({"type": "schedule_created", "schedule": created})
             return {"schedule": created, "proposal": proposal, "mutation": True}
+
+        if self.controlled_automation is not None and name == "automation_draft":
+            intent = getattr(ex, "_automation_intent", None) or {}
+            proposal = self.controlled_automation.ba_create_draft(tenant_id=ex.tenant_id, intent=intent)
+            ex.artifacts.append({"type": "automation_draft", "proposal": proposal})
+            return {"proposal": proposal, "mutation": False}
+
+        if self.controlled_automation is not None and name == "automation_explain":
+            aid = getattr(ex, "_automation_id", None) or ""
+            result = self.controlled_automation.ba_explain(tenant_id=ex.tenant_id, automation_id=aid)
+            ex.artifacts.append({"type": "automation_explain", "result": result})
+            return {"explain": result, "mutation": False}
 
         if self.scheduled_automation is not None and name == "schedule_intent":
             intent = getattr(ex, "_schedule_intent", None) or {}
