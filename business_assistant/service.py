@@ -70,6 +70,7 @@ class BusinessAssistantService:
         integration_activation=None,
         integration_environment: str = "FIXTURE",
         analytics_dashboard=None,
+        scheduled_automation=None,
     ):
         self.commerce = commerce
         self.marketplace = marketplace
@@ -77,6 +78,7 @@ class BusinessAssistantService:
         self.integration_activation = integration_activation
         self.integration_environment = integration_environment
         self.analytics_dashboard = analytics_dashboard
+        self.scheduled_automation = scheduled_automation
         self._requests: dict[str, BusinessRequest] = {}
         self._plans: dict[str, BusinessPlan] = {}
         self._executions: dict[str, BusinessExecution] = {}
@@ -682,6 +684,22 @@ class BusinessAssistantService:
             result = self.analytics_dashboard.ba_query(ctx, tenant_id=ex.tenant_id, question_type=qtype)
             ex.artifacts.append({"type": "analytics_result", "result": result})
             return {"analytics": result, "mutation": False}
+
+        if self.scheduled_automation is not None and name == "schedule_create":
+            from security.identity import RequestSecurityContext
+
+            intent = getattr(ex, "_schedule_intent", None) or {}
+            proposal = self.scheduled_automation.ba_create_proposal(tenant_id=ex.tenant_id, intent=intent)
+            ctx = RequestSecurityContext(tenant_id=ex.tenant_id, user_id="ba", roles=("user",), request_id=str(uuid.uuid4()))
+            created = self.scheduled_automation.create_schedule(ctx, {"tenant_id": ex.tenant_id, **proposal["proposal"]})
+            ex.artifacts.append({"type": "schedule_created", "schedule": created})
+            return {"schedule": created, "proposal": proposal, "mutation": True}
+
+        if self.scheduled_automation is not None and name == "schedule_intent":
+            intent = getattr(ex, "_schedule_intent", None) or {}
+            proposal = self.scheduled_automation.ba_create_proposal(tenant_id=ex.tenant_id, intent=intent)
+            ex.artifacts.append({"type": "schedule_proposal", "proposal": proposal})
+            return {"proposal": proposal, "mutation": False}
 
         # Real Integration Activation: Ozon orders read path
         if self.integration_activation is not None and (
