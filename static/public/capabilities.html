@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="ru" data-theme="light" class="panda-public">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Возможности Panda</title>
+  <meta name="description" content="Карта возможностей Panda с честными статусами LIVE / READY / NOT_ACTIVATED.">
+  <link rel="canonical" href="/capabilities">
+  <link rel="stylesheet" href="/static/shared/theme.css">
+  <link rel="stylesheet" href="/static/public/public.css">
+</head>
+<body>
+  <header class="pub-top"><div class="pub-wrap pub-nav">
+    <a class="pub-nav-brand" href="/">Panda</a>
+    <div class="pub-nav-cta"><a class="pub-btn pub-btn-primary" href="/register">Попробовать</a></div>
+  </div></header>
+  <main class="pub-wrap pub-section" id="main">
+    <h1>Возможности</h1>
+    <p class="section-lede">Каждая возможность отвечает: что делает, кому нужна, пример задачи, WRITE/approval, интеграции, availability.</p>
+    <div id="cap-list" class="pub-grid" aria-live="polite">Загрузка…</div>
+    <p class="pub-note">Источник истины: <code>/api/v1/operational/product-definition</code></p>
+  </main>
+  <footer class="pub-wrap pub-footer"><a href="/use-cases">Сценарии</a> · <a href="/plans">Планы</a></footer>
+  <script src="/static/public/site.js" defer></script>
+  <script>
+    fetch("/api/v1/operational/product-definition").then(r => r.json()).then(data => {
+      const root = document.getElementById("cap-list");
+      root.innerHTML = "";
+      (data.capabilities || []).forEach(c => {
+        const el = document.createElement("article");
+        el.className = "pub-item";
+        el.innerHTML = `<span class="pub-badge" data-state="${c.availability}">${c.availability}</span>
+          <h2 style="font-size:1.05rem;margin:0 0 .35rem">${c.name}</h2>
+          <p>${c.summary}</p>
+          <p><strong>Пример:</strong> ${c.example_task}</p>
+          <p><strong>WRITE/approval:</strong> ${c.requires_approval_for_write ? "да" : "обычно не требуется"}</p>
+          <p><strong>Интеграции:</strong> ${(c.integrations_required || []).join(", ") || "нет внешних"}</p>`;
+        root.appendChild(el);
+      });
+    }).catch(() => { document.getElementById("cap-list").textContent = "Не удалось загрузить definition."; });
+  </script>
+</body>
+</html>

@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="ru" data-theme="light" class="panda-public">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Panda — управляемый бизнес-ассистент</title>
+  <meta name="description" content="Panda — AI-ассистент для бизнеса с tenant isolation, entitlements, HITL и единым core для Web, Telegram и Voice.">
+  <link rel="canonical" href="/">
+  <meta property="og:title" content="Panda — управляемый бизнес-ассистент">
+  <meta property="og:description" content="Не просто чат: документы, Excel, автоматизации и интеграции через governed-контур.">
+  <meta property="og:type" content="website">
+  <meta property="og:url" content="/">
+  <link rel="stylesheet" href="/static/shared/theme.css">
+  <link rel="stylesheet" href="/static/public/public.css">
+  <script type="application/ld+json">
+  {"@context":"https://schema.org","@type":"SoftwareApplication","name":"Panda","applicationCategory":"BusinessApplication","description":"Управляемый бизнес-ассистент с governance и HITL","offers":{"@type":"Offer","price":"0","priceCurrency":"RUB","description":"Pricing pending"}}
+  </script>
+</head>
+<body>
+  <a class="skip-link" href="#main" style="position:absolute;left:-9999px">К содержанию</a>
+  <header class="pub-top">
+    <div class="pub-wrap pub-nav">
+      <a class="pub-nav-brand" href="/"><img src="/static/panda/assets/panda-logo.png" alt="" width="36" height="36" onerror="this.style.display='none'"><span>Panda</span></a>
+      <ul class="pub-nav-links" aria-label="Разделы">
+        <li><a href="/product">Продукт</a></li>
+        <li><a href="/capabilities">Возможности</a></li>
+        <li><a href="/use-cases">Сценарии</a></li>
+        <li><a href="/plans">Планы</a></li>
+        <li><a href="/security">Безопасность</a></li>
+        <li><a href="/faq">FAQ</a></li>
+      </ul>
+      <div class="pub-nav-cta">
+        <a class="pub-btn pub-btn-secondary" href="/login">Войти</a>
+        <a class="pub-btn pub-btn-primary" href="/register">Попробовать</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="pub-wrap pub-hero" aria-labelledby="brand-hero">
+      <p id="brand-hero" class="brand-signal">Panda</p>
+      <h1>Управляемый бизнес-ассистент, а не просто чат</h1>
+      <p class="lede">Документы, Excel, контент и интеграции выполняются через единый контур: identity, tenant, workflow, ToolGateway и HITL. Внешний WRITE по умолчанию запрещён.</p>
+      <div class="pub-hero-actions">
+        <a class="pub-btn pub-btn-primary" href="/register" data-analytics="cta_trial">Начать trial</a>
+        <a class="pub-btn pub-btn-secondary" href="/capabilities" data-analytics="cta_capabilities">Смотреть возможности</a>
+      </div>
+    </section>
+
+    <section class="pub-wrap pub-section" aria-labelledby="cap-overview">
+      <h2 id="cap-overview">Что умеет Panda</h2>
+      <p class="section-lede">Только то, что реально реализовано в продукте. Состояние: READY = engineering/offline; NOT_ACTIVATED = построено, но не активировано в live.</p>
+      <div class="pub-grid">
+        <div class="pub-item"><span class="pub-badge" data-state="READY">READY</span><h3>AI Assistant</h3><p>Диалог и задачи через единый Panda core.</p></div>
+        <div class="pub-item"><span class="pub-badge" data-state="READY">READY</span><h3>Файлы и Excel</h3><p>Документы и табличная аналитика в governed runtime.</p></div>
+        <div class="pub-item"><span class="pub-badge" data-state="READY">READY</span><h3>Автоматизации</h3><p>Расписания и условные действия с политикой и аудитом.</p></div>
+        <div class="pub-item"><span class="pub-badge" data-state="READY">READY</span><h3>Telegram / Voice</h3><p>Те же правила доступа; live-канал — после human approval.</p></div>
+        <div class="pub-item"><span class="pub-badge" data-state="NOT_ACTIVATED">NOT_ACTIVATED</span><h3>Маркетплейсы / 1C</h3><p>Engineering closed; operational LIVE не активирован.</p></div>
+      </div>
+    </section>
+
+    <section class="pub-wrap pub-section" aria-labelledby="examples">
+      <h2 id="examples">Примеры рабочих задач</h2>
+      <p class="section-lede">Конкретные сценарии, которые продукт умеет вести через workflow.</p>
+      <ul class="pub-flow">
+        <li>Сравнить два прайса и найти расхождения.</li>
+        <li>Загрузить договор и ответить на вопросы по тексту.</li>
+        <li>Подготовить черновик карточки товара (без публикации).</li>
+        <li>Создать безопасный daily schedule для internal workflow.</li>
+      </ul>
+      <p class="pub-note">Демо-ассеты и скриншоты: PLACEHOLDER до появления реальных production assets.</p>
+      <div class="pub-placeholder-asset" role="note">[PLACEHOLDER] Real Panda UI screenshot — not fabricated live production capture.</div>
+    </section>
+
+    <section class="pub-wrap pub-section" aria-labelledby="how">
+      <h2 id="how">Как устроен Panda</h2>
+      <p class="section-lede">Один путь для Web, Telegram и Voice — без отдельного «мозга» на канал.</p>
+      <ol class="pub-flow">
+        <li>Канал → Gateway</li>
+        <li>Identity / Tenant</li>
+        <li>Capability / Entitlement</li>
+        <li>Workflow → ToolGateway</li>
+        <li>HITL при WRITE → Audit</li>
+      </ol>
+    </section>
+
+    <section class="pub-wrap pub-section" aria-labelledby="trust">
+      <h2 id="trust">Контроль и доверие</h2>
+      <p class="section-lede">Tenant isolation, аудит, контролируемый WRITE и экспорт/удаление данных через compliance foundation.</p>
+      <a class="pub-btn pub-btn-secondary" href="/security">Подробнее о безопасности</a>
+    </section>
+
+    <section class="pub-wrap pub-section" aria-labelledby="plans-preview">
+      <h2 id="plans-preview">Планы</h2>
+      <p class="section-lede">Trial / Basic / Pro с canonical entitlements. Коммерческие цены — pending; на сайте не выдуманы.</p>
+      <a class="pub-btn pub-btn-secondary" href="/plans">Смотреть планы</a>
+    </section>
+
+    <section class="pub-wrap pub-section pub-faq" aria-labelledby="faq-home">
+      <h2 id="faq-home">FAQ</h2>
+      <details><summary>Это обычный AI-чат?</summary><p>Нет. Panda связывает каналы с tenant, планами, workflow и HITL.</p></details>
+      <details><summary>Может ли Panda сам менять цены на маркетплейсе?</summary><p>Нет по умолчанию. Внешний WRITE запрещён до явного одобрения.</p></details>
+      <details><summary>Юридически всё готово к публичному запуску?</summary><p>Legal copy есть как DRAFT. Полная юридическая готовность требует отдельного review — см. checklist.</p></details>
+      <p><a href="/faq">Все вопросы</a></p>
+    </section>
+
+    <section class="pub-wrap pub-section" aria-labelledby="final-cta">
+      <h2 id="final-cta">Следующий шаг</h2>
+      <p class="section-lede">Понять ценность → выбрать trial → зарегистрироваться → первый запуск Panda.</p>
+      <div class="pub-hero-actions">
+        <a class="pub-btn pub-btn-primary" href="/register">Регистрация</a>
+        <a class="pub-btn pub-btn-secondary" href="/app">Войти в Panda</a>
+      </div>
+    </section>
+  </main>
+
+  <footer class="pub-wrap pub-footer">
+    <nav aria-label="Юридическое">
+      <a href="/terms">Условия</a>
+      <a href="/privacy">Конфиденциальность</a>
+      <a href="/personal-data">Персональные данные</a>
+      <a href="/ai-disclosure">AI Disclosure</a>
+      <a href="/contact">Контакты</a>
+    </nav>
+    <p>Panda product site. Не путать с e-commerce витринами клиента. Legal: DRAFT until counsel review.</p>
+  </footer>
+  <script src="/static/public/site.js" defer></script>
+</body>
+</html>

@@ -35,7 +35,7 @@
         errorEl.hidden = false;
         return;
       }
-      window.location.href = "/";
+      window.location.href = "/app";
     } catch (_) {
       errorEl.textContent = "Не удалось войти.";
       errorEl.hidden = false;

@@ -7,7 +7,7 @@ from dotenv import load_dotenv
 
 from fastapi import Depends, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
@@ -274,6 +274,8 @@ from saas_product.deployment import assert_production_safe
 from accounts.runtime import build_accounts_runtime
 from accounts.router import configure_accounts_router
 from accounts.dual_auth import configure_accounts_auth, install_dual_auth
+from operational_activation.runtime import build_operational_activation_runtime
+from operational_activation.router import configure_operational_activation_router
 from production_foundation.runtime import initialize_production_foundation
 from integrations.production.runtime import build_production_integration_runtime
 from integrations.production.router import configure_production_integration_router
@@ -323,6 +325,7 @@ controlled_automation_runtime = build_controlled_automation_runtime(
     scheduled_automation=scheduled_automation_runtime.service,
 )
 scale_optimization_runtime = build_scale_optimization_runtime()
+operational_activation_runtime = build_operational_activation_runtime()
 ba = ba_api_runtime.service.ba
 for _attr, _svc in (
     ("analytics_dashboard", analytics_runtime.service),
@@ -472,6 +475,7 @@ app.include_router(configure_controlled_automation_router(controlled_automation_
 app.include_router(configure_scale_optimization_router(scale_optimization_runtime.service, scale_optimization_runtime.policy))
 app.include_router(configure_saas_product_router(saas_runtime.service))
 app.include_router(configure_accounts_router(accounts_runtime.service))
+app.include_router(configure_operational_activation_router(operational_activation_runtime))
 app.include_router(
     configure_business_assistant_api_router(ba_api_runtime.service, upload_dir=ba_api_runtime.upload_dir)
 )
@@ -1043,71 +1047,148 @@ async def resume_workflow(
         )
 
 
-@app.get(
-    "/",
-    response_class=HTMLResponse,
-    include_in_schema=False,
-)
-async def home() -> str:
-    with open("static/panda/index.html", encoding="utf-8") as fh:
+def _read_html(path: str) -> str:
+    with open(path, encoding="utf-8") as fh:
         return fh.read()
+
+
+@app.get("/", response_class=HTMLResponse, include_in_schema=False)
+async def public_home() -> str:
+    return _read_html("static/public/index.html")
+
+
+@app.get("/app", response_class=HTMLResponse, include_in_schema=False)
+async def panda_app_ui() -> str:
+    return _read_html("static/panda/index.html")
 
 
 @app.get("/legacy-chat", response_class=HTMLResponse, include_in_schema=False)
 async def legacy_chat_ui() -> str:
-    with open("static/chat/index.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/chat/index.html")
 
 
 @app.get("/admin", response_class=HTMLResponse, include_in_schema=False)
 async def admin_ui() -> str:
-    with open("static/admin/index.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/admin/index.html")
 
 
 @app.get("/owner", response_class=HTMLResponse, include_in_schema=False)
 async def owner_ui() -> str:
-    with open("static/owner/index.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/owner/index.html")
 
 
 @app.get("/product", response_class=HTMLResponse, include_in_schema=False)
-async def product_ui() -> str:
-    with open("static/product/settings.html", encoding="utf-8") as fh:
-        return fh.read()
+async def product_marketing_ui() -> str:
+    return _read_html("static/public/product.html")
+
+
+@app.get("/product/settings", response_class=HTMLResponse, include_in_schema=False)
+async def product_settings_ui() -> str:
+    return _read_html("static/product/settings.html")
+
+
+@app.get("/capabilities", response_class=HTMLResponse, include_in_schema=False)
+async def capabilities_ui() -> str:
+    return _read_html("static/public/capabilities.html")
+
+
+@app.get("/use-cases", response_class=HTMLResponse, include_in_schema=False)
+async def use_cases_ui() -> str:
+    return _read_html("static/public/use-cases.html")
+
+
+@app.get("/plans", response_class=HTMLResponse, include_in_schema=False)
+async def plans_ui() -> str:
+    return _read_html("static/public/plans.html")
+
+
+@app.get("/faq", response_class=HTMLResponse, include_in_schema=False)
+async def faq_ui() -> str:
+    return _read_html("static/public/faq.html")
+
+
+@app.get("/security", response_class=HTMLResponse, include_in_schema=False)
+async def security_ui() -> str:
+    return _read_html("static/public/security.html")
+
+
+@app.get("/contact", response_class=HTMLResponse, include_in_schema=False)
+async def contact_ui() -> str:
+    return _read_html("static/public/contact.html")
+
+
+@app.get("/register", response_class=HTMLResponse, include_in_schema=False)
+async def register_ui() -> str:
+    return _read_html("static/public/register.html")
 
 
 @app.get("/analytics", response_class=HTMLResponse, include_in_schema=False)
 async def analytics_ui() -> str:
-    with open("static/analytics/index.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/analytics/index.html")
 
 
 @app.get("/login", response_class=HTMLResponse, include_in_schema=False)
 async def login_ui() -> str:
-    with open("static/accounts/login.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/accounts/login.html")
 
 
 @app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
 async def terms_ui() -> str:
-    with open("static/accounts/terms.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/accounts/terms.html")
 
 
 @app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
 async def privacy_ui() -> str:
-    with open("static/accounts/privacy.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/accounts/privacy.html")
 
 
 @app.get("/personal-data", response_class=HTMLResponse, include_in_schema=False)
 async def personal_data_ui() -> str:
-    with open("static/accounts/personal-data.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/accounts/personal-data.html")
 
 
 @app.get("/ai-disclosure", response_class=HTMLResponse, include_in_schema=False)
 async def ai_disclosure_ui() -> str:
-    with open("static/accounts/ai-disclosure.html", encoding="utf-8") as fh:
-        return fh.read()
+    return _read_html("static/accounts/ai-disclosure.html")
+
+
+@app.get("/robots.txt", include_in_schema=False)
+async def robots_txt() -> PlainTextResponse:
+    body = "\n".join(
+        [
+            "User-agent: *",
+            "Allow: /",
+            "Allow: /product",
+            "Allow: /capabilities",
+            "Allow: /use-cases",
+            "Allow: /plans",
+            "Allow: /faq",
+            "Allow: /security",
+            "Allow: /contact",
+            "Disallow: /admin",
+            "Disallow: /owner",
+            "Disallow: /api/",
+            "Sitemap: /sitemap.xml",
+            "",
+        ]
+    )
+    return PlainTextResponse(content=body)
+
+
+@app.get("/sitemap.xml", include_in_schema=False)
+async def sitemap_xml() -> Response:
+    paths = [
+        "/",
+        "/product",
+        "/capabilities",
+        "/use-cases",
+        "/plans",
+        "/faq",
+        "/security",
+        "/contact",
+        "/register",
+        "/login",
+    ]
+    urls = "".join(f"<url><loc>{p}</loc></url>" for p in paths)
+    body = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>'
+    return Response(content=body, media_type="application/xml")

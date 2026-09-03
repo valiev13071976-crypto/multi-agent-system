@@ -1,0 +1,303 @@
+/* Panda public product site — shares product tokens; light-first */
+
+@import url("https://fonts.googleapis.com/css2?family=Source+Sans+3:wght@400;600;700&family=Source+Serif+4:opsz,wght@8..60,600;8..60,700&display=swap");
+
+html.panda-public {
+  --pub-font: "Source Sans 3", "Segoe UI", sans-serif;
+  --pub-display: "Source Serif 4", Georgia, serif;
+  --pub-ink: #152033;
+  --pub-muted: #5a6578;
+  --pub-line: #d5dbe6;
+  --pub-paper: #f4f6f9;
+  --pub-panel: #ffffff;
+  --pub-accent: #1f4fd8;
+  --pub-accent-2: #0f766e;
+  --pub-glow: rgba(31, 79, 216, 0.12);
+}
+
+html.panda-public body {
+  margin: 0;
+  font-family: var(--pub-font);
+  color: var(--pub-ink);
+  background:
+    radial-gradient(900px 420px at 8% -8%, var(--pub-glow), transparent 55%),
+    linear-gradient(180deg, #eef2f7 0%, var(--pub-paper) 38%, #e9eef5 100%);
+  line-height: 1.55;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html.panda-public *,
+  html.panda-public *::before,
+  html.panda-public *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+.pub-wrap {
+  width: min(1080px, calc(100% - 2 * var(--space-side, 1rem)));
+  margin-inline: auto;
+}
+
+.pub-top {
+  position: sticky;
+  top: 0;
+  z-index: 20;
+  backdrop-filter: blur(10px);
+  background: rgba(244, 246, 249, 0.88);
+  border-bottom: 1px solid var(--pub-line);
+}
+
+.pub-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.85rem 0;
+}
+
+.pub-nav-brand {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  text-decoration: none;
+  color: inherit;
+  font-weight: 700;
+  font-size: 1.15rem;
+}
+
+.pub-nav-brand img {
+  width: 36px;
+  height: 36px;
+  border-radius: 8px;
+  object-fit: contain;
+}
+
+.pub-nav-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 0.9rem;
+  align-items: center;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.pub-nav-links a {
+  color: var(--pub-muted);
+  text-decoration: none;
+  font-size: 0.95rem;
+}
+
+.pub-nav-links a:hover,
+.pub-nav-links a:focus-visible {
+  color: var(--pub-ink);
+}
+
+.pub-nav-cta {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.pub-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 10px;
+  padding: 0.65rem 1rem;
+  font: inherit;
+  font-weight: 600;
+  text-decoration: none;
+  border: 1px solid transparent;
+  cursor: pointer;
+}
+
+.pub-btn-primary {
+  background: var(--pub-accent);
+  color: #fff;
+}
+
+.pub-btn-primary:hover { background: #1a44b8; }
+
+.pub-btn-secondary {
+  background: transparent;
+  color: var(--pub-ink);
+  border-color: var(--pub-line);
+}
+
+.pub-hero {
+  padding: clamp(2.5rem, 8vh, 5rem) 0 clamp(2rem, 5vh, 3.5rem);
+  display: grid;
+  gap: 1.1rem;
+  max-width: 40rem;
+  animation: pub-rise 0.7s ease-out both;
+}
+
+.pub-hero .brand-signal {
+  font-family: var(--pub-display);
+  font-size: clamp(2.4rem, 6vw, 3.6rem);
+  font-weight: 700;
+  line-height: 1.05;
+  letter-spacing: -0.02em;
+  margin: 0;
+}
+
+.pub-hero h1 {
+  margin: 0;
+  font-size: clamp(1.25rem, 2.6vw, 1.55rem);
+  font-weight: 650;
+  color: var(--pub-ink);
+}
+
+.pub-hero .lede {
+  margin: 0;
+  color: var(--pub-muted);
+  font-size: 1.05rem;
+  max-width: 36rem;
+}
+
+.pub-hero-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.65rem;
+  margin-top: 0.35rem;
+}
+
+.pub-section {
+  padding: clamp(2rem, 5vh, 3.25rem) 0;
+  border-top: 1px solid var(--pub-line);
+  animation: pub-rise 0.8s ease-out both;
+}
+
+.pub-section h2 {
+  margin: 0 0 0.45rem;
+  font-family: var(--pub-display);
+  font-size: clamp(1.45rem, 3vw, 1.85rem);
+}
+
+.pub-section .section-lede {
+  margin: 0 0 1.25rem;
+  color: var(--pub-muted);
+  max-width: 40rem;
+}
+
+.pub-grid {
+  display: grid;
+  gap: 1rem;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.pub-item {
+  padding: 0.15rem 0;
+}
+
+.pub-item h3 {
+  margin: 0 0 0.35rem;
+  font-size: 1.05rem;
+}
+
+.pub-item p {
+  margin: 0;
+  color: var(--pub-muted);
+  font-size: 0.95rem;
+}
+
+.pub-badge {
+  display: inline-block;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--pub-accent-2);
+  margin-bottom: 0.25rem;
+}
+
+.pub-badge[data-state="NOT_ACTIVATED"],
+.pub-badge[data-state="COMING"] {
+  color: #9a3412;
+}
+
+.pub-faq details {
+  border-top: 1px solid var(--pub-line);
+  padding: 0.85rem 0;
+}
+
+.pub-faq summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.pub-footer {
+  border-top: 1px solid var(--pub-line);
+  padding: 2rem 0 2.5rem;
+  color: var(--pub-muted);
+  font-size: 0.9rem;
+}
+
+.pub-footer nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem 1.1rem;
+  margin-bottom: 0.85rem;
+}
+
+.pub-footer a {
+  color: var(--pub-muted);
+}
+
+.pub-note {
+  font-size: 0.85rem;
+  color: var(--pub-muted);
+  border-left: 3px solid var(--pub-line);
+  padding-left: 0.75rem;
+  margin: 1rem 0 0;
+}
+
+.pub-placeholder-asset {
+  border: 1px dashed var(--pub-line);
+  background: rgba(255, 255, 255, 0.55);
+  padding: 1rem;
+  border-radius: 10px;
+  color: var(--pub-muted);
+  font-size: 0.9rem;
+}
+
+.pub-flow {
+  display: grid;
+  gap: 0.55rem;
+  counter-reset: step;
+}
+
+.pub-flow li {
+  list-style: none;
+  position: relative;
+  padding-left: 2rem;
+}
+
+.pub-flow li::before {
+  counter-increment: step;
+  content: counter(step);
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 1.4rem;
+  height: 1.4rem;
+  border-radius: 999px;
+  background: var(--pub-accent);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 700;
+  display: grid;
+  place-items: center;
+}
+
+@keyframes pub-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (max-width: 720px) {
+  .pub-nav-links { display: none; }
+  .pub-hero { max-width: none; }
+}

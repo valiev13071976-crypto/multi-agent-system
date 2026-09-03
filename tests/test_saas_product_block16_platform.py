@@ -194,7 +194,7 @@ class SaaSHTTPTests(unittest.TestCase):
         cls.main = main_mod
 
     def test_product_page(self):
-        r = self.client.get("/product")
+        r = self.client.get("/product/settings")
         self.assertEqual(r.status_code, 200)
         self.assertIn("Panda Account", r.text)
 
@@ -248,8 +248,8 @@ class SaaSHTTPTests(unittest.TestCase):
         self.assertEqual(report.overall, "FAIL")
 
     def test_chat_has_account_link(self):
-        r = self.client.get("/")
-        self.assertIn("/product", r.text)
+        r = self.client.get("/app")
+        self.assertIn("/product/settings", r.text)
 
 
 class SaaSSecurityTests(unittest.TestCase):

@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru" data-theme="light" class="panda-public">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Регистрация — Panda</title>
+  <meta name="description" content="Регистрация в Panda: trial, согласие с Terms/Privacy, первый запуск.">
+  <link rel="canonical" href="/register">
+  <link rel="stylesheet" href="/static/shared/theme.css">
+  <link rel="stylesheet" href="/static/public/public.css">
+  <link rel="stylesheet" href="/static/accounts/accounts.css">
+</head>
+<body>
+  <header class="pub-top"><div class="pub-wrap pub-nav"><a class="pub-nav-brand" href="/">Panda</a>
+    <div class="pub-nav-cta"><a class="pub-btn pub-btn-secondary" href="/login">Уже есть аккаунт</a></div>
+  </div></header>
+  <main class="accounts-page" id="main">
+    <div class="accounts-shell">
+      <p class="pub-badge">FUNNEL</p>
+      <h1>Регистрация</h1>
+      <p class="muted">Visitor → trial → согласие → аккаунт → первый запуск в Panda.</p>
+      <form id="register-form" class="accounts-form" novalidate>
+        <label for="username">Имя пользователя</label>
+        <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="64">
+        <label for="password">Пароль</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required minlength="10" maxlength="128">
+        <label><input type="checkbox" id="accept_terms" required> Принимаю <a href="/terms" target="_blank" rel="noopener">Условия</a></label>
+        <label><input type="checkbox" id="accept_privacy" required> Принимаю <a href="/privacy" target="_blank" rel="noopener">Privacy</a></label>
+        <label><input type="checkbox" id="marketing_opt_in"> Маркетинговые сообщения (опционально)</label>
+        <p id="reg-error" class="error-text" role="alert"></p>
+        <button class="primary" type="submit">Создать аккаунт</button>
+      </form>
+      <p class="pub-note">Используется существующий Accounts API — второй auth не создаётся. Legal: DRAFT.</p>
+    </div>
+  </main>
+  <script src="/static/public/site.js" defer></script>
+  <script>
+    document.getElementById("register-form").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const err = document.getElementById("reg-error");
+      err.textContent = "";
+      window.PandaPublicAnalytics && window.PandaPublicAnalytics.track("signup_start");
+      const body = {
+        username: document.getElementById("username").value.trim(),
+        password: document.getElementById("password").value,
+        accept_terms: document.getElementById("accept_terms").checked,
+        accept_privacy: document.getElementById("accept_privacy").checked,
+        marketing_opt_in: document.getElementById("marketing_opt_in").checked,
+      };
+      try {
+        const r = await fetch("/api/accounts/register", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          credentials: "same-origin",
+          body: JSON.stringify(body),
+        });
+        const data = await r.json().catch(() => ({}));
+        if (!r.ok) {
+          err.textContent = (data.detail && (data.detail.message || data.detail.code)) || "Ошибка регистрации";
+          return;
+        }
+        window.PandaPublicAnalytics && window.PandaPublicAnalytics.track("signup_complete");
+        location.href = "/app";
+      } catch (ex) {
+        err.textContent = "Сеть недоступна";
+      }
+    });
+  </script>
+</body>
+</html>

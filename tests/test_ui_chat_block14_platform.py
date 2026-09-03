@@ -302,7 +302,7 @@ class UIChatHTTPTests(unittest.TestCase):
             self.assertGreaterEqual(len(msgs.json()), 2)
 
     def test_home_serves_chat_ui(self):
-        r = self.client.get("/")
+        r = self.client.get("/app")
         self.assertEqual(r.status_code, 200)
         self.assertIn("Panda", r.text)
         self.assertIn("/static/panda/js/app.js", r.text)

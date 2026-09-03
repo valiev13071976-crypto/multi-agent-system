@@ -176,7 +176,7 @@ class WebInterfaceHttpTests(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def test_home_serves_panda_app(self):
-        r = self.client.get("/")
+        r = self.client.get("/app")
         self.assertEqual(r.status_code, 200)
         self.assertIn("Panda", r.text)
         self.assertIn("/static/panda/js/app.js", r.text)
@@ -426,7 +426,7 @@ class WebInterfaceE2EFlowTests(unittest.TestCase):
     def test_web_e2e_9_xss_content_safe(self):
         malicious = '<img src=x onerror=alert(1)>'
         safe = _escape_html(malicious)
-        page = self.client.get("/").text
+        page = self.client.get("/app").text
         self.assertNotIn("onerror=alert", page)
         self.assertNotIn("<img src=x onerror", safe)
 
