@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panda AI — Управление</title>
+  <link rel="stylesheet" href="/static/shared/theme.css">
+  <link rel="stylesheet" href="/static/owner/owner.css">
+</head>
+<body>
+  <div id="auth-gate" class="auth-gate hidden">
+    <div class="auth-card">
+      <div id="auth-brand"></div>
+      <h1>Вход для управления</h1>
+      <p class="muted">Используйте API-ключ с правами управления.</p>
+      <label for="api-key-input">API-ключ</label>
+      <input id="api-key-input" type="password" autocomplete="off">
+      <p id="auth-error" class="error-text" role="alert"></p>
+      <button id="auth-submit" type="button" class="primary">Продолжить</button>
+      <p class="muted"><a href="/">← Вернуться в чат</a></p>
+    </div>
+  </div>
+
+  <div id="app" class="app-shell hidden">
+    <aside id="sidebar" class="app-sidebar">
+      <header class="app-sidebar-header">
+        <div id="sidebar-brand"></div>
+      </header>
+      <nav class="app-nav" aria-label="Управление">
+        <a href="#" data-view="home" class="active">Главная</a>
+        <a href="/">Чат с Panda</a>
+        <a href="#" data-view="users">Пользователи</a>
+        <a href="#" data-view="usage">Использование Panda</a>
+        <a href="#" data-view="ai-cost">Расходы AI</a>
+        <a href="#" data-view="health">Состояние системы</a>
+        <a href="#" data-view="activity">События</a>
+        <a href="/admin" id="diagnostics-link">Техническая диагностика</a>
+        <span class="nav-placeholder muted">Подписки — скоро</span>
+        <span class="nav-placeholder muted">Тарифы — скоро</span>
+      </nav>
+      <footer class="sidebar-footer">
+        <div id="account-label" class="account-label"></div>
+        <button id="logout-btn" type="button">Выйти</button>
+      </footer>
+    </aside>
+
+    <main class="app-main">
+      <header class="app-main-header">
+        <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Меню">☰</button>
+        <h2 id="view-title">Главная</h2>
+        <span id="status" class="status-pill" role="status"></span>
+      </header>
+      <section id="access-denied" class="empty-state hidden">
+        <p>У вас нет доступа к панели управления.</p>
+        <p><a href="/">Вернуться в чат</a></p>
+      </section>
+      <section id="content" class="content" aria-live="polite"></section>
+    </main>
+  </div>
+
+  <script src="/static/shared/brand.js"></script>
+  <script src="/static/shared/copy.js"></script>
+  <script src="/static/shared/role-context.js"></script>
+  <script src="/static/owner/owner.js"></script>
+</body>
+</html>

@@ -1,91 +1,103 @@
 <!doctype html>
-<html lang="en">
+<html lang="ru" data-theme="light">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Panda — Business Assistant</title>
+  <title>Panda AI — Business Assistant</title>
+  <link rel="stylesheet" href="/static/shared/theme.css">
   <link rel="stylesheet" href="/static/panda/panda.css">
 </head>
 <body>
   <div id="auth-gate" class="auth-gate hidden" role="dialog" aria-labelledby="auth-title">
     <div class="auth-card">
-      <h1 id="auth-title">Sign in to Panda</h1>
-      <p class="muted">Use your workspace API key. Keys are kept in this browser session only.</p>
-      <label for="api-key-input">API key</label>
+      <div id="auth-brand"></div>
+      <h1 id="auth-title">Вход в Panda</h1>
+      <p class="muted">Временный вход по API-ключу рабочей области. Ключ хранится только в этой сессии браузера.</p>
+      <label for="api-key-input">API-ключ</label>
       <input id="api-key-input" type="password" autocomplete="off" aria-required="true">
       <p id="auth-error" class="error-text" role="alert"></p>
-      <button id="auth-submit" type="button">Continue</button>
+      <button id="auth-submit" type="button" class="primary">Продолжить</button>
     </div>
   </div>
 
-  <div id="app" class="app hidden">
-    <aside id="sidebar" class="sidebar" aria-label="Conversations">
-      <header class="sidebar-header">
-        <div class="brand">Panda</div>
-        <button id="new-chat-btn" type="button">New Chat</button>
+  <div id="app" class="app-shell hidden">
+    <aside id="sidebar" class="app-sidebar" aria-label="Навигация">
+      <header class="app-sidebar-header">
+        <div id="sidebar-brand"></div>
+        <button id="new-chat-btn" type="button" class="primary">Новый чат</button>
       </header>
-      <div id="conv-loading" class="empty-state hidden">Loading conversations…</div>
-      <div id="conv-empty" class="empty-state hidden">No conversations yet</div>
+      <nav class="app-nav" aria-label="Разделы">
+        <button type="button" class="nav-item active" data-nav="chat">Чат с Panda</button>
+        <a href="/product" class="nav-item">Мой аккаунт</a>
+        <a id="owner-nav-link" href="/owner" class="nav-item hidden">Управление</a>
+      </nav>
+      <div id="conv-loading" class="empty-state hidden">Загрузка…</div>
+      <div id="conv-empty" class="empty-state hidden">Начните новый разговор с Panda.</div>
       <ul id="conversation-list" class="conversation-list" role="list"></ul>
       <footer class="sidebar-footer">
         <div id="account-label" class="account-label"></div>
-        <button id="logout-btn" type="button">Sign out</button>
-        <a href="/product" class="account-link">Account settings</a>
+        <button id="logout-btn" type="button">Выйти</button>
       </footer>
     </aside>
 
-    <main class="main" aria-label="Business assistant workspace">
-      <header class="main-header">
-        <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Toggle sidebar">☰</button>
-        <h2 id="chat-title">New chat</h2>
+    <main class="app-main" aria-label="Чат с Panda">
+      <header class="app-main-header">
+        <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Открыть меню">☰</button>
+        <h2 id="chat-title">Новый чат</h2>
         <span id="request-status" class="status-pill" role="status" aria-live="polite"></span>
       </header>
 
       <section id="timeline" class="timeline" role="log" aria-live="polite"></section>
 
-      <section id="progress-panel" class="panel hidden" aria-label="Execution progress">
-        <h3>Progress</h3>
-        <ul id="progress-list"></ul>
-      </section>
-
-      <section id="plan-panel" class="panel hidden" aria-label="Plan summary">
-        <details>
-          <summary>Plan</summary>
-          <div id="plan-content"></div>
-        </details>
-      </section>
-
-      <section id="approval-panel" class="approval-card hidden" aria-label="Approval required">
-        <h3>Approval required</h3>
+      <section id="approval-panel" class="approval-card hidden" aria-label="Требуется подтверждение">
+        <h3>Требуется ваше подтверждение</h3>
+        <p class="muted">Panda подготовил изменение, которое затрагивает внешнюю систему.</p>
         <div id="preview-content"></div>
         <div class="approval-actions">
-          <button id="approve-btn" type="button" class="primary">Approve</button>
-          <button id="reject-btn" type="button" class="danger">Reject</button>
-          <button id="cancel-btn" type="button">Cancel request</button>
+          <button id="approve-btn" type="button" class="primary">Подтвердить</button>
+          <button id="reject-btn" type="button" class="danger">Отклонить</button>
+          <button id="cancel-btn" type="button">Отменить</button>
         </div>
       </section>
 
-      <section id="result-panel" class="panel hidden" aria-label="Result">
-        <h3>Result</h3>
-        <div id="result-content"></div>
-        <div id="artifact-list" class="artifact-list"></div>
+      <section id="diagnostics-panel" class="panel diagnostics hidden" aria-label="Техническая диагностика">
+        <details>
+          <summary>Техническая диагностика</summary>
+          <section id="progress-panel" class="subpanel hidden" aria-label="Ход выполнения">
+            <h4>Ход выполнения</h4>
+            <ul id="progress-list"></ul>
+          </section>
+          <section id="plan-panel" class="subpanel hidden" aria-label="План">
+            <h4>План</h4>
+            <div id="plan-content"></div>
+          </section>
+          <section id="result-panel" class="subpanel hidden" aria-label="Результат">
+            <h4>Результат</h4>
+            <div id="result-content"></div>
+            <div id="artifact-list" class="artifact-list"></div>
+          </section>
+        </details>
       </section>
 
       <footer class="composer">
-        <div id="attachment-chips" class="attachment-chips" aria-label="Attachments"></div>
+        <div id="attachment-chips" class="attachment-chips" aria-label="Вложения"></div>
         <div class="composer-row">
-          <label class="file-label" aria-label="Attach file">
+          <label class="file-label" aria-label="Прикрепить файл">
             📎
             <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
           </label>
-          <textarea id="composer-input" rows="1" placeholder="Ask Panda to analyze, prepare, or publish…" aria-label="Message"></textarea>
-          <button id="send-btn" type="button" class="primary">Send</button>
+          <textarea id="composer-input" rows="1" placeholder="Спросите Panda…" aria-label="Сообщение"></textarea>
+          <button id="send-btn" type="button" class="primary">Отправить</button>
         </div>
         <p id="composer-error" class="error-text" role="alert"></p>
       </footer>
     </main>
   </div>
 
+  <script src="/static/shared/brand.js"></script>
+  <script src="/static/shared/copy.js"></script>
+  <script src="/static/shared/presentation.js"></script>
+  <script src="/static/shared/role-context.js"></script>
   <script src="/static/panda/js/sanitize.js"></script>
   <script src="/static/panda/js/api-client.js"></script>
   <script src="/static/panda/js/components.js"></script>

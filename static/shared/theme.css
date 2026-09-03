@@ -1,0 +1,214 @@
+/* Panda product design tokens — LIGHT-FIRST default */
+
+:root,
+[data-theme="light"] {
+  color-scheme: light;
+  --background: #f7f8fa;
+  --surface: #ffffff;
+  --surface-secondary: #f0f2f5;
+  --text-primary: #1a1d24;
+  --text-secondary: #5c6578;
+  --border: #dfe3ea;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --success: #15803d;
+  --warning: #b45309;
+  --danger: #b91c1c;
+  --focus: #2563eb;
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --radius: 12px;
+  --radius-sm: 8px;
+  --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--font);
+  background: var(--background);
+  color: var(--text-primary);
+  line-height: 1.5;
+}
+
+.hidden { display: none !important; }
+
+.brand-mark {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.brand-logo {
+  object-fit: contain;
+  border-radius: 8px;
+}
+
+.brand-text {
+  display: flex;
+  flex-direction: column;
+  line-height: 1.2;
+}
+
+.brand-title { font-size: 1rem; font-weight: 700; }
+.brand-subtitle { font-size: 0.78rem; color: var(--text-secondary); }
+.brand-text-fallback { font-weight: 700; font-size: 1.1rem; }
+
+.app-shell {
+  display: grid;
+  grid-template-columns: 260px 1fr;
+  min-height: 100vh;
+}
+
+.app-sidebar {
+  background: var(--surface);
+  border-right: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-sidebar-header {
+  padding: 1rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.app-nav {
+  display: flex;
+  flex-direction: column;
+  padding: 0.5rem;
+  gap: 0.15rem;
+  flex: 1;
+}
+
+.app-nav a,
+.app-nav button.nav-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  padding: 0.6rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: none;
+  background: transparent;
+  color: var(--text-primary);
+  text-decoration: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.app-nav a:hover,
+.app-nav a.active,
+.app-nav button.nav-item:hover,
+.app-nav button.nav-item.active {
+  background: var(--surface-secondary);
+}
+
+.app-nav a:focus-visible,
+.app-nav button.nav-item:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.app-main {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+.app-main-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.85rem 1.25rem;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 0.85rem;
+}
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.card .label { font-size: 0.85rem; color: var(--text-secondary); margin-bottom: 0.35rem; }
+.card .value { font-size: 1.35rem; font-weight: 700; }
+.card .hint { font-size: 0.8rem; color: var(--text-secondary); margin-top: 0.25rem; }
+
+.empty-state {
+  color: var(--text-secondary);
+  padding: 1.25rem;
+  text-align: center;
+}
+
+.error-text { color: var(--danger); font-size: 0.9rem; }
+.muted { color: var(--text-secondary); font-size: 0.9rem; }
+
+button.primary {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 0.55rem 0.9rem;
+  cursor: pointer;
+  font: inherit;
+}
+
+button.primary:hover { background: var(--accent-hover); }
+button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.auth-gate {
+  min-height: 100vh;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: var(--background);
+}
+
+.auth-card {
+  width: min(420px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 1.5rem;
+  box-shadow: var(--shadow-sm);
+}
+
+.auth-card input {
+  width: 100%;
+  margin: 0.5rem 0 1rem;
+  padding: 0.65rem 0.75rem;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text-primary);
+}
+
+@media (max-width: 900px) {
+  .app-shell { grid-template-columns: 1fr; }
+  .app-sidebar {
+    position: fixed;
+    inset: 0 auto 0 0;
+    width: min(280px, 88vw);
+    z-index: 30;
+    transform: translateX(-105%);
+    transition: transform 0.2s ease;
+    box-shadow: var(--shadow-sm);
+  }
+  .app-sidebar.open { transform: translateX(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .app-sidebar { transition: none; }
+}

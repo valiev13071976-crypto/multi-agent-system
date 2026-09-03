@@ -1055,6 +1055,12 @@ async def admin_ui() -> str:
         return fh.read()
 
 
+@app.get("/owner", response_class=HTMLResponse, include_in_schema=False)
+async def owner_ui() -> str:
+    with open("static/owner/index.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
 @app.get("/product", response_class=HTMLResponse, include_in_schema=False)
 async def product_ui() -> str:
     with open("static/product/settings.html", encoding="utf-8") as fh:

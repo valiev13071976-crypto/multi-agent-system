@@ -1,94 +1,15 @@
-/* Panda Business Assistant Web Interface */
+/* Panda Chat — product UX styles (light-first) */
 
-:root {
-  --bg: #0b0d12;
-  --panel: #12151c;
-  --panel-2: #181c26;
-  --border: #2a3142;
-  --text: #e9ecf1;
-  --muted: #98a1b3;
-  --accent: #5b8cff;
-  --accent-2: #3d6fd9;
-  --success: #3ecf8e;
-  --warn: #ffb020;
-  --danger: #ff6464;
-  --user-bg: #1a2233;
-  --assistant-bg: #141820;
-  --focus: #7aa2ff;
-}
+.app-shell.hidden { display: none !important; }
 
-* { box-sizing: border-box; }
-
-body {
-  margin: 0;
-  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
-  background: var(--bg);
-  color: var(--text);
-  line-height: 1.45;
-}
-
-.hidden { display: none !important; }
-
-.auth-gate {
-  min-height: 100vh;
+.sidebar-footer {
+  border-top: 1px solid var(--border);
+  padding: 0.75rem 1rem;
   display: grid;
-  place-items: center;
-  padding: 1rem;
+  gap: 0.35rem;
 }
 
-.auth-card {
-  width: min(420px, 100%);
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 1.5rem;
-}
-
-.auth-card input {
-  width: 100%;
-  margin: 0.5rem 0 1rem;
-  padding: 0.65rem 0.75rem;
-  border-radius: 8px;
-  border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
-}
-
-.app {
-  display: grid;
-  grid-template-columns: 280px 1fr;
-  min-height: 100vh;
-}
-
-.sidebar {
-  background: var(--panel);
-  border-right: 1px solid var(--border);
-  display: flex;
-  flex-direction: column;
-  min-height: 100vh;
-}
-
-.sidebar-header {
-  padding: 1rem;
-  border-bottom: 1px solid var(--border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5rem;
-}
-
-.brand { font-weight: 700; letter-spacing: 0.02em; }
-
-#new-chat-btn, button.primary {
-  background: var(--accent);
-  color: #fff;
-  border: none;
-  border-radius: 8px;
-  padding: 0.45rem 0.75rem;
-  cursor: pointer;
-}
-
-button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
+.account-label { font-size: 0.85rem; color: var(--text-secondary); }
 
 .conversation-list {
   list-style: none;
@@ -103,44 +24,23 @@ button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
   text-align: left;
   background: transparent;
   border: none;
-  color: var(--text);
+  color: var(--text-primary);
   padding: 0.65rem 0.75rem;
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
+  font: inherit;
 }
 
 .conversation-list button.active,
-.conversation-list button:hover,
-.conversation-list button:focus-visible {
-  background: var(--user-bg);
-  outline: 2px solid var(--focus);
-}
-
-.sidebar-footer {
-  border-top: 1px solid var(--border);
-  padding: 0.75rem 1rem;
-  display: grid;
-  gap: 0.35rem;
-}
-
-.account-label { font-size: 0.85rem; color: var(--muted); }
-.account-link { color: var(--accent); font-size: 0.85rem; }
-
-.main { display: flex; flex-direction: column; min-width: 0; min-height: 100vh; }
-
-.main-header {
-  display: flex;
-  align-items: center;
-  gap: 0.75rem;
-  padding: 0.75rem 1rem;
-  border-bottom: 1px solid var(--border);
+.conversation-list button:hover {
+  background: var(--surface-secondary);
 }
 
 .icon-btn {
-  background: transparent;
+  background: var(--surface);
   border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: 8px;
+  color: var(--text-primary);
+  border-radius: var(--radius-sm);
   padding: 0.35rem 0.55rem;
   cursor: pointer;
 }
@@ -150,13 +50,13 @@ button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
   font-size: 0.8rem;
   padding: 0.25rem 0.6rem;
   border-radius: 999px;
-  background: var(--panel-2);
+  background: var(--surface-secondary);
   border: 1px solid var(--border);
-  color: var(--muted);
+  color: var(--text-secondary);
 }
 
 .status-pill.running { color: var(--accent); border-color: var(--accent); }
-.status-pill.approval { color: var(--warn); border-color: var(--warn); }
+.status-pill.approval { color: var(--warning); border-color: var(--warning); }
 .status-pill.done { color: var(--success); border-color: var(--success); }
 .status-pill.error { color: var(--danger); border-color: var(--danger); }
 
@@ -167,28 +67,44 @@ button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
   display: flex;
   flex-direction: column;
   gap: 0.75rem;
+  background: var(--background);
 }
 
 .msg {
-  max-width: 880px;
+  max-width: min(880px, 92%);
   padding: 0.85rem 1rem;
-  border-radius: 12px;
+  border-radius: var(--radius);
   border: 1px solid var(--border);
+  background: var(--surface);
+  box-shadow: var(--shadow-sm);
+  word-wrap: break-word;
+  overflow-wrap: anywhere;
 }
 
-.msg.user { background: var(--user-bg); align-self: flex-end; }
-.msg.assistant, .msg.system { background: var(--assistant-bg); align-self: flex-start; }
-.msg .meta { font-size: 0.75rem; color: var(--muted); margin-bottom: 0.35rem; }
+.msg.user { align-self: flex-end; background: #eef4ff; border-color: #c7d9ff; }
+.msg.assistant { align-self: flex-start; }
+.msg.system { align-self: center; font-size: 0.9rem; color: var(--text-secondary); border-style: dashed; }
+.msg .meta { font-size: 0.75rem; color: var(--text-secondary); margin-bottom: 0.35rem; }
+.msg .body pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--surface-secondary);
+  padding: 0.5rem;
+  border-radius: var(--radius-sm);
+  overflow-x: auto;
+}
 
 .panel, .approval-card {
   margin: 0 1rem 0.75rem;
   padding: 0.85rem 1rem;
   border: 1px solid var(--border);
-  border-radius: 12px;
-  background: var(--panel-2);
+  border-radius: var(--radius);
+  background: var(--surface);
 }
 
-.approval-card { border-color: var(--warn); }
+.approval-card { border-color: var(--warning); }
+.diagnostics summary { cursor: pointer; font-weight: 600; }
+.subpanel { margin-top: 0.75rem; }
 
 .approval-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.75rem; }
 
@@ -196,15 +112,16 @@ button.danger {
   background: transparent;
   border: 1px solid var(--danger);
   color: var(--danger);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
   padding: 0.45rem 0.75rem;
   cursor: pointer;
+  font: inherit;
 }
 
 .composer {
   border-top: 1px solid var(--border);
   padding: 0.75rem 1rem 1rem;
-  background: var(--panel);
+  background: var(--surface);
 }
 
 .composer-row {
@@ -219,21 +136,22 @@ button.danger {
   min-height: 44px;
   max-height: 160px;
   resize: vertical;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   border: 1px solid var(--border);
-  background: var(--panel-2);
-  color: var(--text);
+  background: var(--surface);
+  color: var(--text-primary);
   padding: 0.65rem 0.75rem;
+  font: inherit;
 }
 
-.file-label { cursor: pointer; padding: 0.5rem; }
+.file-label { cursor: pointer; padding: 0.5rem; min-width: 44px; min-height: 44px; display: grid; place-items: center; }
 
 .attachment-chips { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-bottom: 0.5rem; }
 .chip {
   display: inline-flex;
   align-items: center;
   gap: 0.35rem;
-  background: var(--user-bg);
+  background: var(--surface-secondary);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 0.2rem 0.55rem;
@@ -252,9 +170,6 @@ button.danger {
   text-align: left;
 }
 
-.empty-state, .muted, .error-text { color: var(--muted); font-size: 0.9rem; }
-.error-text { color: var(--danger); }
-
 .artifact-list { display: grid; gap: 0.5rem; margin-top: 0.5rem; }
 .artifact-item {
   display: flex;
@@ -262,27 +177,17 @@ button.danger {
   gap: 0.75rem;
   padding: 0.55rem 0.65rem;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: var(--radius-sm);
 }
+
+.preview-list { margin: 0.5rem 0 0; padding-left: 1.1rem; }
 
 @media (max-width: 900px) {
-  .app { grid-template-columns: 1fr; }
-  .sidebar {
-    position: fixed;
-    inset: 0 auto 0 0;
-    width: min(280px, 85vw);
-    z-index: 20;
-    transform: translateX(-105%);
-    transition: transform 0.2s ease;
-  }
-  .sidebar.open { transform: translateX(0); }
+  .composer-row { grid-template-columns: auto 1fr; }
+  #send-btn { grid-column: 2; justify-self: end; }
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .sidebar { transition: none; }
-}
-
-:focus-visible {
-  outline: 2px solid var(--focus);
-  outline-offset: 2px;
+@media (max-width: 390px) {
+  .msg { max-width: 100%; }
+  .app-main-header h2 { font-size: 1rem; }
 }

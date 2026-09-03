@@ -2,6 +2,9 @@
 (function () {
   const api = window.PandaApi;
   const ui = window.PandaComponents;
+  const brand = window.PandaBrand;
+  const presentation = window.PandaPresentation;
+  const roleApi = window.PandaRoleContext;
 
   const state = {
     conversationId: null,
@@ -15,11 +18,15 @@
     pollTimer: null,
     submitting: false,
     approving: false,
+    roleContext: { loaded: false, isManagement: false, isOwner: false, role: null },
+    lastResultMode: null,
   };
 
   const els = {
     authGate: document.getElementById("auth-gate"),
     app: document.getElementById("app"),
+    authBrand: document.getElementById("auth-brand"),
+    sidebarBrand: document.getElementById("sidebar-brand"),
     apiKey: document.getElementById("api-key-input"),
     authSubmit: document.getElementById("auth-submit"),
     authError: document.getElementById("auth-error"),
@@ -29,11 +36,13 @@
     newChat: document.getElementById("new-chat-btn"),
     logout: document.getElementById("logout-btn"),
     account: document.getElementById("account-label"),
+    ownerNav: document.getElementById("owner-nav-link"),
     sidebar: document.getElementById("sidebar"),
     sidebarToggle: document.getElementById("sidebar-toggle"),
     title: document.getElementById("chat-title"),
     status: document.getElementById("request-status"),
     timeline: document.getElementById("timeline"),
+    diagnosticsPanel: document.getElementById("diagnostics-panel"),
     progressPanel: document.getElementById("progress-panel"),
     progressList: document.getElementById("progress-list"),
     planPanel: document.getElementById("plan-panel"),
@@ -53,12 +62,27 @@
     attachmentChips: document.getElementById("attachment-chips"),
   };
 
-  function show(el) { el.classList.remove("hidden"); }
-  function hide(el) { el.classList.add("hidden"); }
+  function show(el) { if (el) el.classList.remove("hidden"); }
+  function hide(el) { if (el) el.classList.add("hidden"); }
 
   function setStatus(text, kind) {
     els.status.textContent = text || "";
     els.status.className = "status-pill" + (kind ? ` ${kind}` : "");
+  }
+
+  function canShowDiagnostics() {
+    return presentation.shouldShowDiagnostics(state.roleContext);
+  }
+
+  function updateRoleUi() {
+    if (state.roleContext.isManagement) {
+      show(els.ownerNav);
+      els.account.textContent = `Роль: ${state.roleContext.role || "—"}`;
+    } else {
+      hide(els.ownerNav);
+      els.account.textContent = state.roleContext.loaded ? "Пользователь" : "Аккаунт";
+    }
+    if (!canShowDiagnostics()) hide(els.diagnosticsPanel);
   }
 
   function storageKey(prefix) {
@@ -76,15 +100,26 @@
     return sessionStorage.getItem(storageKey("active_request"));
   }
 
+  function assistantBubbleText(result) {
+    const mode = result.structured_result?.mode || state.lastResultMode;
+    const conversational = mode === "CONVERSATIONAL";
+    return presentation.toUserFacingSummary(result.summary || "", { conversational, business: !conversational });
+  }
+
   async function verifyAuth() {
     await api.listConversations();
     return true;
   }
 
+  async function loadRoleContext() {
+    state.roleContext = await roleApi.resolveRoleContext(api.getApiKey());
+    updateRoleUi();
+  }
+
   async function enterApp() {
     hide(els.authGate);
     show(els.app);
-    els.account.textContent = "Authenticated";
+    await loadRoleContext();
     await refreshConversations();
     if (!state.conversationId) await newChat();
     const saved = loadActiveRequest();
@@ -108,6 +143,7 @@
     api.clearApiKey();
     state.conversationId = null;
     state.activeRequestId = null;
+    state.roleContext = { loaded: false, isManagement: false, isOwner: false, role: null };
     hide(els.app);
     show(els.authGate);
   }
@@ -117,7 +153,7 @@
     hide(els.convEmpty);
     try {
       state.conversations = await api.listConversations();
-    } catch (e) {
+    } catch (_) {
       state.conversations = [];
     }
     hide(els.convLoading);
@@ -143,7 +179,7 @@
   function renderTimeline() {
     els.timeline.innerHTML = "";
     state.messages.forEach((m) => {
-      els.timeline.appendChild(ui.renderMessage(m.role, m.content, m.created_at));
+      els.timeline.appendChild(ui.renderMessage(m.role, m.content, null));
     });
     els.timeline.scrollTop = els.timeline.scrollHeight;
   }
@@ -154,7 +190,7 @@
       const chip = ui.el("span", "chip", `${a.filename} (${a.size_bytes || 0} B)`);
       const rm = ui.el("button", "", "×");
       rm.type = "button";
-      rm.setAttribute("aria-label", "Remove attachment");
+      rm.setAttribute("aria-label", "Удалить вложение");
       rm.onclick = () => {
         state.attachments.splice(idx, 1);
         renderAttachmentChips();
@@ -164,6 +200,14 @@
     });
   }
 
+  function resetPanels() {
+    hide(els.approvalPanel);
+    hide(els.resultPanel);
+    hide(els.progressPanel);
+    hide(els.planPanel);
+    if (!canShowDiagnostics()) hide(els.diagnosticsPanel);
+  }
+
   async function openConversation(id, title) {
     stopPolling();
     state.conversationId = id;
@@ -171,15 +215,12 @@
     state.activeRequest = null;
     state.seenEvents.clear();
     state.eventCursor = null;
-    hide(els.approvalPanel);
-    hide(els.resultPanel);
-    hide(els.progressPanel);
-    hide(els.planPanel);
-    els.title.textContent = title || "Conversation";
+    resetPanels();
+    els.title.textContent = title || "Новый чат";
     renderConversations();
     try {
       state.messages = await api.listMessages(id);
-    } catch (e) {
+    } catch (_) {
       state.messages = [];
     }
     renderTimeline();
@@ -200,7 +241,7 @@
 
   async function newChat() {
     stopPolling();
-    const conv = await api.createConversation("New chat");
+    const conv = await api.createConversation("Новый чат");
     state.conversations.unshift(conv);
     state.messages = [];
     state.attachments = [];
@@ -255,22 +296,28 @@
     const label = api.statusLabel(summary.status);
     let kind = "";
     if (summary.status === "WAITING_FOR_APPROVAL") kind = "approval";
-    else if (summary.status === "RUNNING" || summary.status === "RESUMING" || summary.status === "PLANNING") kind = "running";
+    else if (["RUNNING", "RESUMING", "PLANNING", "QUEUED", "VALIDATING"].includes(summary.status)) kind = "running";
     else if (summary.status === "COMPLETED") kind = "done";
     else if (["FAILED", "BLOCKED", "REJECTED", "CANCELLED"].includes(summary.status)) kind = "error";
     setStatus(label, kind);
 
-    await refreshEvents(requestId);
-
-    if (status.plan_summary) {
-      show(els.planPanel);
-      els.planContent.innerHTML = "";
-      els.planContent.appendChild(ui.renderPlan(status.plan_summary));
+    if (canShowDiagnostics()) {
+      show(els.diagnosticsPanel);
+      await refreshEvents(requestId);
+      if (status.plan_summary) {
+        show(els.planPanel);
+        els.planContent.innerHTML = "";
+        els.planContent.appendChild(ui.renderPlan(status.plan_summary));
+      }
+    } else {
+      hide(els.diagnosticsPanel);
+      hide(els.progressPanel);
+      hide(els.planPanel);
+      hide(els.resultPanel);
     }
 
     if (summary.status === "WAITING_FOR_APPROVAL") {
       show(els.approvalPanel);
-      hide(els.resultPanel);
       const preview = await api.getPreview(requestId);
       els.previewContent.innerHTML = "";
       els.previewContent.appendChild(ui.renderPreview(preview));
@@ -285,21 +332,48 @@
       sessionStorage.removeItem(storageKey("active_request"));
       if (summary.status === "COMPLETED") {
         const result = await api.getResult(requestId);
-        const artifacts = await api.listArtifacts(requestId);
-        show(els.resultPanel);
-        els.resultContent.innerHTML = "";
-        els.resultContent.appendChild(ui.renderResult(result));
-        els.artifactList.innerHTML = "";
-        els.artifactList.appendChild(ui.renderArtifacts(artifacts));
-        if (!opts.poll) {
-          state.messages.push({ role: "assistant", content: result.summary || "Completed.", created_at: new Date().toISOString() });
-          renderTimeline();
+        state.lastResultMode = result.structured_result?.mode || null;
+        const bubble = assistantBubbleText(result);
+        const conversational = state.lastResultMode === "CONVERSATIONAL";
+
+        if (canShowDiagnostics() && !conversational) {
+          const artifacts = await api.listArtifacts(requestId);
+          show(els.resultPanel);
+          els.resultContent.innerHTML = "";
+          els.resultContent.appendChild(ui.renderResult(result, { showFindings: true }));
+          els.artifactList.innerHTML = "";
+          els.artifactList.appendChild(ui.renderArtifacts(artifacts));
+        } else {
+          hide(els.resultPanel);
         }
+
+        if (!opts.poll) {
+          const already = state.messages.some(
+            (m) => m.role === "assistant" && m.request_id === requestId
+          );
+          if (!already) {
+            state.messages.push({
+              role: "assistant",
+              content: bubble,
+              created_at: new Date().toISOString(),
+              request_id: requestId,
+            });
+            renderTimeline();
+          }
+        }
+      } else if (summary.status === "FAILED" && !opts.poll) {
+        state.messages.push({
+          role: "system",
+          content: api.mapError({ code: summary.error_code, message: summary.error_message, status: 500 }),
+          created_at: new Date().toISOString(),
+        });
+        renderTimeline();
       }
     }
   }
 
   async function refreshEvents(requestId) {
+    if (!canShowDiagnostics()) return;
     const events = await api.listEvents(requestId, state.eventCursor);
     if (!events.length) return;
     show(els.progressPanel);
@@ -325,10 +399,11 @@
     state.messages.push({ role: "user", content: text, created_at: new Date().toISOString() });
     renderTimeline();
     els.composer.value = "";
+    setStatus(window.PandaCopy.USER_THINKING, "running");
 
     try {
       const payload = {
-        message: text || "Analyze attached files",
+        message: text || "Проанализируй прикреплённые файлы",
         conversation_id: state.conversationId,
         idempotency_key: idempotencyKey,
         artifact_refs: state.attachments.map((a) => a.artifact_ref),
@@ -336,15 +411,17 @@
       const req = await api.submitRequest(payload);
       state.attachments = [];
       renderAttachmentChips();
-      els.progressList.innerHTML = "";
-      state.seenEvents.clear();
-      state.eventCursor = null;
-      show(els.progressPanel);
-      hide(els.resultPanel);
+      if (canShowDiagnostics()) {
+        els.progressList.innerHTML = "";
+        state.seenEvents.clear();
+        state.eventCursor = null;
+      }
+      resetPanels();
       await trackRequest(req.request_id);
       await refreshConversations();
     } catch (e) {
       els.composerError.textContent = api.mapError(e);
+      setStatus("", "");
     } finally {
       state.submitting = false;
       els.sendBtn.disabled = false;
@@ -356,11 +433,10 @@
     state.approving = true;
     els.approveBtn.disabled = true;
     try {
-      const body = {
+      await api.approve(state.activeRequestId, {
         approval_id: state.activeRequest?.approval_id,
         plan_fingerprint: state.activeRequest?.plan_fingerprint,
-      };
-      await api.approve(state.activeRequestId, body);
+      });
       await trackRequest(state.activeRequestId);
     } catch (e) {
       els.composerError.textContent = api.mapError(e);
@@ -384,7 +460,7 @@
 
   async function onFiles(files) {
     for (const file of files) {
-      setStatus(`Uploading ${file.name}…`, "running");
+      setStatus(`Загрузка ${file.name}…`, "running");
       try {
         const ref = await api.uploadFile(file);
         state.attachments.push(ref);
@@ -414,7 +490,14 @@
     });
   }
 
+  function initBrand() {
+    brand.applyDocumentBrand();
+    brand.renderLogo(els.authBrand, { size: 48 });
+    brand.renderLogo(els.sidebarBrand, { size: 32 });
+  }
+
   async function boot() {
+    initBrand();
     bindEvents();
     if (api.hasApiKey()) {
       try {
