@@ -39,8 +39,11 @@
     ownerNav: document.getElementById("owner-nav-link"),
     sidebar: document.getElementById("sidebar"),
     sidebarToggle: document.getElementById("sidebar-toggle"),
+    sidebarClose: document.getElementById("sidebar-close"),
+    sidebarBackdrop: document.getElementById("sidebar-backdrop"),
     title: document.getElementById("chat-title"),
     status: document.getElementById("request-status"),
+    chatScroll: document.querySelector(".chat-scroll"),
     timeline: document.getElementById("timeline"),
     diagnosticsPanel: document.getElementById("diagnostics-panel"),
     progressPanel: document.getElementById("progress-panel"),
@@ -176,12 +179,58 @@
     });
   }
 
-  function renderTimeline() {
+  function scrollContainer() {
+    return els.chatScroll || els.timeline;
+  }
+
+  function isNearBottom(el, threshold) {
+    if (!el) return true;
+    return el.scrollHeight - el.scrollTop - el.clientHeight <= (threshold || 80);
+  }
+
+  function scrollTimelineToBottom(force) {
+    const el = scrollContainer();
+    if (!el) return;
+    if (force || isNearBottom(el)) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }
+
+  function renderTimeline(opts) {
+    const force = Boolean(opts && opts.forceScroll);
+    const stick = force || isNearBottom(scrollContainer());
     els.timeline.innerHTML = "";
     state.messages.forEach((m) => {
       els.timeline.appendChild(ui.renderMessage(m.role, m.content, null));
     });
-    els.timeline.scrollTop = els.timeline.scrollHeight;
+    if (stick) scrollTimelineToBottom(true);
+  }
+
+  function autoGrowComposer() {
+    const ta = els.composer;
+    if (!ta) return;
+    ta.style.height = "auto";
+    const max = Math.min(window.innerHeight * 0.4, 200);
+    ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
+  }
+
+  function setSidebarOpen(open) {
+    if (!els.sidebar) return;
+    els.sidebar.classList.toggle("open", open);
+    if (els.sidebarToggle) els.sidebarToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    if (els.sidebarBackdrop) {
+      if (open) els.sidebarBackdrop.removeAttribute("hidden");
+      else els.sidebarBackdrop.setAttribute("hidden", "");
+    }
+    document.body.classList.toggle("sidebar-open", open);
+  }
+
+  function closeSidebar() {
+    setSidebarOpen(false);
+  }
+
+  function toggleSidebar() {
+    setSidebarOpen(!els.sidebar.classList.contains("open"));
   }
 
   function renderAttachmentChips() {
@@ -223,8 +272,8 @@
     } catch (_) {
       state.messages = [];
     }
-    renderTimeline();
-    els.sidebar.classList.remove("open");
+    renderTimeline({ forceScroll: true });
+    closeSidebar();
     const saved = loadActiveRequest();
     const latestRequestId = findLatestRequestId(state.messages);
     const resumeId = saved || latestRequestId;
@@ -397,8 +446,9 @@
     const idempotencyKey = api.uuid();
 
     state.messages.push({ role: "user", content: text, created_at: new Date().toISOString() });
-    renderTimeline();
+    renderTimeline({ forceScroll: true });
     els.composer.value = "";
+    autoGrowComposer();
     setStatus(window.PandaCopy.USER_THINKING, "running");
 
     try {
@@ -480,13 +530,25 @@
     els.approveBtn.onclick = onApprove;
     els.rejectBtn.onclick = onReject;
     els.cancelBtn.onclick = onCancel;
-    els.sidebarToggle.onclick = () => els.sidebar.classList.toggle("open");
+    els.sidebarToggle.onclick = toggleSidebar;
+    if (els.sidebarClose) els.sidebarClose.onclick = closeSidebar;
+    if (els.sidebarBackdrop) els.sidebarBackdrop.onclick = closeSidebar;
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && els.sidebar.classList.contains("open")) {
+        closeSidebar();
+      }
+    });
     els.fileInput.onchange = (e) => onFiles(Array.from(e.target.files || []));
+    els.composer.addEventListener("input", autoGrowComposer);
     els.composer.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
       }
+    });
+    window.addEventListener("resize", () => {
+      if (window.innerWidth >= 1024) closeSidebar();
+      autoGrowComposer();
     });
   }
 

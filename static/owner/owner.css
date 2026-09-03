@@ -53,6 +53,14 @@ table.mgmt-table td {
   font-style: italic;
 }
 
-@media (max-width: 900px) {
-  .content { padding: 0.75rem; }
+/* Owner responsive safety — shared theme drawer must not trap page scroll */
+html:not(.panda-chat) body {
+  overflow: auto;
+  height: auto;
+  min-height: 100%;
 }
+
+@media (max-width: 1023px) {
+  .content { overflow-x: auto; }
+}
+

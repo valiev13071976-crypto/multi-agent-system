@@ -140,7 +140,10 @@ class OwnerDashboardTests(unittest.TestCase):
 class ResponsiveSecurityTests(unittest.TestCase):
     def test_mobile_sidebar_rules(self):
         css = _read("static/shared/theme.css")
-        self.assertIn("@media (max-width: 900px)", css)
+        self.assertTrue(
+            "@media (max-width: 1023px)" in css or "@media (max-width: 900px)" in css
+        )
+        self.assertIn("transform: translateX", css)
 
     def test_no_secrets_in_frontend_sources(self):
         key_patterns = (re.compile(r"panda_api_keys"), re.compile(r"\bsk-[a-z0-9]{8,}\b"))

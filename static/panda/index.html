@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="ru" data-theme="light">
+<html lang="ru" data-theme="light" class="panda-chat">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>Panda AI — Business Assistant</title>
   <link rel="stylesheet" href="/static/shared/theme.css">
   <link rel="stylesheet" href="/static/panda/panda.css">
@@ -21,9 +21,11 @@
   </div>
 
   <div id="app" class="app-shell hidden">
+    <div id="sidebar-backdrop" class="sidebar-backdrop" hidden></div>
     <aside id="sidebar" class="app-sidebar" aria-label="Навигация">
       <header class="app-sidebar-header">
         <div id="sidebar-brand"></div>
+        <button id="sidebar-close" type="button" class="icon-btn sidebar-close" aria-label="Закрыть меню">✕</button>
         <button id="new-chat-btn" type="button" class="primary">Новый чат</button>
       </header>
       <nav class="app-nav" aria-label="Разделы">
@@ -42,54 +44,60 @@
 
     <main class="app-main" aria-label="Чат с Panda">
       <header class="app-main-header">
-        <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Открыть меню">☰</button>
-        <h2 id="chat-title">Новый чат</h2>
+        <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Открыть меню" aria-controls="sidebar" aria-expanded="false">☰</button>
+        <h2 id="chat-title" class="chat-title">Новый чат</h2>
         <span id="request-status" class="status-pill" role="status" aria-live="polite"></span>
       </header>
 
-      <section id="timeline" class="timeline" role="log" aria-live="polite"></section>
+      <div class="chat-scroll">
+        <div class="chat-column">
+          <section id="timeline" class="timeline" role="log" aria-live="polite"></section>
 
-      <section id="approval-panel" class="approval-card hidden" aria-label="Требуется подтверждение">
-        <h3>Требуется ваше подтверждение</h3>
-        <p class="muted">Panda подготовил изменение, которое затрагивает внешнюю систему.</p>
-        <div id="preview-content"></div>
-        <div class="approval-actions">
-          <button id="approve-btn" type="button" class="primary">Подтвердить</button>
-          <button id="reject-btn" type="button" class="danger">Отклонить</button>
-          <button id="cancel-btn" type="button">Отменить</button>
+          <section id="approval-panel" class="approval-card hidden" aria-label="Требуется подтверждение">
+            <h3>Требуется ваше подтверждение</h3>
+            <p class="muted">Panda подготовил изменение, которое затрагивает внешнюю систему.</p>
+            <div id="preview-content"></div>
+            <div class="approval-actions">
+              <button id="approve-btn" type="button" class="primary">Подтвердить</button>
+              <button id="reject-btn" type="button" class="danger">Отклонить</button>
+              <button id="cancel-btn" type="button">Отменить</button>
+            </div>
+          </section>
+
+          <section id="diagnostics-panel" class="panel diagnostics hidden" aria-label="Техническая диагностика">
+            <details>
+              <summary>Техническая диагностика</summary>
+              <section id="progress-panel" class="subpanel hidden" aria-label="Ход выполнения">
+                <h4>Ход выполнения</h4>
+                <ul id="progress-list"></ul>
+              </section>
+              <section id="plan-panel" class="subpanel hidden" aria-label="План">
+                <h4>План</h4>
+                <div id="plan-content"></div>
+              </section>
+              <section id="result-panel" class="subpanel hidden" aria-label="Результат">
+                <h4>Результат</h4>
+                <div id="result-content"></div>
+                <div id="artifact-list" class="artifact-list"></div>
+              </section>
+            </details>
+          </section>
         </div>
-      </section>
+      </div>
 
-      <section id="diagnostics-panel" class="panel diagnostics hidden" aria-label="Техническая диагностика">
-        <details>
-          <summary>Техническая диагностика</summary>
-          <section id="progress-panel" class="subpanel hidden" aria-label="Ход выполнения">
-            <h4>Ход выполнения</h4>
-            <ul id="progress-list"></ul>
-          </section>
-          <section id="plan-panel" class="subpanel hidden" aria-label="План">
-            <h4>План</h4>
-            <div id="plan-content"></div>
-          </section>
-          <section id="result-panel" class="subpanel hidden" aria-label="Результат">
-            <h4>Результат</h4>
-            <div id="result-content"></div>
-            <div id="artifact-list" class="artifact-list"></div>
-          </section>
-        </details>
-      </section>
-
-      <footer class="composer">
-        <div id="attachment-chips" class="attachment-chips" aria-label="Вложения"></div>
-        <div class="composer-row">
-          <label class="file-label" aria-label="Прикрепить файл">
-            📎
-            <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
-          </label>
-          <textarea id="composer-input" rows="1" placeholder="Спросите Panda…" aria-label="Сообщение"></textarea>
-          <button id="send-btn" type="button" class="primary">Отправить</button>
+      <footer class="composer-dock">
+        <div class="composer chat-column">
+          <div id="attachment-chips" class="attachment-chips" aria-label="Вложения"></div>
+          <div class="composer-row">
+            <label class="file-label" aria-label="Прикрепить файл">
+              📎
+              <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
+            </label>
+            <textarea id="composer-input" rows="1" placeholder="Спросите Panda…" aria-label="Сообщение"></textarea>
+            <button id="send-btn" type="button" class="primary send-btn">Отправить</button>
+          </div>
+          <p id="composer-error" class="error-text" role="alert"></p>
         </div>
-        <p id="composer-error" class="error-text" role="alert"></p>
       </footer>
     </main>
   </div>

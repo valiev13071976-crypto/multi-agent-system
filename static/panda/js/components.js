@@ -91,7 +91,9 @@
           tbody.appendChild(tr);
         });
         table.appendChild(tbody);
-        root.appendChild(table);
+        const wrap = el("div", "table-scroll");
+        wrap.appendChild(table);
+        root.appendChild(wrap);
       }
     }
     return root;

@@ -16,9 +16,20 @@
   --danger: #b91c1c;
   --focus: #2563eb;
   --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-md: 0 8px 24px rgba(16, 24, 40, 0.08);
   --radius: 12px;
   --radius-sm: 8px;
   --font: "Segoe UI", system-ui, -apple-system, sans-serif;
+  --sidebar-width: clamp(220px, 22vw, 280px);
+  --chat-max: 48rem;
+  --space-side: clamp(0.75rem, 2.5vw, 1.5rem);
+  --composer-bottom: clamp(1.25rem, 3.5vh, 3.5rem);
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --app-height: 100vh;
+  --app-height: 100dvh;
 }
 
 * { box-sizing: border-box; }
@@ -37,27 +48,39 @@ body {
   display: flex;
   align-items: center;
   gap: 0.65rem;
+  min-width: 0;
 }
 
 .brand-logo {
   object-fit: contain;
   border-radius: 8px;
+  flex-shrink: 0;
 }
 
 .brand-text {
   display: flex;
   flex-direction: column;
   line-height: 1.2;
+  min-width: 0;
 }
 
-.brand-title { font-size: 1rem; font-weight: 700; }
+.brand-title {
+  font-size: 1rem;
+  font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .brand-subtitle { font-size: 0.78rem; color: var(--text-secondary); }
 .brand-text-fallback { font-weight: 700; font-size: 1.1rem; }
 
 .app-shell {
   display: grid;
-  grid-template-columns: 260px 1fr;
-  min-height: 100vh;
+  grid-template-columns: var(--sidebar-width) minmax(0, 1fr);
+  height: var(--app-height);
+  max-height: var(--app-height);
+  overflow: hidden;
+  width: 100%;
 }
 
 .app-sidebar {
@@ -65,20 +88,28 @@ body {
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
 }
 
 .app-sidebar-header {
   padding: 1rem;
   border-bottom: 1px solid var(--border);
+  display: grid;
+  gap: 0.65rem;
+  position: relative;
 }
+
+.sidebar-close { display: none; }
 
 .app-nav {
   display: flex;
   flex-direction: column;
   padding: 0.5rem;
   gap: 0.15rem;
-  flex: 1;
+  flex: 0 0 auto;
 }
 
 .app-nav a,
@@ -86,7 +117,8 @@ body {
   display: block;
   width: 100%;
   text-align: left;
-  padding: 0.6rem 0.75rem;
+  padding: 0.65rem 0.75rem;
+  min-height: 44px;
   border-radius: var(--radius-sm);
   border: none;
   background: transparent;
@@ -114,18 +146,26 @@ textarea:focus-visible {
 
 .app-main {
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  min-height: 100vh;
+  height: 100%;
+  overflow: hidden;
 }
 
 .app-main-header {
   display: flex;
   align-items: center;
   gap: 0.75rem;
-  padding: 0.85rem 1.25rem;
+  padding: 0.75rem var(--space-side);
   background: var(--surface);
   border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+  min-width: 0;
+}
+
+.sidebar-backdrop {
+  display: none;
 }
 
 .card-grid {
@@ -161,6 +201,7 @@ button.primary {
   border: none;
   border-radius: var(--radius-sm);
   padding: 0.55rem 0.9rem;
+  min-height: 44px;
   cursor: pointer;
   font: inherit;
 }
@@ -169,11 +210,12 @@ button.primary:hover { background: var(--accent-hover); }
 button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
 
 .auth-gate {
-  min-height: 100vh;
+  min-height: var(--app-height);
   display: grid;
   place-items: center;
-  padding: 1rem;
+  padding: max(1rem, var(--safe-top)) max(1rem, var(--safe-right)) max(1rem, var(--safe-bottom)) max(1rem, var(--safe-left));
   background: var(--background);
+  overflow: auto;
 }
 
 .auth-card {
@@ -189,24 +231,50 @@ button.primary:disabled { opacity: 0.55; cursor: not-allowed; }
   width: 100%;
   margin: 0.5rem 0 1rem;
   padding: 0.65rem 0.75rem;
+  min-height: 44px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text-primary);
 }
 
-@media (max-width: 900px) {
-  .app-shell { grid-template-columns: 1fr; }
+/* NARROW DESKTOP / TABLET / MOBILE — drawer sidebar */
+@media (max-width: 1023px) {
+  .app-shell { grid-template-columns: minmax(0, 1fr); }
   .app-sidebar {
     position: fixed;
-    inset: 0 auto 0 0;
-    width: min(280px, 88vw);
-    z-index: 30;
+    top: 0;
+    left: 0;
+    bottom: 0;
+    width: min(var(--sidebar-width), calc(100vw - 3rem));
+    z-index: 40;
     transform: translateX(-105%);
     transition: transform 0.2s ease;
-    box-shadow: var(--shadow-sm);
+    box-shadow: var(--shadow-md);
+    height: var(--app-height);
   }
   .app-sidebar.open { transform: translateX(0); }
+  .sidebar-close {
+    display: inline-grid;
+    place-items: center;
+    position: absolute;
+    top: 0.75rem;
+    right: 0.75rem;
+    min-width: 44px;
+    min-height: 44px;
+  }
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: rgba(16, 24, 40, 0.35);
+    z-index: 35;
+    border: 0;
+    padding: 0;
+    margin: 0;
+    cursor: pointer;
+  }
+  .sidebar-backdrop[hidden] { display: none !important; }
 }
 
 @media (prefers-reduced-motion: reduce) {
