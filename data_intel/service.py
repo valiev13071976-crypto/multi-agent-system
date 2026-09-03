@@ -5,9 +5,24 @@ from __future__ import annotations
 from dataclasses import replace
 
 from data_intel.analysis import analyze_margin, detect_anomalies
+from data_intel.business_process import (
+    assess_structure_for_process,
+    basic_margin,
+    build_business_workbook,
+    find_conflicting_identifier_duplicates,
+    merge_with_provenance,
+    price_comparison_changed_only,
+    stock_reconciliation_report,
+)
 from data_intel.cleaning import clean_row
 from data_intel.compare import compare_price_lists, reconcile_stock
 from data_intel.contracts import (
+    ROLE_ARTICLE,
+    ROLE_EAN,
+    ROLE_PRICE,
+    ROLE_PURCHASE_PRICE,
+    ROLE_SELLING_PRICE,
+    ROLE_SKU,
     DataRow,
     DataTransformation,
     DatasetDescriptor,
@@ -36,6 +51,7 @@ from data_intel.large import LargeDatasetPolicy, large_dataset_execution_key
 from data_intel.mapping import role_map
 from data_intel.merge import merge_datasets
 from data_intel.product_match import match_products
+from data_intel.quality import build_quality_report
 from data_intel.query import aggregate, pivot_report, search_rows
 from data_intel.reconcile import reconcile_payments, reconcile_vat_amounts
 from data_intel.store import InMemoryDatasetStore
@@ -426,8 +442,8 @@ class DataIntelligenceService:
                 }
             issues = self.anomalies(dataset_id, tenant_id=tenant_id)
             sheets = {
-                "Data": {"headers": headers, "rows": body, "text_cols": text_cols},
-                "Issues": {
+                "RESULT": {"headers": headers, "rows": body, "text_cols": text_cols},
+                "ISSUES": {
                     "headers": ["row_ref", "column", "issue_type", "severity", "description"],
                     "rows": [
                         [x["row_ref"], x["column"], x["issue_type"], x["severity"], x["description"]]
@@ -442,6 +458,7 @@ class DataIntelligenceService:
                     "dataset_id": dataset_id,
                     "source_document_id": desc.source_document_id,
                     "checksum": desc.checksum,
+                    "original_preserved": True,
                 },
             )
             name = "dataset.xlsx"
@@ -454,6 +471,218 @@ class DataIntelligenceService:
             kind=kind,
         )
         return {"dataset_id": dataset_id, "filename": name, "size": len(data), "content": data}
+
+    def quality_report(self, dataset_id: str, *, tenant_id: str) -> dict:
+        desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
+        if desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id)
+        cols = desc.tables[0].columns if desc.tables else ()
+        return build_quality_report(
+            rows=rows,
+            columns=cols,
+            source_file=desc.provenance.get("filename", "") if isinstance(desc.provenance, dict) else "",
+            source_sheet=desc.tables[0].sheet if desc.tables else "",
+        )
+
+    def assess_structure(self, dataset_id: str, *, tenant_id: str, required_roles: set[str] | None = None) -> dict:
+        return assess_structure_for_process(self, dataset_id, tenant_id=tenant_id, required_roles=required_roles)
+
+    def run_price_compare_process(
+        self,
+        left_dataset_id: str,
+        right_dataset_id: str,
+        *,
+        tenant_id: str,
+        changed_only: bool = True,
+    ) -> dict:
+        """Offline business workflow: compare two price lists → RESULT/ISSUES/SUMMARY workbook."""
+        left_desc = self.store.get_dataset(left_dataset_id, tenant_id=tenant_id)
+        right_desc = self.store.get_dataset(right_dataset_id, tenant_id=tenant_id)
+        if left_desc is None or right_desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        id_roles = {ROLE_SKU, ROLE_ARTICLE, ROLE_EAN}
+        price_roles = {ROLE_PRICE, ROLE_SELLING_PRICE, ROLE_PURCHASE_PRICE}
+        left_roles = {c.semantic_role for t in left_desc.tables for c in t.columns}
+        right_roles = {c.semantic_role for t in right_desc.tables for c in t.columns}
+        id_ok = bool(left_roles & id_roles) and bool(right_roles & id_roles)
+        price_ok = bool(left_roles & price_roles) and bool(right_roles & price_roles)
+        if not id_ok or not price_ok:
+            return {
+                "status": "NEEDS_USER_MAPPING",
+                "left": assess_structure_for_process(self, left_dataset_id, tenant_id=tenant_id),
+                "right": assess_structure_for_process(self, right_dataset_id, tenant_id=tenant_id),
+                "missing": {
+                    "left_identifiers": not bool(left_roles & id_roles),
+                    "right_identifiers": not bool(right_roles & id_roles),
+                    "left_price": not bool(left_roles & price_roles),
+                    "right_price": not bool(right_roles & price_roles),
+                },
+            }
+        left_rows = self.store.get_rows(left_dataset_id, tenant_id=tenant_id)
+        right_rows = self.store.get_rows(right_dataset_id, tenant_id=tenant_id)
+        assert_sync_data_allowed(row_count=len(left_rows) + len(right_rows), operations=("compare", "generate_xlsx"))
+        result = price_comparison_changed_only(left_rows, right_rows)
+        changed = result["changed"] if changed_only else (
+            result["changed"]
+            + [
+                {
+                    "identifier": x.get("key"),
+                    "product": x.get("product"),
+                    "old_price": x.get("old_price"),
+                    "new_price": x.get("new_price"),
+                    "absolute_difference": "0",
+                    "percentage_difference": "0",
+                    "match_status": x.get("match_method"),
+                    "sku": x.get("sku"),
+                    "ean": x.get("ean"),
+                    "warnings": "",
+                }
+                for x in (result["comparison"].get("matched") or [])
+            ]
+        )
+        headers = [
+            "identifier",
+            "product",
+            "old_price",
+            "new_price",
+            "absolute_difference",
+            "percentage_difference",
+            "match_status",
+            "sku",
+            "ean",
+            "warnings",
+        ]
+        body = [[c.get(h) for h in headers] for c in changed]
+        lq = build_quality_report(rows=left_rows, columns=left_desc.tables[0].columns if left_desc.tables else ())
+        rq = build_quality_report(rows=right_rows, columns=right_desc.tables[0].columns if right_desc.tables else ())
+        issues = list(lq.get("issues") or []) + list(rq.get("issues") or [])
+        summary = {
+            **result["summary"],
+            "changed_only": changed_only,
+            "result_rows": len(body),
+            "process": "price_compare",
+        }
+        content = build_business_workbook(
+            result_headers=headers,
+            result_rows=body,
+            issues=issues,
+            summary=summary,
+            provenance={
+                "left_dataset_id": left_dataset_id,
+                "right_dataset_id": right_dataset_id,
+                "original_preserved": True,
+            },
+            text_cols={0, 7, 8},
+        )
+        out_name = "price_compare_result.xlsx"
+        self.store.save_blob(left_dataset_id, out_name, content, tenant_id=tenant_id)
+        return {
+            "status": "OK",
+            "filename": out_name,
+            "size": len(content),
+            "content": content,
+            "summary": summary,
+            "issues_count": len(issues),
+        }
+
+    def run_stock_reconcile_process(self, left_dataset_id: str, right_dataset_id: str, *, tenant_id: str) -> dict:
+        if self.store.get_dataset(left_dataset_id, tenant_id=tenant_id) is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        if self.store.get_dataset(right_dataset_id, tenant_id=tenant_id) is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        left_rows = self.store.get_rows(left_dataset_id, tenant_id=tenant_id)
+        right_rows = self.store.get_rows(right_dataset_id, tenant_id=tenant_id)
+        report = stock_reconciliation_report(left_rows, right_rows)
+        headers = ["identifier", "product", "stock_A", "stock_B", "difference", "status"]
+        body = [[r.get(h) for h in headers] for r in report["rows"]]
+        content = build_business_workbook(
+            result_headers=headers,
+            result_rows=body,
+            issues=[],
+            summary=report["summary"],
+            provenance={"left_dataset_id": left_dataset_id, "right_dataset_id": right_dataset_id, "original_preserved": True},
+            text_cols={0},
+        )
+        name = "stock_reconcile_result.xlsx"
+        self.store.save_blob(left_dataset_id, name, content, tenant_id=tenant_id)
+        return {"status": "OK", "filename": name, "content": content, "summary": report["summary"]}
+
+    def run_merge_dedupe_process(
+        self,
+        left_dataset_id: str,
+        right_dataset_id: str,
+        *,
+        tenant_id: str,
+    ) -> dict:
+        left_desc = self.store.get_dataset(left_dataset_id, tenant_id=tenant_id)
+        right_desc = self.store.get_dataset(right_dataset_id, tenant_id=tenant_id)
+        if left_desc is None or right_desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        left_rows = self.store.get_rows(left_dataset_id, tenant_id=tenant_id)
+        right_rows = self.store.get_rows(right_dataset_id, tenant_id=tenant_id)
+        merged = merge_with_provenance(left_rows, right_rows, left_file=left_dataset_id, right_file=right_dataset_id)
+        headers = [
+            "source_file",
+            "source_sheet",
+            "source_row",
+            "sku",
+            "article",
+            "ean",
+            "product_name",
+            "price",
+            "stock",
+        ]
+        body = []
+        for r in merged["rows"]:
+            body.append(
+                [
+                    r.get("source_file"),
+                    r.get("source_sheet"),
+                    r.get("source_row") or r.get("__source_row"),
+                    r.get("sku") or r.get("article"),
+                    r.get("article"),
+                    r.get("ean"),
+                    r.get("product_name") or r.get("name"),
+                    r.get("price") or r.get("selling_price"),
+                    r.get("stock"),
+                ]
+            )
+        conflict_issues = [
+            {
+                "file": "",
+                "sheet": "",
+                "row": "",
+                "column": c.get("key"),
+                "reason": "conflicting_duplicate",
+                "severity": "error",
+            }
+            for c in merged["conflicts"]
+        ]
+        content = build_business_workbook(
+            result_headers=headers,
+            result_rows=body,
+            issues=conflict_issues,
+            summary=merged["summary"],
+            provenance={"original_preserved": True, "process": "merge_dedupe"},
+            text_cols={0, 1, 3, 4, 5},
+        )
+        name = "merge_result.xlsx"
+        self.store.save_blob(left_dataset_id, name, content, tenant_id=tenant_id)
+        return {
+            "status": "OK",
+            "filename": name,
+            "content": content,
+            "summary": merged["summary"],
+            "conflicts": merged["conflicts"],
+        }
+
+    def basic_margin_for_row(self, row: dict) -> dict:
+        return basic_margin(row)
+
+    def conflicting_duplicates(self, dataset_id: str, *, tenant_id: str) -> list[dict]:
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id)
+        return find_conflicting_identifier_duplicates(rows)
 
     def from_acquisition_records(self, records: list, *, tenant_id: str, dataset_id: str | None = None) -> dict:
         """Bridge Acquisition ParsedRecord → dataset rows."""

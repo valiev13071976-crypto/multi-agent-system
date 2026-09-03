@@ -68,7 +68,7 @@ def generate_workbook(
         wb.remove(default)
 
         if summary is not None:
-            ws = wb.create_sheet("Summary", 0)
+            ws = wb.create_sheet("SUMMARY", 0)
             from openpyxl.styles import Font
 
             bold = Font(bold=True)
@@ -130,6 +130,35 @@ def _validate_xlsx_bytes(data: bytes) -> None:
         raise
     except Exception as exc:
         raise DataIntelError(EXCEL_GENERATION_FAILED) from exc
+
+
+def generate_business_result_workbook(
+    *,
+    result_headers: list[str],
+    result_rows: list[list],
+    issue_headers: list[str],
+    issue_rows: list[list],
+    summary: dict,
+    provenance: dict | None = None,
+    text_cols: set[int] | None = None,
+) -> bytes:
+    """Canonical Block 10 output: RESULT + ISSUES + SUMMARY (+ Provenance)."""
+    return generate_workbook(
+        summary=dict(summary or {}),
+        sheets={
+            "RESULT": {
+                "headers": list(result_headers),
+                "rows": list(result_rows),
+                "text_cols": set(text_cols or ()),
+            },
+            "ISSUES": {
+                "headers": list(issue_headers),
+                "rows": list(issue_rows),
+                "text_cols": set(),
+            },
+        },
+        provenance=dict(provenance or {}),
+    )
 
 
 def generate_searchable_payments_workbook(rows: list[dict], *, title: str = "Payments") -> bytes:
