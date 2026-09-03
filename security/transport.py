@@ -6,5 +6,6 @@ PRODUCTION_TRANSPORT = "HTTPS/TLS"
 # - TLS termination: Railway / reverse proxy (not FastAPI)
 # - Do not trust client X-Forwarded-* without verified proxy config
 # - HSTS / security headers: configure at reverse proxy when possible
-# - Bearer/API-key auth at application layer (security.api_auth)
-# - Session cookies: not used; CSRF not required for bearer-token API
+# - Dual auth: machine/workspace API-key (security.api_auth) + human session cookie (accounts.dual_auth)
+# - Human sessions: HttpOnly cookie `panda_session` + CSRF token for state-changing routes
+# - Do not store human passwords or session secrets in localStorage

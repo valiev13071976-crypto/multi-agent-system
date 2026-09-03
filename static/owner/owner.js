@@ -37,13 +37,14 @@
 
   function headers() {
     const key = sessionStorage.getItem(SESSION_KEY) || "";
-    const h = { Accept: "application/json", "X-API-Key": key };
+    const h = { Accept: "application/json" };
+    if (key) h["X-API-Key"] = key;
     if (roleContext.tenantId) h["X-Active-Tenant"] = roleContext.tenantId;
     return h;
   }
 
   async function fetchJson(path) {
-    const res = await fetch(path, { headers: headers() });
+    const res = await fetch(path, { headers: headers(), credentials: "same-origin" });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.message || data.detail?.message || res.statusText);
@@ -113,15 +114,49 @@
     els.viewTitle.textContent = "Пользователи";
     setStatus("Загрузка…");
     try {
-      const data = await fetchJson("/api/product/members");
-      const rows = (data.items || []).map(
-        (m) => `<tr><td>${esc(m.user_id)}</td><td>${esc(m.role)}</td><td>${esc(m.status || "active")}</td></tr>`
-      ).join("");
+      let data;
+      try {
+        data = await fetchJson("/api/owner/users");
+      } catch (_) {
+        data = await fetchJson("/api/product/members");
+      }
+      const rows = (data.items || []).map((m) => {
+        const name = m.username || m.display_name || m.user_id;
+        return `<tr>
+          <td>${esc(name)}</td>
+          <td>${esc(m.tenant_id || roleContext.tenantId || "")}</td>
+          <td>${esc(m.role)}</td>
+          <td>${esc(m.status || "ACTIVE")}</td>
+          <td>${esc(m.access_type || "—")}</td>
+          <td>${esc(m.plan_id || "—")}</td>
+          <td>${esc(m.trial_ends_at || m.paid_until || "—")}</td>
+          <td>${esc(m.last_login_at || "—")}</td>
+        </tr>`;
+      }).join("");
       els.content.innerHTML = rows
-        ? `<div class="responsive-table-wrap"><table class="mgmt-table"><thead><tr><th>Пользователь</th><th>Роль</th><th>Статус</th></tr></thead><tbody>${rows}</tbody></table></div>`
+        ? `<div class="responsive-table-wrap"><table class="mgmt-table"><thead><tr>
+            <th>Пользователь</th><th>Tenant</th><th>Роль</th><th>Статус</th>
+            <th>Доступ</th><th>План</th><th>До / до</th><th>Последний вход</th>
+           </tr></thead><tbody>${rows}</tbody></table></div>`
         : `<div class="empty-state">Пользователей пока нет.</div>`;
     } catch (_) {
       els.content.innerHTML = `<div class="empty-state">Данные о пользователях пока недоступны.</div>`;
+    }
+    setStatus("");
+  }
+
+  async function renderAccess() {
+    els.viewTitle.textContent = "Доступ / тарифы";
+    setStatus("Загрузка…");
+    try {
+      const plans = await fetchJson("/api/accounts/plans");
+      const items = (plans.items || []).map(
+        (p) => `<tr><td>${esc(p.name)}</td><td>${esc(p.code)}</td><td>${esc((p.entitlements || []).join(", "))}</td></tr>`
+      ).join("");
+      els.content.innerHTML = `<div class="responsive-table-wrap"><table class="mgmt-table"><thead><tr><th>Тариф</th><th>Код</th><th>Возможности</th></tr></thead><tbody>${items}</tbody></table></div>
+        <p class="muted">Реальный эквайринг не активирован. Состояние подписки — серверное.</p>`;
+    } catch (_) {
+      els.content.innerHTML = `<div class="empty-state">Тарифы пока недоступны.</div>`;
     }
     setStatus("");
   }
@@ -223,6 +258,7 @@
   const views = {
     home: renderHome,
     users: renderUsers,
+    access: renderAccess,
     usage: renderUsage,
     "ai-cost": renderAiCost,
     health: renderHealth,
@@ -239,7 +275,24 @@
   }
 
   async function enterApp() {
-    roleContext = await window.PandaRoleContext.resolveRoleContext(sessionStorage.getItem(SESSION_KEY));
+    const key = sessionStorage.getItem(SESSION_KEY);
+    if (key) {
+      roleContext = await window.PandaRoleContext.resolveRoleContext(key);
+    } else {
+      try {
+        const me = await fetchJson("/api/accounts/me");
+        roleContext = {
+          loaded: true,
+          role: me.role,
+          isOwner: me.role === "OWNER",
+          isManagement: me.role === "OWNER" || me.role === "ADMIN",
+          tenantId: me.tenant_id,
+          userId: me.user_id,
+        };
+      } catch (_) {
+        roleContext = { loaded: false, isManagement: false };
+      }
+    }
     if (!roleContext.isManagement) {
       hide(els.app);
       show(els.accessDenied);
@@ -267,6 +320,7 @@
 
   function logout() {
     sessionStorage.removeItem(SESSION_KEY);
+    fetch("/api/accounts/logout", { method: "POST", credentials: "same-origin" }).catch(() => {});
     show(els.authGate);
     hide(els.app);
     hide(els.accessDenied);
@@ -292,9 +346,5 @@
   });
 
   initBrand();
-  if (sessionStorage.getItem(SESSION_KEY)) {
-    enterApp().catch(() => show(els.authGate));
-  } else {
-    show(els.authGate);
-  }
+  enterApp().catch(() => show(els.authGate));
 })();

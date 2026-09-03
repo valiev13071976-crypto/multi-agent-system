@@ -271,6 +271,9 @@ from scale_optimization.router import configure_scale_optimization_router
 from saas_product.runtime import build_saas_product_runtime
 from saas_product.router import configure_saas_product_router
 from saas_product.deployment import assert_production_safe
+from accounts.runtime import build_accounts_runtime
+from accounts.router import configure_accounts_router
+from accounts.dual_auth import configure_accounts_auth, install_dual_auth
 from production_foundation.runtime import initialize_production_foundation
 from integrations.production.runtime import build_production_integration_runtime
 from integrations.production.router import configure_production_integration_router
@@ -288,6 +291,12 @@ ui_chat_runtime = build_ui_chat_runtime(
     production_bundle=_production_bundle,
 )
 saas_runtime = build_saas_product_runtime(finops=getattr(router, "finops", None), production_bundle=_production_bundle)
+accounts_runtime = build_accounts_runtime(
+    saas_store=saas_runtime.store,
+    saas_billing=saas_runtime.service.billing,
+)
+configure_accounts_auth(accounts_runtime.service)
+install_dual_auth()
 ba_api_runtime = build_business_assistant_api_runtime()
 tg_interface_runtime = None
 if telegram_interface_enabled():
@@ -462,6 +471,7 @@ app.include_router(configure_scheduled_automation_router(scheduled_automation_ru
 app.include_router(configure_controlled_automation_router(controlled_automation_runtime.service, controlled_automation_runtime.policy))
 app.include_router(configure_scale_optimization_router(scale_optimization_runtime.service, scale_optimization_runtime.policy))
 app.include_router(configure_saas_product_router(saas_runtime.service))
+app.include_router(configure_accounts_router(accounts_runtime.service))
 app.include_router(
     configure_business_assistant_api_router(ba_api_runtime.service, upload_dir=ba_api_runtime.upload_dir)
 )
@@ -1070,4 +1080,34 @@ async def product_ui() -> str:
 @app.get("/analytics", response_class=HTMLResponse, include_in_schema=False)
 async def analytics_ui() -> str:
     with open("static/analytics/index.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/login", response_class=HTMLResponse, include_in_schema=False)
+async def login_ui() -> str:
+    with open("static/accounts/login.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/terms", response_class=HTMLResponse, include_in_schema=False)
+async def terms_ui() -> str:
+    with open("static/accounts/terms.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/privacy", response_class=HTMLResponse, include_in_schema=False)
+async def privacy_ui() -> str:
+    with open("static/accounts/privacy.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/personal-data", response_class=HTMLResponse, include_in_schema=False)
+async def personal_data_ui() -> str:
+    with open("static/accounts/personal-data.html", encoding="utf-8") as fh:
+        return fh.read()
+
+
+@app.get("/ai-disclosure", response_class=HTMLResponse, include_in_schema=False)
+async def ai_disclosure_ui() -> str:
+    with open("static/accounts/ai-disclosure.html", encoding="utf-8") as fh:
         return fh.read()

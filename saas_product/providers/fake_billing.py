@@ -79,6 +79,48 @@ class FakeBillingProvider:
         checkout.status = "completed"
         return event
 
+    def emit_event(
+        self,
+        *,
+        event_type: str,
+        tenant_id: str,
+        checkout_id: str = "",
+        subscription_ref: str = "",
+        sequence: int | None = None,
+        amount_minor: int = 0,
+        currency: str = "USD",
+    ) -> ProviderEvent:
+        """Test helper for renewal/expiry/out-of-order events."""
+        if sequence is None:
+            self._sequence += 1
+            sequence = self._sequence
+        else:
+            self._sequence = max(self._sequence, sequence)
+        payload = {
+            "event_type": event_type,
+            "tenant_id": tenant_id,
+            "checkout_id": checkout_id,
+            "subscription_ref": subscription_ref,
+            "sequence": sequence,
+        }
+        payload_hash = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+        event_id = f"evt-{uuid.uuid4().hex[:16]}"
+        event = ProviderEvent(
+            event_id=event_id,
+            event_type=event_type,
+            tenant_id=tenant_id,
+            checkout_id=checkout_id,
+            subscription_ref=subscription_ref or f"sub-{uuid.uuid4().hex[:12]}",
+            invoice_ref=f"inv-{uuid.uuid4().hex[:12]}",
+            amount_minor=amount_minor,
+            currency=currency,
+            sequence=sequence,
+            payload_hash=payload_hash,
+            signature=self._sign(event_id, payload_hash),
+        )
+        self._events[event_id] = event
+        return event
+
     def verify_webhook(self, *, event_id: str, signature: str, payload_hash: str) -> bool:
         expected = self._sign(event_id, payload_hash)
         return hmac.compare_digest(expected, signature)

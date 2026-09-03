@@ -22,6 +22,7 @@
     const isForm = options.body instanceof FormData;
     const res = await fetch(`${BASE}${path}`, {
       ...options,
+      credentials: "same-origin",
       headers: {
         ...(isForm ? {} : { "Content-Type": "application/json" }),
         ...authHeaders(),

@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru" data-theme="light">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Panda — Вход</title>
+  <link rel="stylesheet" href="/static/shared/theme.css">
+  <link rel="stylesheet" href="/static/accounts/accounts.css">
+</head>
+<body class="accounts-page">
+  <main class="accounts-shell">
+    <div id="brand" class="accounts-brand"></div>
+    <h1>Вход в Panda</h1>
+    <p class="muted">Интеллектуальный ассистент для вашей работы</p>
+    <form id="login-form" class="accounts-form" autocomplete="on">
+      <label for="username">Имя пользователя</label>
+      <input id="username" name="username" type="text" autocomplete="username" required minlength="3">
+      <label for="password">Пароль</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <p id="error" class="error-text" role="alert" hidden></p>
+      <button id="submit" type="submit" class="primary">Войти</button>
+    </form>
+    <p class="muted legal-links">
+      <a href="/terms">Условия</a> ·
+      <a href="/privacy">Конфиденциальность</a> ·
+      <a href="/personal-data">Персональные данные</a> ·
+      <a href="/ai-disclosure">Об ИИ</a>
+    </p>
+    <p class="muted"><a href="/">← К чату</a></p>
+  </main>
+  <script src="/static/shared/brand.js"></script>
+  <script src="/static/accounts/login.js"></script>
+</body>
+</html>

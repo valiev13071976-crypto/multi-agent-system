@@ -12,12 +12,12 @@
     <div class="auth-card">
       <div id="auth-brand"></div>
       <h1>Вход для управления</h1>
-      <p class="muted">Используйте API-ключ с правами управления.</p>
-      <label for="api-key-input">API-ключ</label>
-      <input id="api-key-input" type="password" autocomplete="off">
-      <p id="auth-error" class="error-text" role="alert"></p>
-      <button id="auth-submit" type="button" class="primary">Продолжить</button>
-      <p class="muted"><a href="/">← Вернуться в чат</a></p>
+          <p class="muted">Войдите как OWNER через <a href="/login">/login</a> или используйте workspace API-ключ.</p>
+          <label for="api-key-input">API-ключ (legacy / workspace)</label>
+          <input id="api-key-input" type="password" autocomplete="off">
+          <p id="auth-error" class="error-text" role="alert"></p>
+          <button id="auth-submit" type="button" class="primary">Продолжить с API-ключом</button>
+          <p class="muted"><a href="/login">Обычный вход (логин/пароль)</a> · <a href="/">← Чат</a></p>
     </div>
   </div>
 
@@ -30,13 +30,14 @@
         <a href="#" data-view="home" class="active">Главная</a>
         <a href="/">Чат с Panda</a>
         <a href="#" data-view="users">Пользователи</a>
+        <a href="#" data-view="access">Доступ / тарифы</a>
         <a href="#" data-view="usage">Использование Panda</a>
         <a href="#" data-view="ai-cost">Расходы AI</a>
         <a href="#" data-view="health">Состояние системы</a>
         <a href="#" data-view="activity">События</a>
         <a href="/admin" id="diagnostics-link">Техническая диагностика</a>
         <span class="nav-placeholder muted">Подписки — скоро</span>
-        <span class="nav-placeholder muted">Тарифы — скоро</span>
+        <span class="nav-placeholder muted">Эквайринг — скоро</span>
       </nav>
       <footer class="sidebar-footer">
         <div id="account-label" class="account-label"></div>
