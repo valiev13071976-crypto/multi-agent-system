@@ -1,0 +1,22 @@
+"""Governed publish/export errors — fail closed."""
+
+from __future__ import annotations
+
+
+class GovernedPublishError(RuntimeError):
+    def __init__(self, code: str, message: str = ""):
+        self.code = code
+        self.reason = code
+        super().__init__(message or code)
+
+
+PUBLISH_ACCESS_DENIED = "PUBLISH_ACCESS_DENIED"
+PUBLISH_NOT_FOUND = "PUBLISH_NOT_FOUND"
+PUBLISH_BLOCKED = "PUBLISH_BLOCKED"
+PUBLISH_LIVE_FORBIDDEN = "PUBLISH_LIVE_FORBIDDEN"
+PUBLISH_APPROVAL_REQUIRED = "PUBLISH_APPROVAL_REQUIRED"
+PUBLISH_STALE = "PUBLISH_STALE"
+PUBLISH_CAPABILITY_DENIED = "PUBLISH_CAPABILITY_DENIED"
+PUBLISH_EMPTY_SELECTION = "PUBLISH_EMPTY_SELECTION"
+PUBLISH_MODE_FORBIDDEN = "PUBLISH_MODE_FORBIDDEN"
+PUBLISH_TENANT_REQUIRED = "PUBLISH_TENANT_REQUIRED"
