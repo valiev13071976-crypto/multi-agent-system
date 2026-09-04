@@ -3,7 +3,10 @@
   const MANAGEMENT_ROLES = new Set(["OWNER", "ADMIN"]);
 
   async function fetchJson(path, headers) {
-    const res = await fetch(path, { headers: { Accept: "application/json", ...headers } });
+    const res = await fetch(path, {
+      credentials: "same-origin",
+      headers: { Accept: "application/json", ...headers },
+    });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
       const err = new Error(data.message || data.detail?.message || res.statusText);
@@ -15,6 +18,24 @@
   }
 
   async function resolveRoleContext(apiKey) {
+    try {
+      const meHeaders = apiKey ? { "X-API-Key": apiKey } : {};
+      const me = await fetchJson("/api/accounts/me", meHeaders);
+      if (me && me.authenticated && me.auth_method === "session") {
+        const role = me.role || null;
+        return {
+          loaded: true,
+          role,
+          isOwner: role === "OWNER",
+          isManagement: role != null && MANAGEMENT_ROLES.has(role),
+          tenantId: me.tenant_id || null,
+          userId: me.user_id || null,
+          entitlements: me.entitlements || null,
+        };
+      }
+    } catch (_) {
+      /* fall through to API-key product role lookup */
+    }
     if (!apiKey) {
       return { loaded: false, role: null, isManagement: false, isOwner: false, tenantId: null, userId: null };
     }

@@ -111,4 +111,6 @@ def _session_context(request: Request, session_id: str, request_id: str) -> Requ
 def install_dual_auth() -> None:
     import security.api_auth as api_auth
 
+    # Mutate the same Depends() callable (import-time bindings) plus the module attr.
+    api_auth.set_security_context_override(get_security_context_dual)
     api_auth.get_security_context = get_security_context_dual

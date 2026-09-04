@@ -114,6 +114,11 @@
     return true;
   }
 
+  function csrfHeader() {
+    const match = document.cookie.match(/(?:^|; )panda_csrf=([^;]*)/);
+    return match ? decodeURIComponent(match[1]) : "";
+  }
+
   async function loadRoleContext() {
     state.roleContext = await roleApi.resolveRoleContext(api.getApiKey());
     updateRoleUi();
@@ -143,6 +148,12 @@
 
   function logout() {
     stopPolling();
+    const csrf = csrfHeader();
+    fetch("/api/accounts/logout", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { Accept: "application/json", "X-CSRF-Token": csrf },
+    }).catch(function () {});
     api.clearApiKey();
     state.conversationId = null;
     state.activeRequestId = null;
@@ -568,6 +579,17 @@
         return;
       } catch (_) {
         api.clearApiKey();
+      }
+    }
+    if (api.hasHumanSession) {
+      try {
+        if (await api.hasHumanSession()) {
+          await verifyAuth();
+          await enterApp();
+          return;
+        }
+      } catch (_) {
+        /* invalid or unusable session — show API-key gate */
       }
     }
     show(els.authGate);

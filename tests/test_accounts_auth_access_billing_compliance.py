@@ -137,6 +137,7 @@ class AccountsFoundationTests(unittest.TestCase):
         me = self.client.get("/api/accounts/me")
         self.assertEqual(me.status_code, 200)
         self.assertTrue(me.json()["authenticated"])
+        self.assertEqual(me.json().get("auth_method"), "session")
         # logout requires CSRF — set header from response
         csrf = r.json().get("csrf_token") or r.cookies.get("panda_csrf")
         out = self.client.post("/api/accounts/logout", headers={"X-CSRF-Token": csrf})
@@ -144,6 +145,19 @@ class AccountsFoundationTests(unittest.TestCase):
         # access endpoint requires human session
         me2 = self.client.get("/api/accounts/access")
         self.assertEqual(me2.status_code, 401)
+
+    def test_html_form_login_posts_and_redirects_to_app(self):
+        self._user()
+        r = self.client.post(
+            "/api/accounts/login",
+            data={"username": "user1", "password": "UserPass123!"},
+            headers={"Accept": "text/html"},
+            follow_redirects=False,
+        )
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(r.headers.get("location"), "/app")
+        self.assertIn("panda_session", r.cookies)
+        self.assertIn("panda_csrf", r.cookies)
 
     def test_f_expired_session(self):
         user = self._user()
@@ -474,6 +488,8 @@ class ProductUxStaticTests(unittest.TestCase):
         html = Path("static/accounts/login.html").read_text(encoding="utf-8")
         self.assertIn('id="username"', html)
         self.assertIn('id="password"', html)
+        self.assertIn('method="post"', html)
+        self.assertIn('action="/api/accounts/login"', html)
         self.assertNotIn("API-ключ", html)
         self.assertIn("/terms", html)
 

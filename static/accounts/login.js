@@ -14,18 +14,21 @@
     RATE_LIMITED: "Слишком много попыток. Попробуйте позже.",
   };
 
-  form.addEventListener("submit", async (e) => {
-    e.preventDefault();
+  async function pandaLoginSubmit(e) {
+    if (e) e.preventDefault();
+    if (!form || !errorEl || !submit) return false;
     errorEl.hidden = true;
     submit.disabled = true;
     try {
+      const usernameEl = document.getElementById("username");
+      const passwordEl = document.getElementById("password");
       const res = await fetch("/api/accounts/login", {
         method: "POST",
         headers: { "Content-Type": "application/json", Accept: "application/json" },
         credentials: "same-origin",
         body: JSON.stringify({
-          username: document.getElementById("username").value,
-          password: document.getElementById("password").value,
+          username: usernameEl ? usernameEl.value : "",
+          password: passwordEl ? passwordEl.value : "",
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -33,7 +36,7 @@
         const code = data.detail?.code || data.code || "INVALID_CREDENTIALS";
         errorEl.textContent = messages[code] || "Не удалось войти.";
         errorEl.hidden = false;
-        return;
+        return false;
       }
       window.location.href = "/app";
     } catch (_) {
@@ -42,5 +45,11 @@
     } finally {
       submit.disabled = false;
     }
-  });
+    return false;
+  }
+
+  window.pandaLoginSubmit = pandaLoginSubmit;
+  if (form) {
+    form.addEventListener("submit", pandaLoginSubmit);
+  }
 })();

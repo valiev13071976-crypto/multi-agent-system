@@ -5,7 +5,8 @@ from __future__ import annotations
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+from starlette.responses import JSONResponse, RedirectResponse
 
 from accounts.csrf import new_csrf_token, validate_csrf
 from accounts.dual_auth import get_accounts_service, get_security_context_dual
@@ -110,18 +111,52 @@ class PaymentRevokeRequest(BaseModel):
     provider_reference: str
 
 
+async def _login_request_from_http(request: Request) -> LoginRequest:
+    ctype = (request.headers.get("content-type") or "").lower()
+    if "application/json" in ctype:
+        payload = await request.json()
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=422, detail={"code": "INVALID_CREDENTIALS"})
+        return LoginRequest.model_validate(payload)
+    form = await request.form()
+    return LoginRequest(
+        username=str(form.get("username") or ""),
+        password=str(form.get("password") or ""),
+    )
+
+
+def _wants_html_login_redirect(request: Request) -> bool:
+    accept = (request.headers.get("accept") or "").lower()
+    if "application/json" in accept:
+        return False
+    return "text/html" in accept
+
+
 @_router.post("/api/accounts/login")
-async def login(body: LoginRequest, request: Request, response: Response):
+async def login(request: Request):
     svc = _svc()
     try:
-        view, session = svc.login(username=body.username, password=body.password, source_ip=request.client.host if request.client else "")
+        body = await _login_request_from_http(request)
+        view, session = svc.login(
+            username=body.username,
+            password=body.password,
+            source_ip=request.client.host if request.client else "",
+        )
     except InvalidCredentialsError as exc:
         raise _err(exc) from exc
     except AccountsError as exc:
         raise _err(exc) from exc
+    except HTTPException:
+        raise
+    except (ValidationError, ValueError, TypeError):
+        raise HTTPException(status_code=422, detail={"code": "INVALID_CREDENTIALS"}) from None
+    if _wants_html_login_redirect(request):
+        response: Response = RedirectResponse(url="/app", status_code=303)
+    else:
+        response = JSONResponse(view)
+        response.headers["Cache-Control"] = "no-store"
     _set_session_cookies(response, session, secure=svc.secure_cookies)
-    response.headers["Cache-Control"] = "no-store"
-    return view
+    return response
 
 
 @_router.post("/api/accounts/logout")
@@ -170,7 +205,9 @@ async def me(ctx: Annotated[RequestSecurityContext, Depends(get_security_context
             "role": None,
             "access_type": "MACHINE",
         }
-    return svc.me(user_id=ctx.user_id, tenant_id=ctx.tenant_id)
+    view = svc.me(user_id=ctx.user_id, tenant_id=ctx.tenant_id)
+    view["auth_method"] = "session"
+    return view
 
 
 @_router.get("/api/accounts/plans")

@@ -55,6 +55,15 @@
     getApiKey() {
       return sessionStorage.getItem("panda_api_key") || "";
     },
+    async hasHumanSession() {
+      const res = await fetch("/api/accounts/me", {
+        credentials: "same-origin",
+        headers: { Accept: "application/json" },
+      });
+      if (!res.ok) return false;
+      const data = await res.json().catch(() => ({}));
+      return Boolean(data.authenticated && data.auth_method === "session");
+    },
     listConversations() {
       return request("/conversations");
     },

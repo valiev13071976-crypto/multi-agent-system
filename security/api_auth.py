@@ -129,10 +129,33 @@ def _http_error_for(exc: SecurityError) -> HTTPException:
     return HTTPException(status_code=403, detail={"error": getattr(exc, "error_code", "security_error")})
 
 
+_security_context_override = None
+
+
+def set_security_context_override(fn) -> None:
+    """Install a replacement authenticator without breaking FastAPI Depends() bindings."""
+    global _security_context_override
+    _security_context_override = fn
+
+
 async def get_security_context(
     request: Request,
     x_api_key: Annotated[str | None, Header(alias="X-API-Key")] = None,
     authorization: Annotated[str | None, Header()] = None,
+) -> RequestSecurityContext:
+    if _security_context_override is not None:
+        return await _security_context_override(
+            request, x_api_key=x_api_key, authorization=authorization
+        )
+    return await _legacy_get_security_context(
+        request, x_api_key=x_api_key, authorization=authorization
+    )
+
+
+async def _legacy_get_security_context(
+    request: Request,
+    x_api_key: str | None = None,
+    authorization: str | None = None,
 ) -> RequestSecurityContext:
     auth = get_auth_service()
     audit = get_audit_log()

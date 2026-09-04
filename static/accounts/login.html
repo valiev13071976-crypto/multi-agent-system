@@ -12,7 +12,7 @@
     <div id="brand" class="accounts-brand"></div>
     <h1>Вход в Panda</h1>
     <p class="muted">Интеллектуальный ассистент для вашей работы</p>
-    <form id="login-form" class="accounts-form" autocomplete="on">
+    <form id="login-form" class="accounts-form" method="post" action="/api/accounts/login" autocomplete="on">
       <label for="username">Имя пользователя</label>
       <input id="username" name="username" type="text" autocomplete="username" required minlength="3">
       <label for="password">Пароль</label>
