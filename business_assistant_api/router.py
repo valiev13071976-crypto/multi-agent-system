@@ -131,6 +131,10 @@ class CreateConversationBody(BaseModel):
     title: str | None = Field(default=None, max_length=200)
 
 
+class RenameConversationBody(BaseModel):
+    title: str = Field(..., max_length=200)
+
+
 @_router.get("/conversations", response_model=list[ConversationResponse])
 async def list_conversations(
     response: Response,
@@ -159,10 +163,53 @@ async def create_conversation(
     )
     return ConversationResponse(
         conversation_id=conv.conversation_id,
-        title=str(conv.metadata.get("title") or "New chat"),
+        title=str(conv.metadata.get("title") or "Новый чат"),
         created_at=conv.created_at,
         updated_at=conv.updated_at,
     )
+
+
+@_router.patch("/conversations/{conversation_id}", response_model=ConversationResponse)
+async def rename_conversation(
+    conversation_id: str,
+    body: RenameConversationBody,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_ANALYZE_EXECUTE)
+    try:
+        conv = _svc().rename_conversation(
+            tenant_id=ctx.tenant_id,
+            owner_id=ctx.user_id,
+            conversation_id=conversation_id,
+            title=body.title,
+        )
+    except BusinessAssistantApiError as exc:
+        raise _err(exc) from exc
+    return ConversationResponse(
+        conversation_id=conv.conversation_id,
+        title=str(conv.metadata.get("title") or "Новый чат"),
+        created_at=conv.created_at,
+        updated_at=conv.updated_at,
+    )
+
+
+@_router.delete("/conversations/{conversation_id}", status_code=204)
+async def delete_conversation(
+    conversation_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_ANALYZE_EXECUTE)
+    try:
+        _svc().delete_conversation(
+            tenant_id=ctx.tenant_id, owner_id=ctx.user_id, conversation_id=conversation_id
+        )
+    except BusinessAssistantApiError as exc:
+        raise _err(exc) from exc
+    return Response(status_code=204)
 
 
 @_router.get("/conversations/{conversation_id}/messages", response_model=list[MessageItemResponse])

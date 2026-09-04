@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -34,12 +35,104 @@ class PandaConversationGateway(Protocol):
     async def respond(self, request: ConversationRequest) -> ConversationResult: ...
 
 
-def extract_assistant_text(result: dict[str, Any]) -> str:
-    for key in ("best_solution", "summary", "analysis"):
-        value = result.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
+# Judge / routing / governance strings that must never be shown as the user answer.
+_INTERNAL_ASSISTANT_MARKERS = (
+    "синтез ответов экспертов без скрытого приоритета",
+    "внешняя проверка фактов учитывается только при независимых источниках",
+    "финальный анализ успешно сформирован",
+    "использовать решение, подтвержденное большинством экспертов",
+    "без скрытого приоритета provider",
+)
+
+_TECHNICAL_SUMMARY_PREFIXES = (
+    "requested:",
+    "findings:",
+    "artifacts:",
+    "published:",
+    "fixture_mode:",
+    "approved:",
+    "waiting_approval:",
+    "status:",
+    "recipe:",
+    "mode:",
+    "trace id:",
+    "workflow_id",
+    "execution_id",
+    "provider",
+)
+
+_PROVIDER_LINE = re.compile(r"^[\w.\-]+(?:/[\w.\-]+)?\s*:\s+(.*)$")
+
+
+def is_internal_assistant_text(text: str) -> bool:
+    raw = str(text or "").strip()
+    if not raw:
+        return True
+    low = raw.casefold()
+    return any(marker in low for marker in _INTERNAL_ASSISTANT_MARKERS)
+
+
+def _strip_technical_summary(text: str) -> str:
+    kept: list[str] = []
+    for line in str(text or "").replace(" | ", "\n").splitlines():
+        trimmed = line.strip()
+        if not trimmed:
+            continue
+        low = trimmed.casefold()
+        if any(low.startswith(prefix) for prefix in _TECHNICAL_SUMMARY_PREFIXES):
+            continue
+        kept.append(trimmed)
+    return "\n".join(kept).strip()
+
+
+def _clean_analysis_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return ""
+    lines = [ln.strip() for ln in raw.splitlines() if ln.strip()]
+    if not lines:
+        return ""
+    cleaned: list[str] = []
+    prefixed = 0
+    for line in lines:
+        match = _PROVIDER_LINE.match(line)
+        if match:
+            prefixed += 1
+            body = match.group(1).strip()
+            if body:
+                cleaned.append(body)
+        else:
+            cleaned.append(line)
+    if prefixed == len(lines) and cleaned:
+        return "\n".join(cleaned).strip()
+    return raw
+
+
+def _candidate_text(result: dict[str, Any], key: str) -> str:
+    value = result.get(key)
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if key == "analysis":
+        text = _clean_analysis_text(text)
+    return text
+
+
+def select_canonical_final_answer(result: dict[str, Any] | None) -> str:
+    """Pick the user-facing assistant answer; never judge/synthesis/routing metadata."""
+    payload = result if isinstance(result, dict) else {}
+    for key in ("final_answer", "answer", "text", "reply", "best_solution", "summary", "analysis"):
+        text = _candidate_text(payload, key)
+        if not text or is_internal_assistant_text(text):
+            continue
+        stripped = _strip_technical_summary(text)
+        if stripped and not is_internal_assistant_text(stripped):
+            return stripped
     return ""
+
+
+def extract_assistant_text(result: dict[str, Any]) -> str:
+    return select_canonical_final_answer(result if isinstance(result, dict) else {})
 
 
 class WorkflowPandaConversationGateway:

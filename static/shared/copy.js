@@ -15,8 +15,9 @@
     BLOCKED: "Заблокировано",
   };
 
-  const USER_PROGRESS = "Обрабатываю запрос…";
-  const USER_THINKING = "Думаю…";
+    const USER_PROGRESS = "Обрабатываю запрос…";
+    const USER_THINKING = "Думаю…";
+    const MISSING_FINAL_ANSWER = "Panda не смогла сформировать ответ. Попробуйте ещё раз.";
 
   const ERROR_MAP = {
     BAA_AUTH_FAILED: "Сессия недействительна. Войдите снова.",
@@ -28,6 +29,7 @@
     BAA_PROVIDER_UNAVAILABLE: "Внешний сервис временно недоступен.",
     BAA_INTEGRATION_UNAVAILABLE: "Интеграция пока не настроена.",
     BAA_CONVERSATION_UNAVAILABLE: "Panda временно не может обработать запрос. Попробуйте позже.",
+    BAA_MISSING_FINAL_ANSWER: "Panda не смогла сформировать ответ. Попробуйте ещё раз.",
     UNAUTHORIZED: "Сессия недействительна. Войдите снова.",
     request_failed: "Произошла ошибка. Попробуйте ещё раз.",
   };
@@ -62,6 +64,7 @@
     STATUS_LABELS,
     USER_PROGRESS,
     USER_THINKING,
+    MISSING_FINAL_ANSWER,
     statusLabel,
     userFacingStatus,
     mapError,

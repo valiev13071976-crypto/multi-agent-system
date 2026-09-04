@@ -29,7 +29,7 @@
         ...(options.headers || {}),
       },
     });
-    const data = await res.json().catch(() => ({}));
+    const data = res.status === 204 ? {} : await res.json().catch(() => ({}));
     if (!res.ok) {
       const detail = data.detail || data;
       throw new ApiError(
@@ -72,6 +72,15 @@
     },
     listMessages(conversationId) {
       return request(`/conversations/${encodeURIComponent(conversationId)}/messages`);
+    },
+    renameConversation(conversationId, title) {
+      return request(`/conversations/${encodeURIComponent(conversationId)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ title }),
+      });
+    },
+    deleteConversation(conversationId) {
+      return request(`/conversations/${encodeURIComponent(conversationId)}`, { method: "DELETE" });
     },
     uploadFile(file) {
       const fd = new FormData();

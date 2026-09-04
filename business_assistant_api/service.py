@@ -30,6 +30,7 @@ from business_assistant.models import (
     STATUS_RUNNING,
     STATUS_WAITING_FOR_APPROVAL,
 )
+from business_assistant.conversation_gateway import select_canonical_final_answer
 from business_assistant.service import BusinessAssistantService
 from business_assistant_api.errors import (
     BAA_ACCESS_DENIED,
@@ -37,11 +38,13 @@ from business_assistant_api.errors import (
     BAA_CANCELLED,
     BAA_CONVERSATION_UNAVAILABLE,
     BAA_IDEMPOTENCY_CONFLICT,
+    BAA_INVALID_REQUEST,
     BAA_INVALID_STATE,
     BAA_NOT_FOUND,
     BAA_REJECTED,
     BusinessAssistantApiError,
 )
+from business_assistant_api.titles import auto_title_update, title_metadata_for_create, user_title_update
 from business_assistant_api.models import (
     ST_BLOCKED,
     ST_CANCELLED,
@@ -171,7 +174,7 @@ class BusinessAssistantApiService:
                 tenant,
                 norm.conversation_id,
                 role="assistant",
-                content=ex.summary,
+                content=select_canonical_final_answer({"summary": ex.summary, "final_answer": ex.summary}),
                 request_id=request_id,
             )
             self.store.touch_conversation(
@@ -263,13 +266,24 @@ class BusinessAssistantApiService:
             self._append_message(
                 tenant, norm.conversation_id, role="user", content=norm.message, request_id=request_id
             )
-            title = norm.message[:80].strip() or "Conversation"
-            self.store.touch_conversation(
-                conversation_id=norm.conversation_id,
-                tenant_id=tenant,
-                owner_id=owner_id,
-                title=title,
+            conv = self.store.get_conversation(
+                tenant_id=tenant, owner_id=owner_id, conversation_id=norm.conversation_id
             )
+            auto = auto_title_update(conv.metadata if conv else {}, norm.message)
+            if auto:
+                self.store.touch_conversation(
+                    conversation_id=norm.conversation_id,
+                    tenant_id=tenant,
+                    owner_id=owner_id,
+                    title=auto["title"],
+                    metadata_update=auto,
+                )
+            else:
+                self.store.touch_conversation(
+                    conversation_id=norm.conversation_id,
+                    tenant_id=tenant,
+                    owner_id=owner_id,
+                )
         rec = ApiRequestRecord(
             request_id=request_id,
             tenant_id=tenant,
@@ -494,6 +508,7 @@ class BusinessAssistantApiService:
                 "request_id": rec.request_id,
                 "status": rec.status,
                 "summary": rec.error_message or "No execution yet",
+                "final_answer": "",
                 "artifacts": [],
                 "warnings": [],
                 "cost": rec.finops_cost,
@@ -501,12 +516,23 @@ class BusinessAssistantApiService:
         self._hydrate_if_needed(rec)
         result = self.ba.get_result(execution_id=rec.execution_id, tenant_id=rec.tenant_id)
         self._event(rec, EV_RESULT_READY, message="Result ready")
+        summary = redact(str(result.get("summary") or ""))
+        final_answer = select_canonical_final_answer(
+            {
+                "final_answer": result.get("final_answer"),
+                "best_solution": result.get("best_solution"),
+                "summary": summary,
+                "analysis": result.get("analysis"),
+                "mode": result.get("mode"),
+            }
+        )
         return {
             "request_id": rec.request_id,
             "workflow_id": rec.workflow_id,
             "execution_id": rec.execution_id,
             "status": rec.status,
-            "summary": redact(str(result.get("summary") or "")),
+            "summary": summary,
+            "final_answer": final_answer,
             "structured_result": {
                 "findings": result.get("findings") or [],
                 "published": result.get("published"),
@@ -636,10 +662,44 @@ class BusinessAssistantApiService:
             owner_id=owner_id,
             created_at=now,
             updated_at=now,
-            metadata={"title": title[:200]},
+            metadata=title_metadata_for_create(title),
         )
         self.store.save_conversation(conv)
         return conv
+
+    def rename_conversation(
+        self, *, tenant_id: str, owner_id: str, conversation_id: str, title: str
+    ) -> ConversationRecord:
+        tenant = require_tenant_id(tenant_id)
+        conv = self.store.get_conversation(
+            tenant_id=tenant, owner_id=owner_id, conversation_id=conversation_id
+        )
+        if conv is None:
+            raise BusinessAssistantApiError(BAA_NOT_FOUND, http_status=404)
+        update = user_title_update(title)
+        if not update["title"]:
+            raise BusinessAssistantApiError(BAA_INVALID_REQUEST, "empty_title", http_status=400)
+        self.store.touch_conversation(
+            conversation_id=conversation_id,
+            tenant_id=tenant,
+            owner_id=owner_id,
+            title=update["title"],
+            metadata_update=update,
+        )
+        renamed = self.store.get_conversation(
+            tenant_id=tenant, owner_id=owner_id, conversation_id=conversation_id
+        )
+        if renamed is None:
+            raise BusinessAssistantApiError(BAA_NOT_FOUND, http_status=404)
+        return renamed
+
+    def delete_conversation(self, *, tenant_id: str, owner_id: str, conversation_id: str) -> None:
+        tenant = require_tenant_id(tenant_id)
+        deleted = self.store.delete_conversation(
+            tenant_id=tenant, owner_id=owner_id, conversation_id=conversation_id
+        )
+        if not deleted:
+            raise BusinessAssistantApiError(BAA_NOT_FOUND, http_status=404)
 
     def list_conversations(self, *, tenant_id: str, owner_id: str, limit: int = 50) -> list[dict]:
         rows = self.store.list_conversations(tenant_id=require_tenant_id(tenant_id), owner_id=owner_id, limit=limit)
@@ -825,6 +885,7 @@ class BusinessAssistantApiService:
                 owner_id=owner,
                 created_at=now,
                 updated_at=now,
+                metadata=title_metadata_for_create(None),
             )
         )
 

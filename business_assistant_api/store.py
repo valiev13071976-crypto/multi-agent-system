@@ -291,7 +291,13 @@ class SqliteBusinessAssistantApiStore:
         ]
 
     def touch_conversation(
-        self, *, conversation_id: str, tenant_id: str, owner_id: str, title: str | None = None
+        self,
+        *,
+        conversation_id: str,
+        tenant_id: str,
+        owner_id: str,
+        title: str | None = None,
+        metadata_update: dict | None = None,
     ) -> None:
         row = self.get_conversation(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
         if not row:
@@ -299,6 +305,8 @@ class SqliteBusinessAssistantApiStore:
         meta = dict(row.metadata)
         if title:
             meta["title"] = title
+        if metadata_update:
+            meta.update(metadata_update)
         self.save_conversation(
             ConversationRecord(
                 conversation_id=row.conversation_id,
@@ -309,6 +317,24 @@ class SqliteBusinessAssistantApiStore:
                 metadata=meta,
             )
         )
+
+    def delete_conversation(self, *, tenant_id: str, owner_id: str, conversation_id: str) -> bool:
+        row = self.get_conversation(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
+        if row is None:
+            return False
+        self._conn.execute(
+            "DELETE FROM ba_api_messages WHERE conversation_id=? AND tenant_id=?",
+            (conversation_id, tenant_id),
+        )
+        self._conn.execute(
+            """
+            DELETE FROM ba_api_conversations
+            WHERE conversation_id=? AND tenant_id=? AND owner_id=?
+            """,
+            (conversation_id, tenant_id, owner_id),
+        )
+        self._conn.commit()
+        return True
 
     def save_message(self, msg: MessageRecord) -> None:
         self._conn.execute(

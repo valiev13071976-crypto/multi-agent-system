@@ -20,6 +20,8 @@
     approving: false,
     roleContext: { loaded: false, isManagement: false, isOwner: false, role: null },
     lastResultMode: null,
+    openMenuId: null,
+    pendingDeleteId: null,
   };
 
   const els = {
@@ -67,6 +69,10 @@
     welcome: document.getElementById("welcome-state"),
     welcomeBrand: document.getElementById("welcome-brand"),
     suggestedPrompts: document.getElementById("suggested-prompts"),
+    confirmDialog: document.getElementById("chat-confirm-dialog"),
+    confirmText: document.getElementById("chat-confirm-text"),
+    confirmOk: document.getElementById("chat-confirm-ok"),
+    confirmCancel: document.getElementById("chat-confirm-cancel"),
   };
 
   function show(el) { if (el) el.classList.remove("hidden"); }
@@ -110,7 +116,17 @@
   function assistantBubbleText(result) {
     const mode = result.structured_result?.mode || state.lastResultMode;
     const conversational = mode === "CONVERSATIONAL";
-    return presentation.toUserFacingSummary(result.summary || "", { conversational, business: !conversational });
+    const canonical = presentation.selectCanonicalFinalAnswer
+      ? presentation.selectCanonicalFinalAnswer(result)
+      : String(result.final_answer || "").trim();
+    if (conversational) {
+      if (!canonical || presentation.isInternalMetadata(canonical)) return "";
+      return canonical;
+    }
+    return presentation.toUserFacingSummary(canonical || result.summary || "", {
+      conversational: false,
+      business: true,
+    });
   }
 
   async function verifyAuth() {
@@ -178,7 +194,133 @@
     renderConversations();
   }
 
+  function closeChatMenu() {
+    state.openMenuId = null;
+    document.querySelectorAll(".conv-menu").forEach((menu) => {
+      menu.hidden = true;
+      menu.classList.add("hidden");
+    });
+    document.querySelectorAll(".conv-menu-btn").forEach((btn) => {
+      btn.setAttribute("aria-expanded", "false");
+    });
+    document.querySelectorAll(".conv-row.menu-open").forEach((row) => {
+      row.classList.remove("menu-open");
+    });
+  }
+
+  function openChatMenu(conversationId, menuBtn) {
+    const already = state.openMenuId === conversationId;
+    closeChatMenu();
+    if (already) return;
+    const row = menuBtn.closest(".conv-row");
+    const menu = row ? row.querySelector(".conv-menu") : null;
+    if (!menu) return;
+    state.openMenuId = conversationId;
+    menu.hidden = false;
+    menu.classList.remove("hidden");
+    menuBtn.setAttribute("aria-expanded", "true");
+    if (row) row.classList.add("menu-open");
+  }
+
+  function hideConfirm() {
+    state.pendingDeleteId = null;
+    if (!els.confirmDialog) return;
+    hide(els.confirmDialog);
+    els.confirmDialog.setAttribute("hidden", "");
+  }
+
+  function showDeleteConfirm(conversationId) {
+    closeChatMenu();
+    state.pendingDeleteId = conversationId;
+    if (els.confirmText) els.confirmText.textContent = "Удалить этот чат?";
+    if (els.confirmDialog) {
+      show(els.confirmDialog);
+      els.confirmDialog.removeAttribute("hidden");
+    }
+  }
+
+  async function applyRename(conversationId, title) {
+    const renamed = await api.renameConversation(conversationId, title);
+    const idx = state.conversations.findIndex((c) => c.conversation_id === conversationId);
+    if (idx >= 0) state.conversations[idx] = renamed;
+    else state.conversations.unshift(renamed);
+    if (state.conversationId === conversationId) {
+      els.title.textContent = renamed.title || "Новый чат";
+    }
+    renderConversations();
+  }
+
+  async function startRename(conversationId) {
+    closeChatMenu();
+    const conv = state.conversations.find((c) => c.conversation_id === conversationId);
+    const current = conv ? conv.title : "";
+    const row = Array.from(els.convList.querySelectorAll(".conv-row")).find(
+      (node) => node.dataset.id === conversationId
+    );
+    if (!row) return;
+    const openBtn = row.querySelector(".conv-open");
+    if (!openBtn) return;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.className = "conv-rename-input";
+    input.value = current || "";
+    input.maxLength = 80;
+    input.setAttribute("aria-label", "Название чата");
+    openBtn.replaceWith(input);
+    input.focus();
+    input.select();
+    let done = false;
+    async function commit() {
+      if (done) return;
+      done = true;
+      const next = input.value.trim();
+      renderConversations();
+      if (!next) return;
+      if (next === current) return;
+      try {
+        await applyRename(conversationId, next);
+      } catch (e) {
+        els.composerError.textContent = api.mapError(e);
+      }
+    }
+    function cancel() {
+      if (done) return;
+      done = true;
+      renderConversations();
+    }
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        commit();
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        cancel();
+      }
+    });
+    input.addEventListener("blur", () => { commit(); });
+  }
+
+  async function performDelete(conversationId) {
+    await api.deleteConversation(conversationId);
+    state.conversations = state.conversations.filter((c) => c.conversation_id !== conversationId);
+    if (state.conversationId === conversationId) {
+      stopPolling();
+      state.activeRequestId = null;
+      state.activeRequest = null;
+      const next = state.conversations[0];
+      if (next) {
+        await openConversation(next.conversation_id, next.title);
+      } else {
+        await newChat();
+      }
+    } else {
+      renderConversations();
+    }
+  }
+
   function renderConversations() {
+    closeChatMenu();
     els.convList.innerHTML = "";
     if (!state.conversations.length) {
       show(els.convEmpty);
@@ -187,9 +329,35 @@
     hide(els.convEmpty);
     state.conversations.forEach((c) => {
       const li = document.createElement("li");
-      const btn = ui.renderConversationButton(c, state.conversationId);
-      btn.onclick = () => openConversation(c.conversation_id, c.title);
-      li.appendChild(btn);
+      li.className = "conv-item";
+      const row = ui.renderConversationItem(c, state.conversationId);
+      const openBtn = row.querySelector(".conv-open");
+      const menuBtn = row.querySelector(".conv-menu-btn");
+      const renameBtn = row.querySelector('[data-action="rename"]');
+      const deleteBtn = row.querySelector('[data-action="delete"]');
+      if (openBtn) {
+        openBtn.onclick = () => openConversation(c.conversation_id, c.title);
+      }
+      if (menuBtn) {
+        menuBtn.onclick = (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          openChatMenu(c.conversation_id, menuBtn);
+        };
+      }
+      if (renameBtn) {
+        renameBtn.onclick = (e) => {
+          e.stopPropagation();
+          startRename(c.conversation_id);
+        };
+      }
+      if (deleteBtn) {
+        deleteBtn.onclick = (e) => {
+          e.stopPropagation();
+          showDeleteConfirm(c.conversation_id);
+        };
+      }
+      li.appendChild(row);
       els.convList.appendChild(li);
     });
   }
@@ -216,7 +384,14 @@
     const stick = force || isNearBottom(scrollContainer());
     els.timeline.innerHTML = "";
     state.messages.forEach((m) => {
-      els.timeline.appendChild(ui.renderMessage(m.role, m.content, null));
+      let role = m.role;
+      let content = m.content;
+      if (role === "assistant" && presentation.isInternalMetadata(content)) {
+        role = "system";
+        content = (window.PandaCopy && window.PandaCopy.MISSING_FINAL_ANSWER) ||
+          "Panda не смогла сформировать ответ. Попробуйте ещё раз.";
+      }
+      els.timeline.appendChild(ui.renderMessage(role, content, null));
     });
     syncWelcome();
     if (stick) scrollTimelineToBottom(true);
@@ -266,8 +441,11 @@
 
   function syncWelcome() {
     if (!els.welcome) return;
-    if (state.messages.length) hide(els.welcome);
+    const hasMessages = Boolean(state.messages.length);
+    if (hasMessages) hide(els.welcome);
     else show(els.welcome);
+    if (els.chatScroll) els.chatScroll.classList.toggle("has-messages", hasMessages);
+    if (els.app) els.app.classList.toggle("has-messages", hasMessages);
   }
 
   function setSidebarOpen(open) {
@@ -463,12 +641,22 @@
             (m) => m.role === "assistant" && m.request_id === requestId
           );
           if (!already) {
-            state.messages.push({
-              role: "assistant",
-              content: bubble,
-              created_at: new Date().toISOString(),
-              request_id: requestId,
-            });
+            if (!bubble || presentation.isInternalMetadata(bubble)) {
+              state.messages.push({
+                role: "system",
+                content: (window.PandaCopy && window.PandaCopy.MISSING_FINAL_ANSWER) ||
+                  "Panda не смогла сформировать ответ. Попробуйте ещё раз.",
+                created_at: new Date().toISOString(),
+                request_id: requestId,
+              });
+            } else {
+              state.messages.push({
+                role: "assistant",
+                content: bubble,
+                created_at: new Date().toISOString(),
+                request_id: requestId,
+              });
+            }
             renderTimeline();
           }
         }
@@ -595,10 +783,44 @@
     if (els.sidebarClose) els.sidebarClose.onclick = closeSidebar;
     if (els.sidebarBackdrop) els.sidebarBackdrop.onclick = closeSidebar;
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && els.sidebar.classList.contains("open")) {
-        closeSidebar();
+      if (e.key === "Escape") {
+        if (state.pendingDeleteId) {
+          hideConfirm();
+          return;
+        }
+        if (state.openMenuId) {
+          closeChatMenu();
+          return;
+        }
+        if (els.sidebar.classList.contains("open")) {
+          closeSidebar();
+        }
       }
     });
+    document.addEventListener("pointerdown", (e) => {
+      if (state.openMenuId && els.convList && !els.convList.contains(e.target)) {
+        closeChatMenu();
+      }
+    });
+    if (els.confirmOk) {
+      els.confirmOk.onclick = async () => {
+        const id = state.pendingDeleteId;
+        hideConfirm();
+        if (!id) return;
+        try {
+          await performDelete(id);
+        } catch (err) {
+          els.composerError.textContent = api.mapError(err);
+          renderConversations();
+        }
+      };
+    }
+    if (els.confirmCancel) els.confirmCancel.onclick = hideConfirm;
+    if (els.confirmDialog) {
+      els.confirmDialog.addEventListener("click", (e) => {
+        if (e.target === els.confirmDialog) hideConfirm();
+      });
+    }
     els.fileInput.onchange = (e) => onFiles(Array.from(e.target.files || []));
     if (els.suggestedPrompts) {
       els.suggestedPrompts.addEventListener("click", (e) => {

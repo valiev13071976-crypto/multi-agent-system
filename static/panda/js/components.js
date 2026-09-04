@@ -65,9 +65,13 @@
   function renderResult(result, options) {
     const opts = options || {};
     const root = document.createDocumentFragment();
-    const raw = result.summary || "";
-    const mode = result.structured_result?.mode || opts.mode;
+    const payload = result || {};
+    const canonical = presentation.selectCanonicalFinalAnswer
+      ? presentation.selectCanonicalFinalAnswer(payload)
+      : "";
+    const mode = payload.structured_result?.mode || opts.mode;
     const conversational = mode === "CONVERSATIONAL" || opts.conversational;
+    const raw = canonical || (conversational ? "" : (payload.summary || ""));
     const text = presentation.toUserFacingSummary(raw, {
       conversational,
       business: !conversational,
@@ -114,10 +118,46 @@
     return root;
   }
 
+  function renderConversationItem(conv, activeId) {
+    const row = el("div", "conv-row");
+    row.dataset.id = conv.conversation_id;
+    const openBtn = el("button", "conv-open");
+    openBtn.type = "button";
+    if (conv.conversation_id === activeId) openBtn.classList.add("active");
+    setText(openBtn, conv.title || "Разговор");
+    openBtn.dataset.id = conv.conversation_id;
+    const menuBtn = el("button", "conv-menu-btn");
+    menuBtn.type = "button";
+    menuBtn.setAttribute("aria-label", "Действия с чатом");
+    menuBtn.setAttribute("aria-haspopup", "menu");
+    menuBtn.setAttribute("aria-expanded", "false");
+    menuBtn.dataset.id = conv.conversation_id;
+    setText(menuBtn, "⋯");
+    const menu = el("div", "conv-menu hidden");
+    menu.setAttribute("role", "menu");
+    menu.hidden = true;
+    const renameBtn = el("button", "conv-menu-item");
+    renameBtn.type = "button";
+    renameBtn.setAttribute("role", "menuitem");
+    renameBtn.dataset.action = "rename";
+    setText(renameBtn, "Переименовать");
+    const deleteBtn = el("button", "conv-menu-item danger-item");
+    deleteBtn.type = "button";
+    deleteBtn.setAttribute("role", "menuitem");
+    deleteBtn.dataset.action = "delete";
+    setText(deleteBtn, "Удалить");
+    menu.appendChild(renameBtn);
+    menu.appendChild(deleteBtn);
+    row.appendChild(openBtn);
+    row.appendChild(menuBtn);
+    row.appendChild(menu);
+    return row;
+  }
+
   function renderConversationButton(conv, activeId) {
-    const btn = el("button");
+    const btn = el("button", "conv-open");
     btn.type = "button";
-    btn.className = conv.conversation_id === activeId ? "active" : "";
+    btn.className = conv.conversation_id === activeId ? "conv-open active" : "conv-open";
     setText(btn, conv.title || "Разговор");
     btn.dataset.id = conv.conversation_id;
     return btn;
@@ -131,6 +171,7 @@
     renderResult,
     renderArtifacts,
     renderConversationButton,
+    renderConversationItem,
     el,
   };
 })(window);
