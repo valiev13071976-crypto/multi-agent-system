@@ -2,6 +2,11 @@ from dataclasses import dataclass
 import re
 from typing import Mapping
 
+from agents.response_depth import (
+    DEPTH_NORMAL,
+    classify_response_depth,
+    normalize_response_depth,
+)
 from agents.routing_requirements import (
     TaskRequirements,
     derive_task_requirements,
@@ -20,6 +25,7 @@ ROLE_CRITIC = "critic"
 ROLE_RESEARCHER = "researcher"
 ROLE_TREND_AGENT = "trend_agent"
 ROLE_TECHNICAL = "technical"
+ROLE_GENERALIST = "generalist"
 
 REASON_TECHNICAL_ARTIFACT = "technical_artifact"
 REASON_CRITIQUE_INTENT = "critique_intent"
@@ -34,7 +40,7 @@ CATEGORY_TO_ROLE = {
     CATEGORY_RESEARCH: ROLE_RESEARCHER,
     CATEGORY_TREND_ANALYSIS: ROLE_TREND_AGENT,
     CATEGORY_TECHNICAL: ROLE_TECHNICAL,
-    CATEGORY_GENERAL: ROLE_STRATEGIST,
+    CATEGORY_GENERAL: ROLE_GENERALIST,
 }
 
 CONFIDENCE_STRONG = 0.90
@@ -125,6 +131,7 @@ class TaskClassification:
     confidence: float
     reason: str
     requirements: TaskRequirements | None = None
+    response_depth: str | None = None
 
     def __post_init__(self):
         if self.requirements is None:
@@ -133,6 +140,13 @@ class TaskClassification:
                 "requirements",
                 derive_task_requirements(category=self.category),
             )
+        object.__setattr__(
+            self,
+            "response_depth",
+            normalize_response_depth(self.response_depth)
+            if self.response_depth
+            else DEPTH_NORMAL,
+        )
 
 
 def _normalize(user_request: str) -> str:
@@ -174,6 +188,7 @@ def _result(
             text=text,
             metadata=metadata,
         ),
+        response_depth=classify_response_depth(text, category=category),
     )
 
 

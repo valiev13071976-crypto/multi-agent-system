@@ -46,6 +46,7 @@ def build_version_registry() -> VersionRegistry:
     from config.config.prompts import (
         BASE_EXPERT_PROMPT,
         CRITIC_PROMPT,
+        GENERALIST_PROMPT,
         JUDGE_PROMPT,
         RESEARCHER_PROMPT,
         STRATEGIST_PROMPT,
@@ -60,6 +61,7 @@ def build_version_registry() -> VersionRegistry:
         "researcher": RESEARCHER_PROMPT,
         "critic": CRITIC_PROMPT,
         "trend_agent": TREND_AGENT_PROMPT,
+        "generalist": GENERALIST_PROMPT,
         "judge": JUDGE_PROMPT,
     }
     for pid, text in sorted(prompt_map.items()):

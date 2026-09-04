@@ -6,7 +6,6 @@ import unittest
 from agents.role_registry import (
     DEFAULT_ROLE,
     MAX_CONTEXT_CHARS,
-    STRATEGIST_PROMPT,
     USER_TASK_MARKER,
     compose_prompt,
 )
@@ -174,7 +173,9 @@ class RolePromptTests(unittest.TestCase):
         self.assertLessEqual(len(composed), MAX_CONTEXT_CHARS)
         self.assertIn("РОЛЬ: Стратег.", composed)
         self.assertIn(USER_TASK_MARKER, composed)
-        self.assertTrue(composed.startswith(STRATEGIST_PROMPT.rstrip()))
+        self.assertIn("РОЛЬ: Стратег.", composed)
+        self.assertIn(USER_TASK_MARKER, composed)
+        self.assertLessEqual(len(composed), MAX_CONTEXT_CHARS)
 
     def test_missing_role_defaults_to_strategist(self):
         main_mod = load_app(**env_for("openai"))

@@ -48,6 +48,7 @@ ROLE_TO_ROUTING_CATEGORY = {
     "researcher": "research",
     "trend_agent": "trend_analysis",
     "technical": "technical",
+    "generalist": "general",
 }
 
 PROVIDER_PROFILE_ENV = {

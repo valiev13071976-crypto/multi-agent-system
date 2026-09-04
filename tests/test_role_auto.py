@@ -161,7 +161,7 @@ class RoleAutoTests(unittest.TestCase):
         self.assertEqual(composed, compose_prompt("strategist", TECHNICAL_TEXT))
         self._assert_contract(response.json())
 
-    def test_auto_find_supplier_falls_back_to_strategist(self):
+    def test_auto_find_supplier_falls_back_to_generalist(self):
         main_mod = load_app(**env_for("openai"))
         manager = main_mod.router.pipeline.expert_manager
         stack, mocks = mock_provider_runs(manager, "openai")
@@ -179,11 +179,12 @@ class RoleAutoTests(unittest.TestCase):
         composed = mocks["openai"].await_args.args[0]
         self.assertEqual(
             composed,
-            compose_prompt("strategist", "найди поставщика"),
+            compose_prompt("generalist", "найди поставщика"),
         )
+        self.assertEqual(main_mod.router.last_decision.role_id, "generalist")
         self._assert_contract(response.json())
 
-    def test_auto_seo_audit_falls_back_to_strategist(self):
+    def test_auto_seo_audit_falls_back_to_generalist(self):
         main_mod = load_app(**env_for("openai"))
         manager = main_mod.router.pipeline.expert_manager
         stack, mocks = mock_provider_runs(manager, "openai")
@@ -201,8 +202,9 @@ class RoleAutoTests(unittest.TestCase):
         composed = mocks["openai"].await_args.args[0]
         self.assertEqual(
             composed,
-            compose_prompt("strategist", "сделай SEO аудит"),
+            compose_prompt("generalist", "сделай SEO аудит"),
         )
+        self.assertEqual(main_mod.router.last_decision.role_id, "generalist")
         self._assert_contract(response.json())
 
     def test_invalid_role_returns_400_without_provider_calls(self):

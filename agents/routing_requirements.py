@@ -206,6 +206,12 @@ def derive_task_requirements(
         freshness = FRESHNESS_STATIC
         risk = RISK_LOW
 
+    # Freshness is independent of response depth and of category-default complexity.
+    # Do not hard-require CAPABILITY_SEARCH here: most ModelProfiles have
+    # supports_search=False and would 503 auto routing (same as trend_analysis).
+    if _text_indicates_current_freshness(text) and freshness == FRESHNESS_STATIC:
+        freshness = FRESHNESS_CURRENT
+
     if _metadata_requires_vision(metadata):
         caps.append(CAPABILITY_VISION)
 

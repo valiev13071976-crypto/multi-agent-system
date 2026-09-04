@@ -10,6 +10,7 @@ from agents.task_classifier import (
     CATEGORY_TECHNICAL,
     CATEGORY_TREND_ANALYSIS,
     ROLE_CRITIC,
+    ROLE_GENERALIST,
     ROLE_RESEARCHER,
     ROLE_STRATEGIST,
     ROLE_TECHNICAL,
@@ -92,28 +93,28 @@ class TaskClassifierTests(unittest.TestCase):
         self._assert_result(
             "проанализируй рынок",
             CATEGORY_GENERAL,
-            ROLE_STRATEGIST,
+            ROLE_GENERALIST,
         )
 
     def test_find_supplier_is_general(self):
         self._assert_result(
             "найди поставщика",
             CATEGORY_GENERAL,
-            ROLE_STRATEGIST,
+            ROLE_GENERALIST,
         )
 
     def test_seo_audit_is_general(self):
         self._assert_result(
             "сделай SEO аудит",
             CATEGORY_GENERAL,
-            ROLE_STRATEGIST,
+            ROLE_GENERALIST,
         )
 
     def test_excel_prices_are_general_not_technical(self):
         self._assert_result(
             "сравни цены в Excel",
             CATEGORY_GENERAL,
-            ROLE_STRATEGIST,
+            ROLE_GENERALIST,
         )
 
     def test_same_input_is_deterministic(self):

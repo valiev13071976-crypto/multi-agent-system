@@ -26,8 +26,12 @@ from agents.role_registry import (
 from agents.provider_registry import PROVIDER_IDS, ProviderRegistry
 from agents.model_profile import routing_category_for_role
 from agents.model_router import ModelRouter
-from agents.task_classifier import TaskClassifier
+from agents.task_classifier import TaskClassifier, classify_task
 from agents.routing_requirements import derive_task_requirements
+from agents.response_depth import (
+    classify_response_depth,
+    orchestration_policy_for,
+)
 from agents.routing_health import ProviderHealthTracker, load_routing_health_policy
 from agents.routing_runtime_stats import (
     ProviderRuntimeStatsAggregator,
@@ -261,6 +265,8 @@ class RouterV2:
             self.last_classification = None
             self.last_requirements = None
             self.last_route_context = None
+            self.last_response_depth = None
+            self.last_orchestration_policy = None
 
             if requested_role == ROLE_AUTO:
                 self.last_classification = self.task_classifier.classify(prompt)
@@ -268,6 +274,7 @@ class RouterV2:
                 routing_category = self.last_classification.category
                 category_source = "classifier"
                 self.last_requirements = self.last_classification.requirements
+                response_depth = self.last_classification.response_depth
             else:
                 resolved_role = requested_role
                 routing_category = routing_category_for_role(resolved_role)
@@ -276,13 +283,24 @@ class RouterV2:
                     category=routing_category,
                     text=prompt,
                 )
+                # Depth is message-level. Do not use role-mapped routing category
+                # (explicit strategist would otherwise force DEEP on greetings).
+                response_depth = classify_response_depth(
+                    prompt,
+                    category=classify_task(prompt).category,
+                )
 
             get_role_prompt(resolved_role)
+            orchestration_policy = orchestration_policy_for(response_depth)
+            self.last_response_depth = response_depth
+            self.last_orchestration_policy = orchestration_policy
 
             self.last_route_context = {
                 "category": routing_category,
                 "source": category_source,
                 "policy": self.provider_registry.auto_routing_policy,
+                "response_depth": response_depth,
+                "orchestration_policy": orchestration_policy,
                 "requirements": (
                     dict(self.last_requirements.as_dict())
                     if self.last_requirements is not None
@@ -329,7 +347,11 @@ class RouterV2:
                 self.model_router.clear_routing_audit()
             self.last_decision = decision
 
-            composed = compose_prompt(decision.role_id, prompt)
+            composed = compose_prompt(
+                decision.role_id,
+                prompt,
+                response_depth=response_depth,
+            )
             selected = self._agents_for_decision(decision)
 
             if lifecycle is not None and started_route:
@@ -338,6 +360,8 @@ class RouterV2:
                     metadata={
                         "reason": decision.reason,
                         "provider_count": len(decision.provider_ids),
+                        "response_depth": response_depth,
+                        "orchestration_policy": orchestration_policy,
                     },
                 )
 
