@@ -61,8 +61,12 @@
     composer: document.getElementById("composer-input"),
     sendBtn: document.getElementById("send-btn"),
     composerError: document.getElementById("composer-error"),
+    composerShell: document.getElementById("composer-shell"),
     fileInput: document.getElementById("file-input"),
     attachmentChips: document.getElementById("attachment-chips"),
+    welcome: document.getElementById("welcome-state"),
+    welcomeBrand: document.getElementById("welcome-brand"),
+    suggestedPrompts: document.getElementById("suggested-prompts"),
   };
 
   function show(el) { if (el) el.classList.remove("hidden"); }
@@ -214,6 +218,7 @@
     state.messages.forEach((m) => {
       els.timeline.appendChild(ui.renderMessage(m.role, m.content, null));
     });
+    syncWelcome();
     if (stick) scrollTimelineToBottom(true);
   }
 
@@ -221,19 +226,59 @@
     const ta = els.composer;
     if (!ta) return;
     ta.style.height = "auto";
-    const max = Math.min(window.innerHeight * 0.4, 200);
+    const max = Math.min(window.innerHeight * 0.4, 240);
     ta.style.height = `${Math.min(ta.scrollHeight, max)}px`;
+  }
+
+  function isDesktopLayout() {
+    return window.innerWidth >= 1024;
+  }
+
+  function updateSidebarToggleLabel() {
+    if (!els.sidebarToggle) return;
+    if (isDesktopLayout()) {
+      const collapsed = els.app && els.app.classList.contains("sidebar-collapsed");
+      els.sidebarToggle.setAttribute("aria-expanded", collapsed ? "false" : "true");
+      els.sidebarToggle.setAttribute("aria-label", collapsed ? "Показать меню" : "Скрыть меню");
+      return;
+    }
+    const open = els.sidebar && els.sidebar.classList.contains("open");
+    els.sidebarToggle.setAttribute("aria-expanded", open ? "true" : "false");
+    els.sidebarToggle.setAttribute("aria-label", open ? "Закрыть меню" : "Открыть меню");
+  }
+
+  function composerHasContent() {
+    const text = els.composer ? els.composer.value.trim() : "";
+    return Boolean(text || state.attachments.length);
+  }
+
+  function updateSendEnabled() {
+    if (!els.sendBtn) return;
+    els.sendBtn.disabled = state.submitting || !composerHasContent();
+  }
+
+  function setComposerBusy(busy) {
+    state.submitting = busy;
+    if (els.composerShell) els.composerShell.classList.toggle("is-sending", busy);
+    if (els.composer) els.composer.readOnly = busy;
+    updateSendEnabled();
+  }
+
+  function syncWelcome() {
+    if (!els.welcome) return;
+    if (state.messages.length) hide(els.welcome);
+    else show(els.welcome);
   }
 
   function setSidebarOpen(open) {
     if (!els.sidebar) return;
     els.sidebar.classList.toggle("open", open);
-    if (els.sidebarToggle) els.sidebarToggle.setAttribute("aria-expanded", open ? "true" : "false");
     if (els.sidebarBackdrop) {
       if (open) els.sidebarBackdrop.removeAttribute("hidden");
       else els.sidebarBackdrop.setAttribute("hidden", "");
     }
     document.body.classList.toggle("sidebar-open", open);
+    updateSidebarToggleLabel();
   }
 
   function closeSidebar() {
@@ -241,6 +286,11 @@
   }
 
   function toggleSidebar() {
+    if (isDesktopLayout()) {
+      if (els.app) els.app.classList.toggle("sidebar-collapsed");
+      updateSidebarToggleLabel();
+      return;
+    }
     setSidebarOpen(!els.sidebar.classList.contains("open"));
   }
 
@@ -258,6 +308,7 @@
       chip.appendChild(rm);
       els.attachmentChips.appendChild(chip);
     });
+    updateSendEnabled();
   }
 
   function resetPanels() {
@@ -451,8 +502,7 @@
     if (!text && !state.attachments.length) return;
     if (!state.conversationId) await newChat();
 
-    state.submitting = true;
-    els.sendBtn.disabled = true;
+    setComposerBusy(true);
     els.composerError.textContent = "";
     const idempotencyKey = api.uuid();
 
@@ -460,6 +510,7 @@
     renderTimeline({ forceScroll: true });
     els.composer.value = "";
     autoGrowComposer();
+    updateSendEnabled();
     setStatus(window.PandaCopy.USER_THINKING, "running");
 
     try {
@@ -484,8 +535,7 @@
       els.composerError.textContent = api.mapError(e);
       setStatus("", "");
     } finally {
-      state.submitting = false;
-      els.sendBtn.disabled = false;
+      setComposerBusy(false);
     }
   }
 
@@ -550,23 +600,41 @@
       }
     });
     els.fileInput.onchange = (e) => onFiles(Array.from(e.target.files || []));
-    els.composer.addEventListener("input", autoGrowComposer);
+    if (els.suggestedPrompts) {
+      els.suggestedPrompts.addEventListener("click", (e) => {
+        const chip = e.target.closest("[data-prompt]");
+        if (!chip) return;
+        els.composer.value = chip.getAttribute("data-prompt") || "";
+        autoGrowComposer();
+        updateSendEnabled();
+        els.composer.focus();
+      });
+    }
+    els.composer.addEventListener("input", () => {
+      autoGrowComposer();
+      updateSendEnabled();
+    });
     els.composer.addEventListener("keydown", (e) => {
+      if (e.isComposing || e.keyCode === 229) return;
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
       }
     });
     window.addEventListener("resize", () => {
-      if (window.innerWidth >= 1024) closeSidebar();
+      if (isDesktopLayout()) closeSidebar();
       autoGrowComposer();
+      updateSidebarToggleLabel();
     });
+    updateSendEnabled();
+    updateSidebarToggleLabel();
   }
 
   function initBrand() {
     brand.applyDocumentBrand();
     brand.renderLogo(els.authBrand, { size: 48 });
     brand.renderLogo(els.sidebarBrand, { size: 32 });
+    if (els.welcomeBrand) brand.renderLogo(els.welcomeBrand, { size: 56, title: "Panda AI" });
   }
 
   async function boot() {

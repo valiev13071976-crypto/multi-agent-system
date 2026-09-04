@@ -83,6 +83,24 @@ body {
   width: 100%;
 }
 
+@media (min-width: 1024px) {
+  .app-shell.sidebar-collapsed {
+    grid-template-columns: 0 minmax(0, 1fr);
+  }
+  .app-shell.sidebar-collapsed .app-sidebar {
+    overflow: hidden;
+    border-right: none;
+    visibility: hidden;
+    pointer-events: none;
+  }
+}
+
+.app-nav a.nav-item-secondary,
+.app-nav .nav-item-secondary {
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+}
+
 .app-sidebar {
   background: var(--surface);
   border-right: 1px solid var(--border);

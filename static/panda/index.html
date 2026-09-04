@@ -2,7 +2,7 @@
 <html lang="ru" data-theme="light" class="panda-chat">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
   <title>Panda AI — Business Assistant</title>
   <link rel="stylesheet" href="/static/shared/theme.css">
   <link rel="stylesheet" href="/static/panda/panda.css">
@@ -32,7 +32,7 @@
       <nav class="app-nav" aria-label="Разделы">
         <button type="button" class="nav-item active" data-nav="chat">Чат с Panda</button>
         <a href="/product/settings" class="nav-item">Мой аккаунт</a>
-        <a id="owner-nav-link" href="/owner" class="nav-item hidden">Управление</a>
+        <a id="owner-nav-link" href="/owner" class="nav-item nav-item-secondary hidden">Управление</a>
       </nav>
       <div id="conv-loading" class="empty-state hidden">Загрузка…</div>
       <div id="conv-empty" class="empty-state hidden">Начните новый разговор с Panda.</div>
@@ -52,6 +52,16 @@
 
       <div class="chat-scroll">
         <div class="chat-column">
+          <section id="welcome-state" class="welcome-state" aria-label="Приветствие Panda">
+            <div id="welcome-brand" class="welcome-brand"></div>
+            <h1 class="welcome-title">Чем могу помочь?</h1>
+            <p class="muted welcome-copy">Panda AI — интеллектуальный ассистент для вашей работы</p>
+            <div id="suggested-prompts" class="suggested-prompts" aria-label="Подсказки">
+              <button type="button" class="prompt-chip" data-prompt="Помоги составить краткое резюме по рабочей задаче">Составить резюме задачи</button>
+              <button type="button" class="prompt-chip" data-prompt="Разбери прикреплённый файл и выдели главное">Разобрать файл</button>
+              <button type="button" class="prompt-chip" data-prompt="Предложи план следующих шагов по текущей работе">План следующих шагов</button>
+            </div>
+          </section>
           <section id="timeline" class="timeline" role="log" aria-live="polite"></section>
 
           <section id="approval-panel" class="approval-card hidden" aria-label="Требуется подтверждение">
@@ -87,15 +97,17 @@
       </div>
 
       <footer class="composer-dock">
-        <div class="composer chat-column">
+        <div class="composer chat-column" id="composer-shell">
           <div id="attachment-chips" class="attachment-chips" aria-label="Вложения"></div>
           <div class="composer-row">
-            <label class="file-label" aria-label="Прикрепить файл">
-              📎
-              <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
+            <label class="composer-tool" for="file-input" aria-label="Прикрепить файл">
+              <span aria-hidden="true">📎</span>
             </label>
-            <textarea id="composer-input" rows="1" placeholder="Спросите Panda…" aria-label="Сообщение"></textarea>
-            <button id="send-btn" type="button" class="primary send-btn">Отправить</button>
+            <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
+            <textarea id="composer-input" rows="1" placeholder="Спросите Panda…" aria-label="Сообщение" enterkeyhint="send"></textarea>
+            <button id="send-btn" type="button" class="composer-send" aria-label="Отправить" disabled>
+              <span aria-hidden="true">➤</span>
+            </button>
           </div>
           <p id="composer-error" class="error-text" role="alert"></p>
         </div>
