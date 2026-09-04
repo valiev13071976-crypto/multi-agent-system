@@ -38,6 +38,8 @@ class Judge:
                 "Использовать решение, подтвержденное большинством "
                 "экспертов и проверкой фактов."
             ),
+            "final_answer": "",
+            "experts": {},
             "confidence": confidence,
             "analysis": text,
             "risks": [
@@ -61,6 +63,29 @@ class Judge:
         for provider_id in sorted(experts):
             lines.append(f"{provider_id}: {experts[provider_id]}")
         return "\n".join(lines)
+
+    def _expert_text(self, value) -> str:
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value.strip()
+        text = getattr(value, "text", None)
+        if isinstance(text, str) and text.strip():
+            return text.strip()
+        return ""
+
+    def _serialized_experts(self, experts: dict) -> dict[str, str]:
+        out: dict[str, str] = {}
+        for provider_id in sorted(experts or {}):
+            text = self._expert_text(experts[provider_id])
+            if text:
+                out[str(provider_id)] = text
+        return out
+
+    def _user_facing_from_experts(self, experts: dict) -> str:
+        """Existing aggregation: all successful expert texts, sorted provider id, no labels."""
+        parts = [self._expert_text(experts[pid]) for pid in sorted(experts or {})]
+        return "\n".join(part for part in parts if part).strip()
 
     def _risks(self, fact, consistency, structural_fail: bool, failed_count: int) -> list:
         risks = [
@@ -142,6 +167,8 @@ class Judge:
                 "Синтез ответов экспертов без скрытого приоритета provider. "
                 "Внешняя проверка фактов учитывается только при независимых источниках."
             ),
+            "final_answer": self._user_facing_from_experts(experts),
+            "experts": self._serialized_experts(experts),
             "confidence": confidence,
             "analysis": self._analysis(experts),
             "risks": self._risks(

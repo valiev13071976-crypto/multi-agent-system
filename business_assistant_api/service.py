@@ -519,7 +519,8 @@ class BusinessAssistantApiService:
         summary = redact(str(result.get("summary") or ""))
         final_answer = select_canonical_final_answer(
             {
-                "final_answer": result.get("final_answer"),
+                "final_answer": result.get("final_answer") or summary,
+                "experts": result.get("experts"),
                 "best_solution": result.get("best_solution"),
                 "summary": summary,
                 "analysis": result.get("analysis"),

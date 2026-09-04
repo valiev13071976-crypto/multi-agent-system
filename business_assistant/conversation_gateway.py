@@ -44,6 +44,11 @@ _INTERNAL_ASSISTANT_MARKERS = (
     "без скрытого приоритета provider",
 )
 
+_NO_ANSWER_PLACEHOLDERS = (
+    "нет успешных ответов экспертов.",
+)
+
+# Business-diagnostic labels only — never a bare "provider" (that drops ProviderResult / expert bodies).
 _TECHNICAL_SUMMARY_PREFIXES = (
     "requested:",
     "findings:",
@@ -56,11 +61,14 @@ _TECHNICAL_SUMMARY_PREFIXES = (
     "recipe:",
     "mode:",
     "trace id:",
-    "workflow_id",
-    "execution_id",
-    "provider",
+    "workflow_id:",
+    "execution_id:",
+    "provider:",
+    "providers:",
 )
 
+_WRAP_KEYS = ("result", "payload", "decision", "data", "output")
+_EXPERT_VALUE_KEYS = ("text", "content", "response", "output", "answer", "message")
 _PROVIDER_LINE = re.compile(r"^[\w.\-]+(?:/[\w.\-]+)?\s*:\s+(.*)$")
 
 
@@ -70,6 +78,22 @@ def is_internal_assistant_text(text: str) -> bool:
         return True
     low = raw.casefold()
     return any(marker in low for marker in _INTERNAL_ASSISTANT_MARKERS)
+
+
+def _is_placeholder_answer(text: str) -> bool:
+    low = str(text or "").strip().casefold()
+    if not low:
+        return True
+    return any(low == marker or low.startswith(marker) for marker in _NO_ANSWER_PLACEHOLDERS)
+
+
+def _usable_user_text(text: str) -> str:
+    raw = str(text or "").strip()
+    if not raw or is_internal_assistant_text(raw) or _is_placeholder_answer(raw):
+        return ""
+    if raw.casefold().startswith("providerresult("):
+        return ""
+    return raw
 
 
 def _strip_technical_summary(text: str) -> str:
@@ -105,13 +129,66 @@ def _clean_analysis_text(text: str) -> str:
             cleaned.append(line)
     if prefixed == len(lines) and cleaned:
         return "\n".join(cleaned).strip()
+    if prefixed and cleaned:
+        return "\n".join(cleaned).strip()
     return raw
+
+
+def _expert_item_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return _usable_user_text(value)
+    text = getattr(value, "text", None)
+    if isinstance(text, str):
+        return _usable_user_text(text)
+    if isinstance(value, dict):
+        for key in _EXPERT_VALUE_KEYS:
+            inner = value.get(key)
+            if isinstance(inner, str):
+                got = _usable_user_text(inner)
+                if got:
+                    return got
+            if isinstance(inner, dict):
+                nested = inner.get("text") or inner.get("content")
+                if isinstance(nested, str):
+                    got = _usable_user_text(nested)
+                    if got:
+                        return got
+    return ""
+
+
+def _aggregate_experts(experts: Any) -> str:
+    """Match Judge aggregation: every successful expert text, sorted by provider id."""
+    if not isinstance(experts, dict) or not experts:
+        return ""
+    parts: list[str] = []
+    for provider_id in sorted(experts):
+        text = _expert_item_text(experts[provider_id])
+        if text:
+            parts.append(text)
+    return "\n".join(parts).strip()
+
+
+def _merged_payload(result: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(result)
+    for key in _WRAP_KEYS:
+        inner = result.get(key)
+        if not isinstance(inner, dict):
+            continue
+        for inner_key, inner_val in inner.items():
+            current = merged.get(inner_key)
+            if current in (None, "", {}, []):
+                merged[inner_key] = inner_val
+    return merged
 
 
 def _candidate_text(result: dict[str, Any], key: str) -> str:
     value = result.get(key)
     if value is None:
         return ""
+    if key == "experts":
+        return _aggregate_experts(value)
     text = str(value).strip()
     if key == "analysis":
         text = _clean_analysis_text(text)
@@ -119,14 +196,36 @@ def _candidate_text(result: dict[str, Any], key: str) -> str:
 
 
 def select_canonical_final_answer(result: dict[str, Any] | None) -> str:
-    """Pick the user-facing assistant answer; never judge/synthesis/routing metadata."""
-    payload = result if isinstance(result, dict) else {}
-    for key in ("final_answer", "answer", "text", "reply", "best_solution", "summary", "analysis"):
-        text = _candidate_text(payload, key)
-        if not text or is_internal_assistant_text(text):
+    """Authoritative user-facing answer from orchestration output.
+
+    Order (existing architecture):
+    1. explicit final_answer (Judge/formatter user-facing field)
+    2. experts map aggregated the same way Judge concatenates successful experts
+    3. analysis (expert dump with provider labels stripped)
+    4. answer / text / reply if they are not governance/metadata
+    5. best_solution / summary only if not internal and not business diagnostics
+    """
+    payload = _merged_payload(result) if isinstance(result, dict) else {}
+
+    for key in ("final_answer", "experts", "analysis"):
+        text = _usable_user_text(_candidate_text(payload, key))
+        if text:
+            return text
+
+    for key in ("answer", "text", "reply"):
+        text = _usable_user_text(_candidate_text(payload, key))
+        if text:
+            stripped = _strip_technical_summary(text)
+            stripped = _usable_user_text(stripped)
+            if stripped:
+                return stripped
+
+    for key in ("best_solution", "summary"):
+        text = _usable_user_text(_candidate_text(payload, key))
+        if not text:
             continue
-        stripped = _strip_technical_summary(text)
-        if stripped and not is_internal_assistant_text(stripped):
+        stripped = _usable_user_text(_strip_technical_summary(text))
+        if stripped:
             return stripped
     return ""
 
@@ -176,8 +275,6 @@ class WorkflowPandaConversationGateway:
         except Exception as exc:
             raise ConversationUnavailableError(str(exc) or "panda_intelligence_failed") from exc
         reply = extract_assistant_text(result if isinstance(result, dict) else {})
-        if not reply:
-            raise ConversationUnavailableError("empty_response")
         return ConversationResult(
             text=reply,
             workflow_id=getattr(self._workflow_engine, "last_workflow_id", None),

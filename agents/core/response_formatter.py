@@ -9,6 +9,8 @@ class ResponseFormatter:
             return {
                 "summary": str(decision),
                 "analysis": "",
+                "final_answer": "",
+                "experts": {},
                 "risks": [],
                 "action_plan": [],
                 "confidence": 0,
@@ -24,6 +26,10 @@ class ResponseFormatter:
                 "best_solution",
                 ""
             ),
+
+            "final_answer": decision.get("final_answer", "") or "",
+
+            "experts": dict(decision.get("experts") or {}),
 
             "analysis": decision.get(
                 "analysis",
