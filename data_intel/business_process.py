@@ -8,7 +8,8 @@ from data_intel.analysis import analyze_margin
 from data_intel.cleaning import clean_text, normalize_decimal_string
 from data_intel.compare import reconcile_stock
 from data_intel.contracts import utc_now
-from data_intel.excel_out import generate_business_result_workbook
+from data_intel.economics import economics_batch_rows, economics_result_table
+from data_intel.excel_out import generate_business_result_workbook, generate_economics_workbook
 from data_intel.merge import merge_datasets
 from data_intel.product_match import match_products
 from data_intel.quality import build_quality_report, mapping_gate
@@ -389,6 +390,40 @@ def build_business_workbook(
         provenance=provenance or {},
         text_cols=text_cols,
     )
+
+
+def run_economics_batch(
+    rows: list[dict],
+    *,
+    policy=None,
+    channel: str = "SITE",
+    channel_configs: dict | None = None,
+) -> dict:
+    """Block 11 batch economics — reuses Block 10 row normalization, not a second Excel engine."""
+    batch = economics_batch_rows(
+        rows,
+        policy=policy,
+        channel=channel,
+        channel_configs=channel_configs,
+    )
+    headers, body, text_cols = economics_result_table(batch["results"])
+    content = generate_economics_workbook(
+        economics_headers=headers,
+        economics_rows=body,
+        issues=batch["issues"],
+        summary=batch["summary"],
+        scenarios=batch.get("scenarios") or [],
+        text_cols=text_cols,
+        provenance={"process": "product_economics", "original_preserved": True},
+    )
+    return {
+        "status": "OK",
+        "content": content,
+        "size": len(content),
+        "summary": batch["summary"],
+        "results": batch["results"],
+        "issues": batch["issues"],
+    }
 
 
 def assess_structure_for_process(service, dataset_id: str, *, tenant_id: str, required_roles: set[str] | None = None) -> dict:

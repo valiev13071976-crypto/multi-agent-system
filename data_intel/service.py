@@ -12,8 +12,10 @@ from data_intel.business_process import (
     find_conflicting_identifier_duplicates,
     merge_with_provenance,
     price_comparison_changed_only,
+    run_economics_batch,
     stock_reconciliation_report,
 )
+from data_intel.economics import EconomicsPolicy
 from data_intel.cleaning import clean_row
 from data_intel.compare import compare_price_lists, reconcile_stock
 from data_intel.contracts import (
@@ -679,6 +681,34 @@ class DataIntelligenceService:
 
     def basic_margin_for_row(self, row: dict) -> dict:
         return basic_margin(row)
+
+    def run_economics_process(
+        self,
+        dataset_id: str,
+        *,
+        tenant_id: str,
+        policy: EconomicsPolicy | None = None,
+        channel: str = "SITE",
+        channel_configs: dict | None = None,
+    ) -> dict:
+        """Block 11 — product economics batch on ingested dataset (reuses Block 10 store)."""
+        desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
+        if desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id)
+        assert_sync_data_allowed(row_count=len(rows), operations=("economics", "generate_xlsx"))
+        out = run_economics_batch(
+            rows,
+            policy=policy,
+            channel=channel,
+            channel_configs=channel_configs,
+        )
+        name = "economics_result.xlsx"
+        self.store.save_blob(dataset_id, name, out["content"], tenant_id=tenant_id)
+        out["filename"] = name
+        out["dataset_id"] = dataset_id
+        self._emit("data.economics_generated", dataset_id=dataset_id, tenant=tenant_id, rows=len(rows))
+        return out
 
     def conflicting_duplicates(self, dataset_id: str, *, tenant_id: str) -> list[dict]:
         rows = self.store.get_rows(dataset_id, tenant_id=tenant_id)

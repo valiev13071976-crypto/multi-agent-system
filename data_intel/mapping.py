@@ -136,6 +136,18 @@ _ALIAS: dict[str, str] = {
     "склад": ROLE_WAREHOUSE,
     "supplier": ROLE_SUPPLIER,
     "поставщик": ROLE_SUPPLIER,
+    # Block 11 economics columns (direct key match in economics.parse_economics_row)
+    "commission_rate": ROLE_UNKNOWN,
+    "комиссия": ROLE_UNKNOWN,
+    "logistics_cost": ROLE_UNKNOWN,
+    "логистика": ROLE_UNKNOWN,
+    "fulfillment_cost": ROLE_UNKNOWN,
+    "storage_cost": ROLE_UNKNOWN,
+    "хранение": ROLE_UNKNOWN,
+    "advertising_cost": ROLE_UNKNOWN,
+    "реклама": ROLE_UNKNOWN,
+    "acquiring_rate": ROLE_UNKNOWN,
+    "эквайринг": ROLE_UNKNOWN,
 }
 
 

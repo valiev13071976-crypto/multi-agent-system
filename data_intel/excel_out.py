@@ -132,6 +132,47 @@ def _validate_xlsx_bytes(data: bytes) -> None:
         raise DataIntelError(EXCEL_GENERATION_FAILED) from exc
 
 
+def generate_economics_workbook(
+    *,
+    economics_headers: list[str],
+    economics_rows: list[list],
+    issues: list[dict],
+    summary: dict,
+    scenarios: list[dict] | None = None,
+    provenance: dict | None = None,
+    text_cols: set[int] | None = None,
+) -> bytes:
+    """Block 11 output: ECONOMICS + ISSUES + SUMMARY (+ SCENARIOS)."""
+    issue_headers = ["file", "sheet", "row", "column", "reason", "severity"]
+    issue_body = [
+        [
+            i.get("file", ""),
+            i.get("sheet", ""),
+            i.get("row", ""),
+            i.get("column", ""),
+            i.get("reason", ""),
+            i.get("severity", ""),
+        ]
+        for i in issues
+    ]
+    sheets: dict[str, dict] = {
+        "ECONOMICS": {
+            "headers": list(economics_headers),
+            "rows": list(economics_rows),
+            "text_cols": set(text_cols or ()),
+        },
+        "ISSUES": {"headers": issue_headers, "rows": issue_body, "text_cols": set()},
+    }
+    if scenarios:
+        sc_headers = sorted({k for s in scenarios for k in s})
+        sheets["SCENARIOS"] = {
+            "headers": sc_headers,
+            "rows": [[s.get(h) for h in sc_headers] for s in scenarios],
+            "text_cols": set(),
+        }
+    return generate_workbook(summary=dict(summary or {}), sheets=sheets, provenance=dict(provenance or {}))
+
+
 def generate_business_result_workbook(
     *,
     result_headers: list[str],
