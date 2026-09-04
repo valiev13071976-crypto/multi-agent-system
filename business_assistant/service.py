@@ -221,6 +221,7 @@ class BusinessAssistantService:
         *,
         tenant_id: str,
         conversation_id: str | None,
+        history=(),
     ) -> ConversationRequest:
         return ConversationRequest(
             text=req.text,
@@ -229,6 +230,7 @@ class BusinessAssistantService:
             request_id=req.request_id,
             conversation_id=conversation_id,
             correlation_id=req.correlation_id,
+            history=tuple(history or ()),
         )
 
     def _execution_from_conversation(
@@ -260,6 +262,7 @@ class BusinessAssistantService:
         request_id: str,
         tenant_id: str,
         conversation_id: str | None = None,
+        history=(),
     ) -> BusinessExecution:
         """Handle ordinary chat via Panda AI core — async path for API/event-loop callers."""
         req = self._get_request(tenant_id=tenant_id, request_id=request_id)
@@ -269,7 +272,12 @@ class BusinessAssistantService:
             raise BusinessAssistantError(BA_CONVERSATION_UNAVAILABLE, "conversation_gateway_unconfigured")
         try:
             result = await self.conversation_gateway.respond(
-                self._conversation_request(req, tenant_id=tenant_id, conversation_id=conversation_id)
+                self._conversation_request(
+                    req,
+                    tenant_id=tenant_id,
+                    conversation_id=conversation_id,
+                    history=history,
+                )
             )
         except ConversationUnavailableError as exc:
             raise BusinessAssistantError(BA_CONVERSATION_UNAVAILABLE, str(exc)) from exc
@@ -281,12 +289,14 @@ class BusinessAssistantService:
         request_id: str,
         tenant_id: str,
         conversation_id: str | None = None,
+        history=(),
     ) -> BusinessExecution:
         """Sync entry for non-event-loop callers (tests, CLI). API path uses respond_conversationally_async."""
         coro = self.respond_conversationally_async(
             request_id=request_id,
             tenant_id=tenant_id,
             conversation_id=conversation_id,
+            history=history,
         )
         try:
             asyncio.get_running_loop()

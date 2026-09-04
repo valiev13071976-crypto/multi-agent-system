@@ -30,7 +30,8 @@ from business_assistant.models import (
     STATUS_RUNNING,
     STATUS_WAITING_FOR_APPROVAL,
 )
-from business_assistant.conversation_gateway import select_canonical_final_answer
+from business_assistant.conversation_gateway import select_canonical_final_answer, is_internal_assistant_text
+from business_assistant.follow_up import HistoryTurn
 from business_assistant.service import BusinessAssistantService
 from business_assistant_api.errors import (
     BAA_ACCESS_DENIED,
@@ -366,6 +367,11 @@ class BusinessAssistantApiService:
                         request_id=ba_req.request_id,
                         tenant_id=tenant,
                         conversation_id=norm.conversation_id,
+                        history=self._history_turns(
+                            tenant=tenant,
+                            owner_id=owner_id,
+                            conversation_id=norm.conversation_id,
+                        ),
                     )
                 except BusinessAssistantError as exc:
                     if exc.code == BA_CONVERSATION_UNAVAILABLE:
@@ -437,6 +443,11 @@ class BusinessAssistantApiService:
                         request_id=ba_req.request_id,
                         tenant_id=tenant,
                         conversation_id=norm.conversation_id,
+                        history=self._history_turns(
+                            tenant=tenant,
+                            owner_id=owner_id,
+                            conversation_id=norm.conversation_id,
+                        ),
                     )
                 except BusinessAssistantError as exc:
                     if exc.code == BA_CONVERSATION_UNAVAILABLE:
@@ -869,6 +880,30 @@ class BusinessAssistantApiService:
             correlation_id=rec.correlation_id,
         )
         self.store.save_event(ev)
+
+    def _history_turns(
+        self, *, tenant: str, owner_id: str, conversation_id: str | None
+    ) -> tuple[HistoryTurn, ...]:
+        cid = (conversation_id or "").strip()
+        if not cid:
+            return ()
+        conv = self.store.get_conversation(
+            tenant_id=tenant, owner_id=owner_id, conversation_id=cid
+        )
+        if conv is None:
+            return ()
+        out: list[HistoryTurn] = []
+        for msg in self.store.list_messages(tenant_id=tenant, conversation_id=cid):
+            role = str(msg.role or "").lower()
+            if role not in {"user", "assistant"}:
+                continue
+            content = str(msg.content or "").strip()
+            if not content:
+                continue
+            if role == "assistant" and is_internal_assistant_text(content):
+                continue
+            out.append(HistoryTurn(role=role, content=content))
+        return tuple(out)
 
     def _ensure_conversation(self, tenant: str, owner: str, conversation_id: str) -> None:
         if not conversation_id:

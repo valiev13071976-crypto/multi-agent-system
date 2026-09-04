@@ -20,6 +20,7 @@ class ConversationRequest:
     request_id: str
     conversation_id: str | None = None
     correlation_id: str | None = None
+    history: tuple = ()
 
 
 @dataclass(frozen=True)
@@ -258,10 +259,14 @@ class WorkflowPandaConversationGateway:
         text = str(request.text or "").strip()
         if not text:
             raise ConversationUnavailableError("empty_message")
+        from business_assistant.follow_up import build_follow_up_prompt, resolve_follow_up
+
+        resolution = resolve_follow_up(text, history=request.history or ())
+        prompt = build_follow_up_prompt(text, resolution)
         task_id = str(uuid.uuid4())
         try:
             result = await self._workflow_engine.execute(
-                text,
+                prompt,
                 self._mode,
                 self._role,
                 context_manager=self._context_manager,
@@ -282,6 +287,8 @@ class WorkflowPandaConversationGateway:
             metadata={
                 "role": (result or {}).get("role") if isinstance(result, dict) else None,
                 "confidence": (result or {}).get("confidence") if isinstance(result, dict) else None,
+                "follow_up_kind": resolution.kind,
+                "follow_up_target": resolution.target,
             },
         )
 
