@@ -41,11 +41,13 @@ STRATEGIST_FRAMEWORK_MARKERS = (
 
 _BREVITY_RE = re.compile(
     r"(ответь\s+коротко|коротко|кратко|одним\s+предложением|"
+    r"в\s+двух\s+словах|без\s+подробностей|"
     r"in\s+one\s+sentence|briefly|tl;?\s*dr)",
     re.I,
 )
 _DEPTH_UP_RE = re.compile(
     r"(подробно|разберись\s+глубоко|подробн\w*\s+анализ|детальн|"
+    r"полный\s+разбор|глубоко\s+проанализ|"
     r"глубокий\s+анализ|in[- ]depth|comprehensively|разбери\s+подробно)",
     re.I,
 )

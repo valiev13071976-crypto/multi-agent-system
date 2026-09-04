@@ -1,6 +1,8 @@
 from config.constants import MAX_CONTEXT_CHARS
 from config.config.prompts import (
     CRITIC_PROMPT,
+    FRESHNESS_CURRENT_BLOCK,
+    FRESHNESS_HISTORICAL_BLOCK,
     GENERALIST_PROMPT,
     RESEARCHER_PROMPT,
     RESPONSE_DEPTH_ANALYTICAL,
@@ -13,6 +15,7 @@ from config.config.prompts import (
     TECHNICAL_PROMPT,
     TREND_AGENT_PROMPT,
 )
+from agents.answer_presentation import presentation_policy_for
 from agents.response_depth import (
     DEPTH_ANALYTICAL,
     DEPTH_DEEP,
@@ -20,6 +23,10 @@ from agents.response_depth import (
     DEPTH_NORMAL,
     classify_response_depth,
     normalize_response_depth,
+)
+from agents.routing_requirements import (
+    FRESHNESS_CURRENT,
+    FRESHNESS_HISTORICAL,
 )
 
 
@@ -29,8 +36,8 @@ ROLE_GENERALIST = "generalist"
 USER_TASK_MARKER = "USER TASK:"
 
 # Bump when role registry mapping or prompt wiring changes.
-ROLE_REGISTRY_VERSION = "1.1.0"
-PROMPT_VERSION = "1.1.0"
+ROLE_REGISTRY_VERSION = "1.2.0"
+PROMPT_VERSION = "1.2.0"
 
 ALLOWED_ROLE_VALUES = (
     "strategist",
@@ -93,16 +100,27 @@ def instruction_for_role(role_id: str, response_depth: str) -> str:
         return f"{GENERALIST_PROMPT.rstrip()}\n\n{depth_block}"
     if role_id == "strategist":
         core = STRATEGIST_ROLE_CORE.rstrip()
-        if depth in (DEPTH_ANALYTICAL, DEPTH_DEEP):
+        # Seven-section report is DEEP-only. ANALYTICAL strategist stays answer-first.
+        if depth == DEPTH_DEEP:
             return f"{core}\n{STRATEGIST_FORMAT.rstrip()}\n\n{depth_block}"
         return f"{core}\n\n{depth_block}"
     return f"{get_role_prompt(role_id).rstrip()}\n\n{depth_block}"
+
+
+def _freshness_instruction(requirements) -> str:
+    freshness = getattr(requirements, "freshness", None)
+    if freshness == FRESHNESS_CURRENT:
+        return FRESHNESS_CURRENT_BLOCK.strip()
+    if freshness == FRESHNESS_HISTORICAL:
+        return FRESHNESS_HISTORICAL_BLOCK.strip()
+    return ""
 
 
 def compose_prompt(
     role_id: str,
     user_request: str,
     response_depth: str | None = None,
+    requirements=None,
 ) -> str:
     if role_id not in ROLE_PROMPTS:
         raise InvalidRoleError(role_id)
@@ -113,7 +131,18 @@ def compose_prompt(
             text,
             category=_task_category_for_depth(text),
         )
-    instruction = instruction_for_role(role_id, depth).rstrip()
+    if requirements is None:
+        from agents.routing_requirements import derive_task_requirements
+
+        requirements = derive_task_requirements(
+            category=_task_category_for_depth(text),
+            text=text,
+        )
+    parts = [instruction_for_role(role_id, depth).rstrip()]
+    fresh = _freshness_instruction(requirements)
+    if fresh:
+        parts.append(fresh)
+    instruction = "\n\n".join(parts)
     prefix = f"{instruction}\n\n{USER_TASK_MARKER}\n"
     max_user_chars = MAX_CONTEXT_CHARS - len(prefix)
     if max_user_chars < 0:

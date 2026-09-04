@@ -28,6 +28,7 @@ from agents.model_profile import routing_category_for_role
 from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier, classify_task
 from agents.routing_requirements import derive_task_requirements
+from agents.answer_presentation import presentation_policy_for
 from agents.response_depth import (
     classify_response_depth,
     orchestration_policy_for,
@@ -267,6 +268,7 @@ class RouterV2:
             self.last_route_context = None
             self.last_response_depth = None
             self.last_orchestration_policy = None
+            self.last_presentation_policy = None
 
             if requested_role == ROLE_AUTO:
                 self.last_classification = self.task_classifier.classify(prompt)
@@ -292,14 +294,17 @@ class RouterV2:
 
             get_role_prompt(resolved_role)
             orchestration_policy = orchestration_policy_for(response_depth)
+            presentation_policy = presentation_policy_for(response_depth)
             self.last_response_depth = response_depth
             self.last_orchestration_policy = orchestration_policy
+            self.last_presentation_policy = presentation_policy
 
             self.last_route_context = {
                 "category": routing_category,
                 "source": category_source,
                 "policy": self.provider_registry.auto_routing_policy,
                 "response_depth": response_depth,
+                "answer_presentation": presentation_policy,
                 "orchestration_policy": orchestration_policy,
                 "requirements": (
                     dict(self.last_requirements.as_dict())
@@ -351,6 +356,7 @@ class RouterV2:
                 decision.role_id,
                 prompt,
                 response_depth=response_depth,
+                requirements=self.last_requirements,
             )
             selected = self._agents_for_decision(decision)
 
@@ -361,6 +367,7 @@ class RouterV2:
                         "reason": decision.reason,
                         "provider_count": len(decision.provider_ids),
                         "response_depth": response_depth,
+                        "answer_presentation": presentation_policy,
                         "orchestration_policy": orchestration_policy,
                     },
                 )

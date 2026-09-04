@@ -6,6 +6,7 @@ quality, estimate cost, or apply health/eval logic.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Mapping
@@ -26,7 +27,8 @@ COMPLEXITY_LEVELS = (
 
 FRESHNESS_STATIC = "static"
 FRESHNESS_CURRENT = "current"
-FRESHNESS_LEVELS = (FRESHNESS_STATIC, FRESHNESS_CURRENT)
+FRESHNESS_HISTORICAL = "historical"
+FRESHNESS_LEVELS = (FRESHNESS_STATIC, FRESHNESS_CURRENT, FRESHNESS_HISTORICAL)
 
 # --- Risk -------------------------------------------------------------------
 
@@ -74,6 +76,27 @@ CURRENT_FRESHNESS_MARKERS = (
     "up to date",
     "up-to-date",
     "right now",
+)
+
+_HISTORICAL_RE = re.compile(
+    r"(в\s+20\d{2}\s*год|в\s+20\d{2}|были\s+в\s+20\d{2}|"
+    r"историческ|as\s+of\s+20\d{2}|in\s+20\d{2}|"
+    r"ориентир(?:ы|а)?\s+20\d{2})",
+    re.I,
+)
+_MARKETPLACE_RE = re.compile(
+    r"(ozon|озон|wildberries|вайлдберриз|\bwb\b|маркетплейс|"
+    r"yandex\s+market|яндекс\s+маркет)",
+    re.I,
+)
+_COMMERCIAL_RATE_RE = re.compile(
+    r"(комисс|тариф|логист|cpm|реклам|ставк\w*\s+(?:ндс|налог)|"
+    r"правил(?:а|ах)\s+площадк)",
+    re.I,
+)
+_MARKETPLACE_DECISION_RE = re.compile(
+    r"(сравни|стратег|выбер|выход(?:а|е)\s+на)",
+    re.I,
 )
 
 
@@ -137,6 +160,40 @@ def _text_indicates_current_freshness(text: str) -> bool:
     return any(marker in lowered for marker in CURRENT_FRESHNESS_MARKERS)
 
 
+def _text_indicates_historical(text: str) -> bool:
+    return bool(_HISTORICAL_RE.search(text or ""))
+
+
+def _text_indicates_time_sensitive_commercial(text: str) -> bool:
+    """Marketplace rates/policies or marketplace go-to-market decisions need current data."""
+    raw = text or ""
+    if _COMMERCIAL_RATE_RE.search(raw) and (
+        _MARKETPLACE_RE.search(raw) or _text_indicates_current_freshness(raw)
+    ):
+        return True
+    if _MARKETPLACE_RE.search(raw) and _MARKETPLACE_DECISION_RE.search(raw):
+        return True
+    return False
+
+
+def resolve_freshness(text: str, *, category_default: str) -> str:
+    """Temporal claim mode. Independent of response_depth / verbosity.
+
+    HISTORICAL wins over topic-current when the user names a past period
+    and does not also ask for current figures.
+    """
+    historical = _text_indicates_historical(text)
+    wants_current = _text_indicates_current_freshness(text)
+    time_sensitive = _text_indicates_time_sensitive_commercial(text)
+    if historical and not wants_current:
+        return FRESHNESS_HISTORICAL
+    if wants_current or time_sensitive:
+        return FRESHNESS_CURRENT
+    if category_default in FRESHNESS_LEVELS:
+        return category_default
+    return FRESHNESS_STATIC
+
+
 def _metadata_requires_vision(metadata: Mapping | None) -> bool:
     if not metadata:
         return False
@@ -182,13 +239,13 @@ def derive_task_requirements(
     elif category_key == "research":
         complexity = COMPLEXITY_STANDARD
         risk = RISK_LOW
-        if _text_indicates_current_freshness(text):
+        if resolve_freshness(text, category_default=FRESHNESS_STATIC) == FRESHNESS_CURRENT:
             freshness = FRESHNESS_CURRENT
             caps.append(CAPABILITY_SEARCH)
     elif category_key == "trend_analysis":
         complexity = COMPLEXITY_STANDARD
         risk = RISK_MEDIUM
-        # Freshness is current, but do not hard-require CAPABILITY_SEARCH:
+        # Freshness default is current, but do not hard-require CAPABILITY_SEARCH:
         # ModelProfile has no supports_search, so search is always unresolved
         # and would 503 every trend_agent / trend_analysis route.
         freshness = FRESHNESS_CURRENT
@@ -206,11 +263,7 @@ def derive_task_requirements(
         freshness = FRESHNESS_STATIC
         risk = RISK_LOW
 
-    # Freshness is independent of response depth and of category-default complexity.
-    # Do not hard-require CAPABILITY_SEARCH here: most ModelProfiles have
-    # supports_search=False and would 503 auto routing (same as trend_analysis).
-    if _text_indicates_current_freshness(text) and freshness == FRESHNESS_STATIC:
-        freshness = FRESHNESS_CURRENT
+    freshness = resolve_freshness(text, category_default=freshness)
 
     if _metadata_requires_vision(metadata):
         caps.append(CAPABILITY_VISION)
