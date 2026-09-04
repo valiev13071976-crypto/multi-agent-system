@@ -28,10 +28,11 @@ def preactivation_readiness() -> dict:
     return {
         "block": "22A",
         "readiness": READINESS,
-        "canonical_flow": (
-            "Telegram update fixture → validate → bind → Business Assistant API "
-            "→ Panda AI Core / governed tools → Telegram fixture adapter"
-        ),
+    "canonical_flow": (
+        "Telegram update → telegram_interface → binding/tenant → "
+        "Business Assistant → Panda conversation gateway → HITL/governance → "
+        "FakeTelegramProvider (offline) or ProductionTelegramProvider (explicit LIVE)"
+    ),
         "second_ai_core": False,
         "inbound_mode": CANONICAL_MODE,
         "polling": POLLING_STATUS,

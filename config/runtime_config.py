@@ -165,7 +165,12 @@ class RuntimeConfig:
 
 def resolve_profile(env: Mapping | None = None) -> str:
     source = env if env is not None else os.environ
-    raw = str(source.get("PANDA_RUNTIME_PROFILE") or PROFILE_DEVELOPMENT).strip().lower()
+    raw = str(source.get("PANDA_RUNTIME_PROFILE") or "").strip().lower()
+    if not raw:
+        panda = str(source.get("PANDA_ENV") or source.get("ENVIRONMENT") or "").strip().lower()
+        if panda in {"production", "prod"}:
+            return PROFILE_SINGLE_NODE
+        return PROFILE_DEVELOPMENT
     if raw in PROFILES:
         return raw
     aliases = {

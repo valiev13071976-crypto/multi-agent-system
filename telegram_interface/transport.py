@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from b2b_commerce.telegram import TelegramProvider, TelegramSendRequest, TelegramSendResult
+from telegram_interface.errors import TGI_LIVE_FORBIDDEN, TelegramInterfaceError
 
 
 @dataclass
@@ -34,10 +35,15 @@ class TelegramOutboundTransport(Protocol):
 class ProviderTelegramTransport:
     provider: TelegramProvider
     tenant_id: str
+    live_network: bool = False
     _file_fixtures: dict[str, tuple[bytes, str]] = field(default_factory=dict)
     callbacks_answered: list[str] = field(default_factory=list)
 
     def send(self, message: OutboundMessage) -> TelegramSendResult:
+        from integrations.production.adapters.telegram import ProductionTelegramProvider
+
+        if isinstance(self.provider, ProductionTelegramProvider) and not self.live_network:
+            raise TelegramInterfaceError(TGI_LIVE_FORBIDDEN, http_status=403)
         req = TelegramSendRequest(
             tenant_id=self.tenant_id,
             chat_id=message.chat_id,

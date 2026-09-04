@@ -70,6 +70,19 @@ class SqliteTelegramInterfaceStore:
                 created_at TEXT NOT NULL,
                 consumed INTEGER NOT NULL DEFAULT 0
             );
+
+            CREATE TABLE IF NOT EXISTS tgi_binding_audit (
+                event_id TEXT PRIMARY KEY,
+                timestamp TEXT NOT NULL,
+                actor_id TEXT NOT NULL,
+                tenant_id TEXT NOT NULL,
+                action TEXT NOT NULL,
+                binding_id TEXT NOT NULL,
+                owner_id TEXT NOT NULL DEFAULT '',
+                telegram_user_id TEXT NOT NULL DEFAULT '',
+                chat_id TEXT NOT NULL DEFAULT '',
+                result TEXT NOT NULL
+            );
             """
         )
         self._conn.commit()
@@ -228,6 +241,55 @@ class SqliteTelegramInterfaceStore:
         )
         self.save_binding(binding)
         return binding
+
+    def append_binding_audit(
+        self,
+        *,
+        actor_id: str,
+        tenant_id: str,
+        action: str,
+        binding_id: str,
+        owner_id: str = "",
+        telegram_user_id: str = "",
+        chat_id: str = "",
+        result: str = "ok",
+    ) -> dict:
+        event_id = f"tga_{uuid.uuid4().hex[:12]}"
+        ts = _utc_iso()
+        self._conn.execute(
+            """
+            INSERT INTO tgi_binding_audit
+            (event_id, timestamp, actor_id, tenant_id, action, binding_id, owner_id, telegram_user_id, chat_id, result)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (event_id, ts, actor_id, tenant_id, action, binding_id, owner_id, telegram_user_id, chat_id, result),
+        )
+        self._conn.commit()
+        return {
+            "event_id": event_id,
+            "timestamp": ts,
+            "actor_id": actor_id,
+            "tenant_id": tenant_id,
+            "action": action,
+            "binding_id": binding_id,
+            "owner_id": owner_id,
+            "telegram_user_id": telegram_user_id,
+            "chat_id": chat_id,
+            "result": result,
+        }
+
+    def list_binding_audit(self, *, tenant_id: str, binding_id: str = "") -> list[dict]:
+        if binding_id:
+            rows = self._conn.execute(
+                "SELECT * FROM tgi_binding_audit WHERE tenant_id = ? AND binding_id = ? ORDER BY timestamp ASC",
+                (tenant_id, binding_id),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM tgi_binding_audit WHERE tenant_id = ? ORDER BY timestamp ASC",
+                (tenant_id,),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     @staticmethod
     def _row_binding(row: sqlite3.Row) -> TelegramBinding:

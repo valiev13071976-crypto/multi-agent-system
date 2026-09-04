@@ -486,6 +486,8 @@ if tg_interface_runtime is not None:
             webhook_secret=tg_interface_runtime.webhook_secret,
         )
     )
+else:
+    app.include_router(configure_telegram_interface_router(None, webhook_secret=""))
 if voice_interface_runtime is not None:
     app.include_router(configure_voice_interface_router(voice_interface_runtime.service))
 _stripe_provider = _production_bundle.billing_provider if getattr(_production_bundle.billing_provider, "name", "") == "stripe" else None

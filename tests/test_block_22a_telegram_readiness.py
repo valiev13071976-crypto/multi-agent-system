@@ -19,7 +19,6 @@ from telegram_interface.errors import (
     TGI_BINDING_REVOKED,
     TGI_DUPLICATE_UPDATE,
     TGI_INVALID_UPDATE,
-    TGI_LIVE_FORBIDDEN,
     TGI_PANDA_ERROR,
     TGI_PAYLOAD_TOO_LARGE,
     TGI_RATE_LIMITED,
@@ -214,14 +213,13 @@ class Block22ATelegramReadinessTests(unittest.TestCase):
         )
         self.assertNotIn("TELEGRAM_BOT_TOKEN", str(out))
 
-    def test_11_live_telegram_forbidden(self):
+    def test_11_live_authorization_does_not_block_ingest(self):
         self.svc.live_active = True
-        with self.assertRaises(TelegramInterfaceError) as ctx:
-            self.svc.handle_payload(
-                tenant_id="tenant-a",
-                payload=_msg("11", self.chat, self.user, "Summarize quarterly revenue trends"),
-            )
-        self.assertEqual(ctx.exception.code, TGI_LIVE_FORBIDDEN)
+        out = self.svc.handle_payload(
+            tenant_id="tenant-a",
+            payload=_msg("11", self.chat, self.user, "Summarize quarterly revenue trends"),
+        )
+        self.assertEqual(out["status"], "ok")
         state = live_activation_state()
         self.assertFalse(state["telegram_live_active"])
         self.assertFalse(state["telegram_live_verified"])

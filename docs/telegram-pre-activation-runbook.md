@@ -1,120 +1,88 @@
-# Telegram pre-activation runbook (Block 22A)
+# Telegram activation runbook
 
-This runbook is documentation only. Do not execute any step from this file as part of Block 22A.
+Documentation only. Do not execute live Telegram operations from this file.
 
-Live activation requires a later human-approved block. After Block 22A:
+After Block 22B Phase 1A, live flags remain off until a later human-approved phase:
 
 - `telegram_live_active` = false
 - `telegram_live_verified` = false
 
-## PRE-ACTIVATION
+## Flag semantics
 
-Prerequisites:
-
-- Existing `telegram_interface` package is the only Telegram transport.
-- Business Assistant API / Panda AI Core is the conversational path. Do not add a second AI core.
-- Bot is owned by the Panda operator (not a personal ad-hoc bot for production).
-- Production public endpoint is already defined by the platform (do not change DNS here).
-- Identity binding is administrative (`register_binding`). Do not auto-register unknown Telegram users.
-
-Required variable **names** (values are not recorded here):
-
-| VARIABLE_NAME | REQUIRED / OPTIONAL |
+| VARIABLE_NAME | Meaning |
 |---|---|
-| `TELEGRAM_BOT_TOKEN` | REQUIRED for live only |
-| `TELEGRAM_WEBHOOK_SECRET` | REQUIRED in production when the interface is enabled |
-| `TELEGRAM_INTERFACE_ENABLED` | OPTIONAL (default true) |
-| `TELEGRAM_ENABLED` | OPTIONAL (must stay false until live is approved) |
-| `TELEGRAM_LIVE_ACTIVE` | OPTIONAL (must stay false until live is approved) |
-| `TELEGRAM_INTERFACE_DB_PATH` | OPTIONAL |
-| `TELEGRAM_DEFAULT_TENANT` | OPTIONAL |
-| `TELEGRAM_INTERFACE_ENGINEERING_READY` | OPTIONAL documentation flag |
+| `TELEGRAM_INTERFACE_ENABLED` | Build canonical `telegram_interface` runtime (default true). If false, `POST /api/v1/telegram/webhook/{tenant_id}` stays in OpenAPI and returns 503. |
+| `TELEGRAM_LIVE_ACTIVE` | **LIVE AUTHORIZATION.** Does **not** reject inbound webhook updates. |
+| `TELEGRAM_ENABLED` | Select `ProductionTelegramProvider` via existing `build_telegram_provider`. |
+| Live network | Used only when **both** `TELEGRAM_LIVE_ACTIVE` and `TELEGRAM_ENABLED` are true. Missing token → fail closed. No silent Fake fallback. |
+| Unapproved live | Either flag false → `FakeTelegramProvider`. Outbound Bot API with a production provider without `live_network` → `tgi_live_forbidden`. |
+| `TELEGRAM_WEBHOOK_SECRET` | Required in production when the interface is enabled, and whenever live network is selected. Header `X-Telegram-Bot-Api-Secret-Token`. Never in the URL. |
+| `TELEGRAM_BOT_TOKEN` | Required for live network only. Never logged or returned. |
+| `TELEGRAM_INTERFACE_DB_PATH` | Production live: `/data/telegram_interface.sqlite` (must be under `PANDA_DATA_DIR`). Fixture/tests may use temp SQLite. |
+| `TELEGRAM_DEFAULT_TENANT` | Optional; code default `tenant-a`. Webhook `{tenant_id}` must match binding tenant. |
+| `TELEGRAM_INTERFACE_ENGINEERING_READY` | Documentation only; not read by runtime. |
 
-Webhook vs polling:
+Canonical webhook (Panda Business Assistant):
 
-- Canonical inbound mode is **webhook**: `POST /api/v1/telegram/webhook/{tenant_id}`
-- Header: `X-Telegram-Bot-Api-Secret-Token` compared to `TELEGRAM_WEBHOOK_SECRET`
-- Token must not appear in the URL
-- **Polling is NOT APPLICABLE** for this activation path. Do not add a second inbound mechanism.
+`POST /api/v1/telegram/webhook/{tenant_id}`
 
-Binding / bootstrap:
+Do **not** register:
 
-1. Create or confirm the Panda user and tenant in the accounts system.
-2. Register a server-side binding: Telegram `user_id` + `chat_id` → Panda `tenant_id` + `owner_id`.
-3. Unknown users fail closed (`tgi_binding_required`).
-4. Cross-tenant webhook paths fail closed (`tgi_tenant_mismatch`).
-5. Revoked bindings fail closed (`tgi_binding_revoked`). Disabled bindings fail closed (`tgi_user_disabled`).
+`POST /integrations/telegram/webhook/{tenant_id}`
 
-## HUMAN APPROVAL
+that B2B path is a separate integration route.
 
-A human owner must explicitly approve live Telegram. Block 22A does not grant that approval.
+Binding administration (offline-tested; production execution needs a later approval):
 
-Approval must confirm:
+`POST /api/v1/telegram/admin/bindings` — authenticated, `operations:write`, tenant-scoped upsert  
+`GET /api/v1/telegram/admin/bindings` — readback by ids  
+`POST /api/v1/telegram/admin/bindings/status` — `active` / `revoked` / `disabled`
 
-- Bot ownership
-- Production endpoint
-- Secret installation plan
-- Binding list for the first users
-- Rollback owner
+No public self-binding. Unknown Telegram users → `tgi_binding_required`.
 
-## SECRET INSTALLATION
+## Later operational sequence (do not run in Phase 1A)
 
-Install secrets through the approved production secret mechanism only.
+Keep these as **separate** human-approved steps:
 
-Never commit values. Never put the bot token in a URL, log line, exception, diagnostic payload, or browser/client response.
+1. Code CLOSED (this wiring fix)
+2. Git fixation (separate request)
+3. Separate human-approved deployment
+4. Production config verification (names/presence only)
+5. Tenant selection
+6. Human-approved production binding mutation
+7. Human approval for the first Telegram API call
+8. **ONE** `getMe`
+9. Evaluate
+10. `setWebhook` to `POST /api/v1/telegram/webhook/{tenant_id}` with secret header (token never in URL)
+11. Verify
+12. One inbound smoke
+13. One outbound smoke
+14. Accept / rollback
 
-This phase is not executed in Block 22A.
+Do not combine these into one uncontrolled operation.
 
-## DEPLOYMENT (if separately approved)
+## Production config diagnosis (Phase 1 observation; do not set here)
 
-Deploy the already-merged Telegram interface. Do not rebuild Telegram. Do not change public endpoints as part of this runbook unless a later block explicitly approves it.
+`/ready` `runtime_config=development` because `PANDA_RUNTIME_PROFILE` was unset and `PANDA_ENV` was not `production`. After this code, profile defaults to `single-node-production` **only if** `PANDA_ENV`/`ENVIRONMENT` is `production`/`prod`.
 
-This phase is not executed in Block 22A.
+Proposed later non-secret values (human-approved config phase):
 
-## TELEGRAM REGISTRATION (if separately approved)
+| NAME | Proposed |
+|---|---|
+| `PANDA_ENV` | `production` |
+| `PANDA_RUNTIME_PROFILE` | `single-node-production` |
+| `PANDA_DATA_DIR` | `/data` |
+| `TELEGRAM_INTERFACE_ENABLED` | `true` |
+| `TELEGRAM_INTERFACE_DB_PATH` | `/data/telegram_interface.sqlite` |
+| `TELEGRAM_LIVE_ACTIVE` | `false` until live approval |
+| `TELEGRAM_ENABLED` | `false` until live approval |
 
-Only after human approval and secret installation:
+`/ready` `production_config=WARN` is expected when backup destination is local and/or `PANDA_ALERT_WEBHOOK_URL` is unset. That is an operator config gap, not a Telegram wiring defect.
 
-- Register webhook against `POST /api/v1/telegram/webhook/{tenant_id}`
-- Send `X-Telegram-Bot-Api-Secret-Token`
-- Do not use polling
+## Rollback (not executed here)
 
-This phase is not executed in Block 22A. No `setWebhook` / `deleteWebhook` / `getMe` / `getUpdates` / `sendMessage` here.
-
-## BOUNDED LIVE SMOKE (if separately approved)
-
-Minimum smoke after a later approval (not this block):
-
-1. One known bound user sends one text
-2. Confirm Panda fixture/BA path responds
-3. Confirm unknown user still fails closed
-4. Confirm no WRITE bypass (governed actions still HITL)
-
-This phase is not executed in Block 22A.
-
-## ACCEPT / ROLLBACK
-
-Rollback / webhook disable (if live had been registered in a later block):
-
-- Disable `TELEGRAM_LIVE_ACTIVE` and `TELEGRAM_ENABLED`
-- Remove webhook registration if it was set (`deleteWebhook` only in that later approved block)
-- Keep bindings server-side; revoke compromised bindings
-- Rotate `TELEGRAM_BOT_TOKEN` and `TELEGRAM_WEBHOOK_SECRET` via the secret mechanism if exposure is suspected
-
-Incident stop:
-
-- Set `TELEGRAM_INTERFACE_ENABLED=false` or `TELEGRAM_LIVE_ACTIVE=false`
-- Stop processing at the webhook
-- Do not attempt live Telegram API calls from this runbook
-
-## Verification checklist (offline / Block 22A)
-
-- [ ] Fixture E2E tests pass
-- [ ] Unknown user fail-closed
-- [ ] Cross-tenant denied
-- [ ] Duplicate update suppressed
-- [ ] Malformed / oversized / unsupported types explicit
-- [ ] Governed WRITE still HITL + capabilities
-- [ ] Secret **names** documented; secret **values** not in git
-- [ ] `telegram_live_active=false`
-- [ ] `telegram_live_verified=false`
+- Set `TELEGRAM_LIVE_ACTIVE=false` and `TELEGRAM_ENABLED=false`
+- Optionally `TELEGRAM_INTERFACE_ENABLED=false` (webhook returns 503; route remains)
+- `deleteWebhook` only in a later approved phase if a webhook had been registered
+- Preserve `/data` binding/dedup SQLite
+- Do not delete the bot; do not print tokens

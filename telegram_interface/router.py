@@ -4,14 +4,20 @@ from __future__ import annotations
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Header, HTTPException, Request, Response
+from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
+from pydantic import BaseModel, Field
 
 from integrations.production.adapters.telegram import verify_telegram_webhook
 from integrations.production.errors import ProductionProviderError, ProviderErrorCategory
+from security.api_auth import get_security_context
+from security.identity import RequestSecurityContext
+from security.rbac import PERM_OPS_WRITE, RBACDenied, RBACPolicy
 from telegram_interface.errors import (
+    TGI_ACCESS_DENIED,
     TGI_DUPLICATE_UPDATE,
     TGI_INVALID_UPDATE,
     TGI_PAYLOAD_TOO_LARGE,
+    TGI_UNAUTHORIZED,
     TelegramInterfaceError,
 )
 from telegram_interface.normalize import MAX_TELEGRAM_PAYLOAD_BYTES
@@ -20,10 +26,11 @@ from telegram_interface.service import TelegramInterfaceService
 _router = APIRouter(prefix="/api/v1/telegram", tags=["telegram-interface"])
 _service: TelegramInterfaceService | None = None
 _webhook_secret: str = ""
+_rbac = RBACPolicy()
 
 
 def configure_telegram_interface_router(
-    service: TelegramInterfaceService, *, webhook_secret: str = ""
+    service: TelegramInterfaceService | None, *, webhook_secret: str = ""
 ) -> APIRouter:
     global _service, _webhook_secret
     _service = service
@@ -35,6 +42,28 @@ def _svc() -> TelegramInterfaceService:
     if _service is None:
         raise HTTPException(status_code=503, detail={"code": "tgi_unavailable"})
     return _service
+
+
+def _require_binding_admin(ctx: RequestSecurityContext) -> RequestSecurityContext:
+    try:
+        _rbac.require(ctx.roles, PERM_OPS_WRITE)
+    except RBACDenied as exc:
+        raise HTTPException(status_code=403, detail={"code": TGI_UNAUTHORIZED}) from exc
+    return ctx
+
+
+class BindingUpsertRequest(BaseModel):
+    tenant_id: str
+    owner_id: str
+    telegram_user_id: str = Field(..., min_length=1)
+    chat_id: str = Field(..., min_length=1)
+
+
+class BindingStatusRequest(BaseModel):
+    tenant_id: str
+    telegram_user_id: str = Field(..., min_length=1)
+    chat_id: str = Field(..., min_length=1)
+    status: str = Field(..., pattern="^(active|revoked|disabled)$")
 
 
 @_router.post("/webhook/{tenant_id}")
@@ -94,4 +123,71 @@ async def telegram_fixture_update(tenant_id: str, payload: dict[str, Any], respo
     except TelegramInterfaceError as exc:
         if exc.code == TGI_DUPLICATE_UPDATE:
             return {"status": "duplicate"}
+        raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message})
+
+
+def _tenant_guard(ctx: RequestSecurityContext, tenant_id: str) -> str:
+    if tenant_id != ctx.tenant_id:
+        raise HTTPException(status_code=403, detail={"code": TGI_ACCESS_DENIED})
+    return tenant_id
+
+
+@_router.post("/admin/bindings")
+async def admin_upsert_binding(
+    body: BindingUpsertRequest,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    response.headers["Cache-Control"] = "no-store, private"
+    _require_binding_admin(ctx)
+    tenant = _tenant_guard(ctx, body.tenant_id)
+    try:
+        return _svc().admin_upsert_binding(
+            tenant_id=tenant,
+            owner_id=body.owner_id,
+            telegram_user_id=body.telegram_user_id,
+            chat_id=body.chat_id,
+            actor_id=ctx.user_id,
+        )
+    except TelegramInterfaceError as exc:
+        raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message})
+
+
+@_router.get("/admin/bindings")
+async def admin_get_binding(
+    tenant_id: str,
+    telegram_user_id: str,
+    chat_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    response.headers["Cache-Control"] = "no-store, private"
+    _require_binding_admin(ctx)
+    tenant = _tenant_guard(ctx, tenant_id)
+    try:
+        return _svc().get_binding_view(
+            tenant_id=tenant, telegram_user_id=telegram_user_id, chat_id=chat_id
+        )
+    except TelegramInterfaceError as exc:
+        raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message})
+
+
+@_router.post("/admin/bindings/status")
+async def admin_set_binding_status(
+    body: BindingStatusRequest,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    response.headers["Cache-Control"] = "no-store, private"
+    _require_binding_admin(ctx)
+    tenant = _tenant_guard(ctx, body.tenant_id)
+    try:
+        return _svc().admin_set_binding_status(
+            tenant_id=tenant,
+            telegram_user_id=body.telegram_user_id,
+            chat_id=body.chat_id,
+            status=body.status,
+            actor_id=ctx.user_id,
+        )
+    except TelegramInterfaceError as exc:
         raise HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message})

@@ -8,12 +8,16 @@ from dataclasses import dataclass
 from b2b_commerce.providers.fake_telegram import FakeTelegramProvider
 from business_assistant_api.runtime import build_business_assistant_api_runtime
 from business_assistant_api.service import BusinessAssistantApiService
+from integrations.production.adapters.telegram import ProductionTelegramProvider, build_telegram_provider
 from security.rate_limit import RateLimiter
 from telegram_interface.config import (
+    require_durable_telegram_db,
     require_webhook_secret_in_production,
     telegram_interface_db_path,
     telegram_interface_enabled,
     telegram_live_active,
+    telegram_live_network_selected,
+    telegram_token_configured,
     telegram_webhook_secret,
 )
 from telegram_interface.service import TelegramInterfaceService
@@ -32,6 +36,18 @@ class TelegramInterfaceRuntime:
         self.service.close()
 
 
+def select_telegram_interface_provider(env: dict):
+    """Fake unless LIVE is explicitly selected; then ProductionTelegramProvider or fail closed."""
+    if not telegram_live_network_selected(env):
+        return FakeTelegramProvider()
+    if not telegram_token_configured(env):
+        raise RuntimeError("TELEGRAM_BOT_TOKEN required when TELEGRAM_LIVE_ACTIVE and TELEGRAM_ENABLED")
+    provider = build_telegram_provider(env)
+    if not isinstance(provider, ProductionTelegramProvider):
+        raise RuntimeError("explicit LIVE Telegram selection cannot fall back to FakeTelegramProvider")
+    return provider
+
+
 def build_telegram_interface_runtime(
     *,
     env: dict | None = None,
@@ -44,6 +60,7 @@ def build_telegram_interface_runtime(
         raise RuntimeError("TELEGRAM_INTERFACE_ENABLED is false")
     require_webhook_secret_in_production(env)
     path = db_path or telegram_interface_db_path(env)
+    require_durable_telegram_db(env, path)
     store = SqliteTelegramInterfaceStore(path)
     if ba_api is None:
         ba_rt = build_business_assistant_api_runtime(env=env, db_path=env.get("BA_API_DB_PATH"))
@@ -51,9 +68,10 @@ def build_telegram_interface_runtime(
         upload = upload_dir or ba_rt.upload_dir
     else:
         upload = upload_dir or getattr(ba_api, "upload_dir", "")
-    provider = FakeTelegramProvider()
+    live_network = telegram_live_network_selected(env)
+    provider = select_telegram_interface_provider(env)
     tenant = str(env.get("TELEGRAM_DEFAULT_TENANT") or "tenant-a")
-    transport = ProviderTelegramTransport(provider=provider, tenant_id=tenant)
+    transport = ProviderTelegramTransport(provider=provider, tenant_id=tenant, live_network=live_network)
     svc = TelegramInterfaceService(
         store=store,
         ba_api=ba_api,
@@ -63,9 +81,10 @@ def build_telegram_interface_runtime(
         live_active=telegram_live_active(env),
         rate_limiter=RateLimiter(),
     )
+    svc.live_network = live_network
     ba_core = getattr(ba_api, "ba", None)
     if (
-        not telegram_live_active(env)
+        not live_network
         and ba_core is not None
         and getattr(ba_core, "conversation_gateway", None) is None
     ):

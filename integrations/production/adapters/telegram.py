@@ -31,7 +31,10 @@ class ProductionTelegramProvider:
                 message="telegram_token_missing",
                 provider_id="telegram",
             )
-        self._http = BoundedHttpClient(provider_id="telegram", timeout_seconds=self.timeout_seconds)
+        # BoundedHttpClient is created lazily on first request — no network at construct.
+
+    def __repr__(self) -> str:
+        return "ProductionTelegramProvider(bot_token=[REDACTED])"
 
     @property
     def base_url(self) -> str:
@@ -47,7 +50,7 @@ class ProductionTelegramProvider:
             raise B2BCommerceError(B2B_TELEGRAM_PROVIDER_FAILED, "empty message")
         started = time.monotonic()
         try:
-            resp = self._http.request(
+            resp = self._http_client().request(
                 "POST",
                 f"{self.base_url}/sendMessage",
                 json_body={"chat_id": request.chat_id, "text": text},
@@ -72,7 +75,7 @@ class ProductionTelegramProvider:
     def health_check(self) -> dict:
         started = time.monotonic()
         try:
-            resp = self._http.request("GET", f"{self.base_url}/getMe")
+            resp = self._http_client().request("GET", f"{self.base_url}/getMe")
             data = resp.json()
             ok = bool(data.get("ok"))
             username = str(data.get("result", {}).get("username") or "")
@@ -81,6 +84,11 @@ class ProductionTelegramProvider:
             return {"status": "healthy" if ok else "unhealthy", "bot_username": username}
         except ProductionProviderError as exc:
             return {"status": "unhealthy", "error_category": exc.category.value}
+
+    def _http_client(self) -> BoundedHttpClient:
+        if self._http is None:
+            self._http = BoundedHttpClient(provider_id="telegram", timeout_seconds=self.timeout_seconds)
+        return self._http
 
     def close(self) -> None:
         if self._http:

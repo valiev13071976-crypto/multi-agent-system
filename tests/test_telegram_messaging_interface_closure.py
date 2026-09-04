@@ -349,7 +349,53 @@ class TelegramInterfaceHttpTests(unittest.TestCase):
 
     def test_openapi_includes_telegram(self):
         spec = self.client.get("/openapi.json").json()
-        self.assertIn("/api/v1/telegram/webhook/{tenant_id}", spec.get("paths", {}))
+        paths = spec.get("paths", {})
+        self.assertIn("/api/v1/telegram/webhook/{tenant_id}", paths)
+        self.assertIn("post", paths["/api/v1/telegram/webhook/{tenant_id}"])
+        self.assertIn("/integrations/telegram/webhook/{tenant_id}", paths)
+
+    def test_webhook_malformed_and_unknown_and_duplicate(self):
+        headers = {"X-Telegram-Bot-Api-Secret-Token": "test-webhook-secret"}
+        bad = self.client.post(
+            "/api/v1/telegram/webhook/tenant-a",
+            content=b"{not-json",
+            headers={**headers, "Content-Type": "application/json"},
+        )
+        self.assertEqual(bad.status_code, 400)
+        unknown = self.client.post(
+            "/api/v1/telegram/webhook/tenant-a",
+            json=_msg_payload("502", "1", "2", "hello"),
+            headers=headers,
+        )
+        self.assertEqual(unknown.status_code, 403)
+        self.assertEqual(unknown.json()["detail"]["code"], "tgi_binding_required")
+        ok = self.client.post(
+            "/api/v1/telegram/webhook/tenant-a",
+            json=_msg_payload("503", "100001", "200001", "Summarize quarterly revenue trends"),
+            headers=headers,
+        )
+        self.assertEqual(ok.status_code, 200)
+        dup = self.client.post(
+            "/api/v1/telegram/webhook/tenant-a",
+            json=_msg_payload("503", "100001", "200001", "Summarize quarterly revenue trends"),
+            headers=headers,
+        )
+        self.assertEqual(dup.status_code, 200)
+        self.assertEqual(dup.json()["status"], "duplicate")
+        mismatch = self.client.post(
+            "/api/v1/telegram/webhook/tenant-b",
+            json=_msg_payload("504", "100001", "200001", "Summarize quarterly revenue trends"),
+            headers=headers,
+        )
+        self.assertEqual(mismatch.status_code, 403)
+        self.assertEqual(mismatch.json()["detail"]["code"], "tgi_tenant_mismatch")
+        huge = _msg_payload("505", "100001", "200001", "x" * 70000)
+        oversized = self.client.post(
+            "/api/v1/telegram/webhook/tenant-a",
+            json=huge,
+            headers=headers,
+        )
+        self.assertEqual(oversized.status_code, 413)
 
 
 if __name__ == "__main__":

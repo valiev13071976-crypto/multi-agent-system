@@ -26,7 +26,6 @@ from telegram_interface.errors import (
     TGI_FILE_UNSUPPORTED,
     TGI_INVALID_CALLBACK,
     TGI_INVALID_UPDATE,
-    TGI_LIVE_FORBIDDEN,
     TGI_PANDA_ERROR,
     TGI_PAYLOAD_TOO_LARGE,
     TGI_RATE_LIMITED,
@@ -97,6 +96,7 @@ class TelegramInterfaceService:
         self.upload_dir = upload_dir or getattr(ba_api, "upload_dir", "")
         self.default_tenant_id = default_tenant_id
         self.live_active = bool(live_active)
+        self.live_network = False
         self.rate_limiter = rate_limiter or RateLimiter()
         self.max_payload_bytes = int(max_payload_bytes)
 
@@ -134,6 +134,121 @@ class TelegramInterfaceService:
             "owner_id": owner_id,
         }
 
+    def admin_upsert_binding(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        telegram_user_id: str,
+        chat_id: str,
+        actor_id: str,
+    ) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        existing = self.store.get_binding(
+            tenant_id=tenant, telegram_user_id=telegram_user_id, chat_id=chat_id
+        )
+        if existing is not None:
+            if existing.owner_id != owner_id:
+                raise TelegramInterfaceError(TGI_ACCESS_DENIED, http_status=403)
+            existing.status = "active"
+            existing.updated_at = _utc_iso()
+            self.store.save_binding(existing)
+            audit = self.store.append_binding_audit(
+                actor_id=actor_id,
+                tenant_id=tenant,
+                action="binding_upsert",
+                binding_id=existing.binding_id,
+                owner_id=owner_id,
+                telegram_user_id=telegram_user_id,
+                chat_id=chat_id,
+                result="idempotent",
+            )
+            return {
+                "binding_id": existing.binding_id,
+                "conversation_id": existing.conversation_id,
+                "tenant_id": tenant,
+                "owner_id": owner_id,
+                "status": existing.status,
+                "idempotent": True,
+                "audit_event_id": audit["event_id"],
+            }
+        out = self.register_binding(
+            tenant_id=tenant,
+            owner_id=owner_id,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+        )
+        audit = self.store.append_binding_audit(
+            actor_id=actor_id,
+            tenant_id=tenant,
+            action="binding_create",
+            binding_id=out["binding_id"],
+            owner_id=owner_id,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            result="ok",
+        )
+        out["status"] = "active"
+        out["idempotent"] = False
+        out["audit_event_id"] = audit["event_id"]
+        return out
+
+    def admin_set_binding_status(
+        self,
+        *,
+        tenant_id: str,
+        telegram_user_id: str,
+        chat_id: str,
+        status: str,
+        actor_id: str,
+    ) -> dict:
+        if status not in {"active", "revoked", "disabled"}:
+            raise TelegramInterfaceError(TGI_INVALID_UPDATE, "invalid_binding_status", http_status=400)
+        self.set_binding_status(
+            tenant_id=tenant_id,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            status=status,
+        )
+        binding = self.store.get_binding(
+            tenant_id=tenant_id, telegram_user_id=telegram_user_id, chat_id=chat_id
+        )
+        assert binding is not None
+        action = {"revoked": "binding_revoke", "disabled": "binding_disable", "active": "binding_enable"}[status]
+        audit = self.store.append_binding_audit(
+            actor_id=actor_id,
+            tenant_id=binding.tenant_id,
+            action=action,
+            binding_id=binding.binding_id,
+            owner_id=binding.owner_id,
+            telegram_user_id=telegram_user_id,
+            chat_id=chat_id,
+            result="ok",
+        )
+        return {
+            "binding_id": binding.binding_id,
+            "tenant_id": binding.tenant_id,
+            "owner_id": binding.owner_id,
+            "status": binding.status,
+            "audit_event_id": audit["event_id"],
+        }
+
+    def get_binding_view(self, *, tenant_id: str, telegram_user_id: str, chat_id: str) -> dict:
+        tenant = require_tenant_id(tenant_id)
+        binding = self.store.get_binding(
+            tenant_id=tenant, telegram_user_id=telegram_user_id, chat_id=chat_id
+        )
+        if binding is None:
+            raise TelegramInterfaceError(TGI_BINDING_REQUIRED, http_status=404)
+        return {
+            "binding_id": binding.binding_id,
+            "tenant_id": binding.tenant_id,
+            "owner_id": binding.owner_id,
+            "telegram_user_id": binding.telegram_user_id,
+            "chat_id": binding.chat_id,
+            "status": binding.status,
+        }
+
     def set_binding_status(
         self, *, tenant_id: str, telegram_user_id: str, chat_id: str, status: str
     ) -> None:
@@ -167,8 +282,6 @@ class TelegramInterfaceService:
         raise TelegramInterfaceError(TGI_BINDING_REQUIRED, http_status=403)
 
     def handle_payload(self, *, tenant_id: str, payload: dict[str, Any]) -> dict:
-        if self.live_active:
-            raise TelegramInterfaceError(TGI_LIVE_FORBIDDEN, http_status=403)
         tenant = require_tenant_id(tenant_id or self.default_tenant_id)
         if not isinstance(payload, dict):
             raise TelegramInterfaceError(TGI_INVALID_UPDATE, http_status=400)
