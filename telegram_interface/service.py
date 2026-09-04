@@ -10,20 +10,39 @@ from business_assistant_api.errors import BusinessAssistantApiError
 from business_assistant_api.models import ST_CANCELLED, ST_COMPLETED, ST_REJECTED, ST_WAITING_FOR_APPROVAL, TERMINAL_STATES
 from business_assistant_api.service import BusinessAssistantApiService
 from business_assistant_api.uploads import safe_filename, save_upload
+from security.errors import RateLimitedError
+from security.rate_limit import RateLimiter
 from security.redaction import redact
 from security.tenant import require_tenant_id
 from telegram_interface.errors import (
     TGI_ACCESS_DENIED,
+    TGI_APPROVAL_REQUIRED,
     TGI_BINDING_REQUIRED,
+    TGI_BINDING_REVOKED,
     TGI_CALLBACK_STALE,
+    TGI_CAPABILITY_DENIED,
     TGI_DUPLICATE_UPDATE,
     TGI_FILE_TOO_LARGE,
     TGI_FILE_UNSUPPORTED,
     TGI_INVALID_CALLBACK,
+    TGI_INVALID_UPDATE,
+    TGI_LIVE_FORBIDDEN,
+    TGI_PANDA_ERROR,
+    TGI_PAYLOAD_TOO_LARGE,
+    TGI_RATE_LIMITED,
+    TGI_RESPONSE_EMPTY,
+    TGI_TENANT_MISMATCH,
+    TGI_UNSUPPORTED_MESSAGE,
+    TGI_USER_DISABLED,
     TelegramInterfaceError,
 )
 from telegram_interface.models import CallbackToken, ChatSession, NormalizedTelegramUpdate
-from telegram_interface.normalize import attachment_allowed, normalize_telegram_payload
+from telegram_interface.normalize import (
+    MAX_TELEGRAM_PAYLOAD_BYTES,
+    attachment_allowed,
+    normalize_telegram_payload,
+    telegram_payload_size_bytes,
+)
 from telegram_interface.render import (
     render_artifacts,
     render_error,
@@ -31,6 +50,7 @@ from telegram_interface.render import (
     render_progress,
     render_result,
     render_status_label,
+    chunk_telegram_text,
 )
 from telegram_interface.store import SqliteTelegramInterfaceStore
 from telegram_interface.transport import InlineButton, OutboundMessage, ProviderTelegramTransport, new_idempotency
@@ -42,6 +62,21 @@ def _utc_iso() -> str:
 
 _TERMINAL = frozenset(TERMINAL_STATES)
 
+_BA_CODE_MAP = {
+    "baa_unsupported_capability": TGI_CAPABILITY_DENIED,
+    "BAA_UNSUPPORTED_CAPABILITY": TGI_CAPABILITY_DENIED,
+    "baa_access_denied": TGI_ACCESS_DENIED,
+    "BAA_ACCESS_DENIED": TGI_ACCESS_DENIED,
+    "baa_approval_required": TGI_APPROVAL_REQUIRED,
+    "BAA_APPROVAL_REQUIRED": TGI_APPROVAL_REQUIRED,
+    "baa_rate_limited": TGI_RATE_LIMITED,
+    "BAA_RATE_LIMITED": TGI_RATE_LIMITED,
+}
+
+
+def _map_ba_error(code: str) -> str:
+    return _BA_CODE_MAP.get(code, TGI_PANDA_ERROR)
+
 
 class TelegramInterfaceService:
     def __init__(
@@ -52,12 +87,18 @@ class TelegramInterfaceService:
         transport: ProviderTelegramTransport,
         upload_dir: str = "",
         default_tenant_id: str = "",
+        live_active: bool = False,
+        rate_limiter: RateLimiter | None = None,
+        max_payload_bytes: int = MAX_TELEGRAM_PAYLOAD_BYTES,
     ):
         self.store = store
         self.ba = ba_api
         self.transport = transport
         self.upload_dir = upload_dir or getattr(ba_api, "upload_dir", "")
         self.default_tenant_id = default_tenant_id
+        self.live_active = bool(live_active)
+        self.rate_limiter = rate_limiter or RateLimiter()
+        self.max_payload_bytes = int(max_payload_bytes)
 
     def close(self) -> None:
         self.store.close()
@@ -93,18 +134,60 @@ class TelegramInterfaceService:
             "owner_id": owner_id,
         }
 
-    def handle_payload(self, *, tenant_id: str, payload: dict[str, Any]) -> dict:
-        tenant = require_tenant_id(tenant_id or self.default_tenant_id)
-        update = normalize_telegram_payload(payload)
-        if self.store.has_processed_update(update.update_id):
-            raise TelegramInterfaceError(TGI_DUPLICATE_UPDATE, http_status=200)
+    def set_binding_status(
+        self, *, tenant_id: str, telegram_user_id: str, chat_id: str, status: str
+    ) -> None:
+        tenant = require_tenant_id(tenant_id)
+        binding = self.store.get_binding(
+            tenant_id=tenant, telegram_user_id=telegram_user_id, chat_id=chat_id
+        )
+        if binding is None:
+            raise TelegramInterfaceError(TGI_BINDING_REQUIRED, http_status=404)
+        binding.status = status
+        binding.updated_at = _utc_iso()
+        self.store.save_binding(binding)
+
+    def _resolve_binding(self, *, tenant: str, update: NormalizedTelegramUpdate):
         binding = self.store.get_binding(
             tenant_id=tenant, telegram_user_id=update.telegram_user_id, chat_id=update.chat_id
         )
-        if binding is None:
-            raise TelegramInterfaceError(TGI_BINDING_REQUIRED, http_status=403)
-        if binding.status != "active":
-            raise TelegramInterfaceError(TGI_BINDING_REQUIRED, http_status=403)
+        if binding is not None:
+            if binding.status == "disabled":
+                raise TelegramInterfaceError(TGI_USER_DISABLED, http_status=403)
+            if binding.status != "active":
+                raise TelegramInterfaceError(TGI_BINDING_REVOKED, http_status=403)
+            return binding
+        others = [
+            b
+            for b in self.store.find_bindings_for_telegram_user(telegram_user_id=update.telegram_user_id)
+            if b.status == "active" and b.tenant_id != tenant
+        ]
+        if others:
+            raise TelegramInterfaceError(TGI_TENANT_MISMATCH, http_status=403)
+        raise TelegramInterfaceError(TGI_BINDING_REQUIRED, http_status=403)
+
+    def handle_payload(self, *, tenant_id: str, payload: dict[str, Any]) -> dict:
+        if self.live_active:
+            raise TelegramInterfaceError(TGI_LIVE_FORBIDDEN, http_status=403)
+        tenant = require_tenant_id(tenant_id or self.default_tenant_id)
+        if not isinstance(payload, dict):
+            raise TelegramInterfaceError(TGI_INVALID_UPDATE, http_status=400)
+        if telegram_payload_size_bytes(payload) > self.max_payload_bytes:
+            raise TelegramInterfaceError(TGI_PAYLOAD_TOO_LARGE, http_status=413)
+        update = normalize_telegram_payload(payload)
+        if update.kind == "invalid" or not update.update_id or update.update_id in {"None", "null"}:
+            raise TelegramInterfaceError(TGI_INVALID_UPDATE, http_status=400)
+        if not update.chat_id or not update.telegram_user_id:
+            raise TelegramInterfaceError(TGI_INVALID_UPDATE, http_status=400)
+        if update.kind == "unsupported":
+            raise TelegramInterfaceError(TGI_UNSUPPORTED_MESSAGE, http_status=400)
+        if self.store.has_processed_update(update.update_id):
+            raise TelegramInterfaceError(TGI_DUPLICATE_UPDATE, http_status=200)
+        binding = self._resolve_binding(tenant=tenant, update=update)
+        try:
+            self.rate_limiter.check_authenticated(tenant_id=tenant, user_id=binding.owner_id)
+        except RateLimitedError as exc:
+            raise TelegramInterfaceError(TGI_RATE_LIMITED, http_status=429) from exc
         self.store.mark_processed_update(update_id=update.update_id, tenant_id=tenant)
         try:
             if update.kind == "callback_query":
@@ -114,13 +197,14 @@ class TelegramInterfaceService:
             else:
                 out = self._handle_message(update, binding)
         except BusinessAssistantApiError as exc:
-            self._reply(binding.chat_id, render_error(exc.code), prefix="err")
-            raise TelegramInterfaceError(exc.code, redact(exc.message), http_status=422) from exc
+            mapped = _map_ba_error(exc.code)
+            self._reply(binding.chat_id, render_error(mapped), prefix="err")
+            raise TelegramInterfaceError(mapped, redact(exc.message), http_status=422) from exc
         except TelegramInterfaceError:
             raise
         except Exception as exc:
-            self._reply(binding.chat_id, render_error("request_failed"), prefix="err")
-            raise TelegramInterfaceError("request_failed", redact(str(exc)), http_status=500) from exc
+            self._reply(binding.chat_id, render_error(TGI_PANDA_ERROR), prefix="err")
+            raise TelegramInterfaceError(TGI_PANDA_ERROR, render_error(TGI_PANDA_ERROR), http_status=500) from exc
         return out
 
     def _session(self, binding) -> ChatSession:
@@ -389,13 +473,18 @@ class TelegramInterfaceService:
         self.transport.send(msg)
 
     def _reply(self, chat_id: str, text: str, *, prefix: str) -> None:
-        self.transport.send(
-            OutboundMessage(
-                chat_id=chat_id,
-                text=text,
-                idempotency_key=new_idempotency(prefix),
+        body = str(text or "").strip()
+        if not body:
+            body = render_error(TGI_RESPONSE_EMPTY)
+        chunks = chunk_telegram_text(body)
+        for i, part in enumerate(chunks):
+            self.transport.send(
+                OutboundMessage(
+                    chat_id=chat_id,
+                    text=part,
+                    idempotency_key=new_idempotency(f"{prefix}-{i}"),
+                )
             )
-        )
 
     def recover_session(self, chat_id: str) -> ChatSession | None:
         return self.store.get_session(chat_id)
@@ -406,6 +495,6 @@ class TelegramInterfaceService:
         binding = self.store.get_binding(
             tenant_id=tenant_id, telegram_user_id=telegram_user_id, chat_id=chat_id
         )
-        if binding is None or binding.owner_id != owner_id:
+        if binding is None or binding.owner_id != owner_id or binding.status != "active":
             raise TelegramInterfaceError(TGI_ACCESS_DENIED, http_status=403)
         self.ba.get_request(tenant_id=tenant_id, owner_id=owner_id, request_id=request_id)

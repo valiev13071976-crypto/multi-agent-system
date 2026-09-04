@@ -313,6 +313,11 @@ class TelegramInterfaceHttpTests(unittest.TestCase):
         cls.main = importlib.reload(main_mod)
         cls.client = TestClient(cls.main.app)
         cls.tg = cls.main.tg_interface_runtime.service
+        from business_assistant.conversation_gateway import FakePandaConversationGateway
+
+        cls.main.ba_api_runtime.service.ba.conversation_gateway = FakePandaConversationGateway(
+            response="Panda fixture reply"
+        )
         cls.tg.register_binding(
             tenant_id="tenant-a",
             owner_id="approver-a",

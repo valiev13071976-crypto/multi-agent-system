@@ -22,6 +22,14 @@ def truncate_safe(text: str, limit: int = _MAX) -> str:
     return s[: limit - 20] + "\n\n… (truncated)"
 
 
+def chunk_telegram_text(text: str, limit: int = _MAX) -> list[str]:
+    """Deterministic ordered chunks for Telegram length limits."""
+    s = str(text or "")
+    if not s:
+        return []
+    return [s[i : i + limit] for i in range(0, len(s), limit)]
+
+
 def render_status_label(status: str) -> str:
     labels = {
         "RECEIVED": "Request received",
@@ -102,6 +110,17 @@ def render_error(code: str) -> str:
         "tgi_invalid_callback": "This action is no longer valid.",
         "tgi_callback_stale": "Approval expired. Refresh and try again.",
         "tgi_access_denied": "Access denied.",
+        "tgi_tenant_mismatch": "Access denied.",
+        "tgi_user_disabled": "This account is disabled.",
+        "tgi_unsupported_message": "This message type is not supported.",
+        "tgi_invalid_update": "Could not read that update.",
+        "tgi_payload_too_large": "Message is too large.",
+        "tgi_rate_limited": "Too many requests. Try again later.",
+        "tgi_live_forbidden": "Live Telegram is not enabled.",
+        "tgi_response_empty": "No response.",
+        "tgi_panda_error": "Something went wrong. Please try again.",
+        "tgi_capability_denied": "This action is not permitted.",
+        "tgi_approval_required": "Approval is required before this action can continue.",
         "baa_not_found": "Request not found.",
         "baa_invalid_state": "Action not available in current state.",
         "baa_approval_stale": "Approval is stale.",

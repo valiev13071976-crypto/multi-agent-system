@@ -52,7 +52,11 @@ Telegram code does **not** call marketplace, Bitrix, LLM providers, or ToolGatew
 
 ## Identity binding
 
-Telegram `user_id` + `chat_id` maps to Panda `tenant_id` + `owner_id` via server-side `tgi_bindings`. Binding is created administratively (`register_binding` / test setup). Unknown bindings fail closed.
+Unknown bindings fail closed (`tgi_binding_required`). A Telegram user bound to another tenant cannot select a tenant via payload (`tgi_tenant_mismatch`). Revoked bindings return `tgi_binding_revoked`; disabled bindings return `tgi_user_disabled`.
+
+Live Telegram network (`TELEGRAM_LIVE_ACTIVE`) remains false until a later human-approved activation. Pre-activation runtime always uses `FakeTelegramProvider`.
+
+See `docs/telegram-pre-activation-runbook.md` (do not execute).
 
 ## Webhook
 

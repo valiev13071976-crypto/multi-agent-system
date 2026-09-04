@@ -8,12 +8,12 @@ from dataclasses import dataclass
 from b2b_commerce.providers.fake_telegram import FakeTelegramProvider
 from business_assistant_api.runtime import build_business_assistant_api_runtime
 from business_assistant_api.service import BusinessAssistantApiService
-from integrations.production.adapters.telegram import build_telegram_provider
+from security.rate_limit import RateLimiter
 from telegram_interface.config import (
     require_webhook_secret_in_production,
-    telegram_bot_token,
     telegram_interface_db_path,
     telegram_interface_enabled,
+    telegram_live_active,
     telegram_webhook_secret,
 )
 from telegram_interface.service import TelegramInterfaceService
@@ -51,7 +51,7 @@ def build_telegram_interface_runtime(
         upload = upload_dir or ba_rt.upload_dir
     else:
         upload = upload_dir or getattr(ba_api, "upload_dir", "")
-    provider = build_telegram_provider(env) or FakeTelegramProvider()
+    provider = FakeTelegramProvider()
     tenant = str(env.get("TELEGRAM_DEFAULT_TENANT") or "tenant-a")
     transport = ProviderTelegramTransport(provider=provider, tenant_id=tenant)
     svc = TelegramInterfaceService(
@@ -60,7 +60,18 @@ def build_telegram_interface_runtime(
         transport=transport,
         upload_dir=upload,
         default_tenant_id=tenant,
+        live_active=telegram_live_active(env),
+        rate_limiter=RateLimiter(),
     )
+    ba_core = getattr(ba_api, "ba", None)
+    if (
+        not telegram_live_active(env)
+        and ba_core is not None
+        and getattr(ba_core, "conversation_gateway", None) is None
+    ):
+        from business_assistant.conversation_gateway import FakePandaConversationGateway
+
+        ba_core.conversation_gateway = FakePandaConversationGateway(response="Panda fixture reply")
     return TelegramInterfaceRuntime(
         service=svc,
         store=store,

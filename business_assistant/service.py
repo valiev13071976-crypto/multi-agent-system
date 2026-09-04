@@ -68,6 +68,17 @@ from business_assistant.models import (
 from business_assistant.planner import DEFAULT_CAPABILITIES, build_plan, revise_plan, validate_plan
 
 
+def _run_coroutine_in_new_loop(coro):
+    """Run an async gateway call when the caller is already inside an event loop (ASGI)."""
+    import concurrent.futures
+
+    def _runner():
+        return asyncio.run(coro)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(_runner).result()
+
+
 class BusinessAssistantService:
     """Application orchestration layer over closed Panda platforms."""
 
@@ -272,20 +283,16 @@ class BusinessAssistantService:
         conversation_id: str | None = None,
     ) -> BusinessExecution:
         """Sync entry for non-event-loop callers (tests, CLI). API path uses respond_conversationally_async."""
+        coro = self.respond_conversationally_async(
+            request_id=request_id,
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+        )
         try:
             asyncio.get_running_loop()
         except RuntimeError:
-            return asyncio.run(
-                self.respond_conversationally_async(
-                    request_id=request_id,
-                    tenant_id=tenant_id,
-                    conversation_id=conversation_id,
-                )
-            )
-        raise BusinessAssistantError(
-            BA_CONVERSATION_UNAVAILABLE,
-            "use_respond_conversationally_async_under_running_event_loop",
-        )
+            return asyncio.run(coro)
+        return _run_coroutine_in_new_loop(coro)
 
     def build_plan(self, *, request_id: str, tenant_id: str) -> BusinessPlan:
         req = self._get_request(tenant_id=tenant_id, request_id=request_id)

@@ -101,11 +101,18 @@ class SqliteTelegramInterfaceStore:
         row = self._conn.execute(
             """
             SELECT * FROM tgi_bindings
-            WHERE tenant_id = ? AND telegram_user_id = ? AND chat_id = ? AND status = 'active'
+            WHERE tenant_id = ? AND telegram_user_id = ? AND chat_id = ?
             """,
             (tenant_id, telegram_user_id, chat_id),
         ).fetchone()
         return self._row_binding(row) if row else None
+
+    def find_bindings_for_telegram_user(self, *, telegram_user_id: str) -> list[TelegramBinding]:
+        rows = self._conn.execute(
+            "SELECT * FROM tgi_bindings WHERE telegram_user_id = ?",
+            (telegram_user_id,),
+        ).fetchall()
+        return [self._row_binding(r) for r in rows]
 
     def get_binding_by_chat(self, *, tenant_id: str, chat_id: str) -> TelegramBinding | None:
         row = self._conn.execute(

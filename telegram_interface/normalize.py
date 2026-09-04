@@ -9,6 +9,22 @@ from telegram_interface.models import NormalizedTelegramUpdate, TelegramAttachme
 
 _CMD = re.compile(r"^/([a-zA-Z0-9_]+)(?:@\w+)?(?:\s+(.*))?$")
 _ALLOWED_DOC_EXT = frozenset({".xlsx", ".xls", ".csv", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".txt"})
+_UNSUPPORTED_KEYS = frozenset(
+    {
+        "voice",
+        "sticker",
+        "video",
+        "animation",
+        "poll",
+        "location",
+        "contact",
+        "venue",
+        "dice",
+        "audio",
+        "video_note",
+    }
+)
+MAX_TELEGRAM_PAYLOAD_BYTES = 65536
 
 
 def _ext(name: str) -> str:
@@ -18,6 +34,14 @@ def _ext(name: str) -> str:
 
 
 def normalize_telegram_payload(payload: dict[str, Any]) -> NormalizedTelegramUpdate:
+    if not isinstance(payload, dict):
+        return NormalizedTelegramUpdate(
+            update_id="",
+            kind="invalid",
+            chat_id="",
+            telegram_user_id="",
+            raw_kind="invalid",
+        )
     if "callback_query" in payload:
         cb = payload["callback_query"] or {}
         msg = cb.get("message") or {}
@@ -33,13 +57,40 @@ def normalize_telegram_payload(payload: dict[str, Any]) -> NormalizedTelegramUpd
             raw_kind="callback_query",
         )
 
+    if "message" not in payload and "edited_message" not in payload:
+        return NormalizedTelegramUpdate(
+            update_id=str(payload.get("update_id") or ""),
+            kind="invalid",
+            chat_id="",
+            telegram_user_id="",
+            raw_kind="invalid",
+        )
+
     message = payload.get("message") or payload.get("edited_message") or {}
+    if not isinstance(message, dict) or not message:
+        return NormalizedTelegramUpdate(
+            update_id=str(payload.get("update_id") or ""),
+            kind="invalid",
+            chat_id="",
+            telegram_user_id="",
+            raw_kind="invalid",
+        )
     chat = message.get("chat") or {}
     user = message.get("from") or {}
     text = str(message.get("text") or message.get("caption") or "")
     chat_id = str(chat.get("id") or "")
     user_id = str(user.get("id") or "")
     update_id = str(payload.get("update_id"))
+
+    if any(message.get(k) for k in _UNSUPPORTED_KEYS):
+        return NormalizedTelegramUpdate(
+            update_id=update_id,
+            kind="unsupported",
+            chat_id=chat_id,
+            telegram_user_id=user_id,
+            text=text,
+            raw_kind="unsupported",
+        )
 
     attachment = None
     doc = message.get("document")
@@ -96,3 +147,12 @@ def attachment_allowed(attachment: TelegramAttachment) -> bool:
     if attachment.kind == "photo":
         return ext in {".jpg", ".jpeg", ".png", ".webp"} or ext == ""
     return ext in _ALLOWED_DOC_EXT
+
+
+def telegram_payload_size_bytes(payload: Any) -> int:
+    import json
+
+    try:
+        return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+    except (TypeError, ValueError):
+        return len(str(payload).encode("utf-8"))
