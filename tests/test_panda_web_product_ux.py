@@ -99,6 +99,7 @@ class ChatUxTests(unittest.TestCase):
         app = _read("static/panda/js/app.js")
         self.assertIn("assistantBubbleText", app)
         self.assertIn("canShowDiagnostics", app)
+        self.assertIn("return false;", app)
         self.assertIn("PandaCopy.USER_THINKING", app)
 
     def test_no_technical_markers_in_default_timeline_path(self):

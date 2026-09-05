@@ -84,7 +84,9 @@
   }
 
   function canShowDiagnostics() {
-    return presentation.shouldShowDiagnostics(state.roleContext);
+    // Ordinary Panda chat never renders workflow internals.
+    // Governed diagnostics remain on /admin for management roles.
+    return false;
   }
 
   function updateRoleUi() {

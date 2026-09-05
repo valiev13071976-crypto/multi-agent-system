@@ -1,3 +1,4 @@
+import time
 import uuid
 
 from agents.openai_agent import OpenAIAgent
@@ -29,6 +30,10 @@ from agents.model_router import ModelRouter
 from agents.task_classifier import TaskClassifier, classify_task
 from agents.routing_requirements import derive_task_requirements
 from agents.answer_presentation import presentation_policy_for
+from agents.execution_policy import (
+    resolve_execution_policy,
+    sanitize_latency_ms,
+)
 from agents.response_depth import (
     classify_response_depth,
     orchestration_policy_for,
@@ -165,6 +170,8 @@ class RouterV2:
         self.last_classification = None
         self.last_requirements = None
         self.last_route_context = None
+        self.last_execution_policy = None
+        self.last_latency_ms = {}
         self.last_task_id = None
         self.last_workflow_id = None
         self.last_request_id = None
@@ -202,6 +209,8 @@ class RouterV2:
         user_id: str | None = None,
         actor_ref: str | None = None,
         envelope=None,
+        follow_up_kind: str | None = None,
+        classification_text: str | None = None,
     ):
         if mode is None:
             resolved_mode = "both"
@@ -263,15 +272,19 @@ class RouterV2:
                     self.provider_governor.observability = eng_obs
 
             requested_role = DEFAULT_ROLE if role is None else role
+            route_t0 = time.monotonic()
             self.last_classification = None
             self.last_requirements = None
             self.last_route_context = None
             self.last_response_depth = None
             self.last_orchestration_policy = None
             self.last_presentation_policy = None
+            self.last_execution_policy = None
+            self.last_latency_ms = {}
 
+            route_text = str(classification_text or "").strip() or prompt
             if requested_role == ROLE_AUTO:
-                self.last_classification = self.task_classifier.classify(prompt)
+                self.last_classification = self.task_classifier.classify(route_text)
                 resolved_role = self.last_classification.role_id
                 routing_category = self.last_classification.category
                 category_source = "classifier"
@@ -283,13 +296,13 @@ class RouterV2:
                 category_source = "role_mapping"
                 self.last_requirements = derive_task_requirements(
                     category=routing_category,
-                    text=prompt,
+                    text=route_text,
                 )
                 # Depth is message-level. Do not use role-mapped routing category
                 # (explicit strategist would otherwise force DEEP on greetings).
                 response_depth = classify_response_depth(
-                    prompt,
-                    category=classify_task(prompt).category,
+                    route_text,
+                    category=classify_task(route_text).category,
                 )
 
             get_role_prompt(resolved_role)
@@ -298,6 +311,13 @@ class RouterV2:
             self.last_response_depth = response_depth
             self.last_orchestration_policy = orchestration_policy
             self.last_presentation_policy = presentation_policy
+            execution_policy = resolve_execution_policy(
+                category=routing_category,
+                response_depth=response_depth,
+                requirements=self.last_requirements,
+                follow_up_kind=follow_up_kind,
+            )
+            self.last_execution_policy = execution_policy
 
             self.last_route_context = {
                 "category": routing_category,
@@ -306,6 +326,7 @@ class RouterV2:
                 "response_depth": response_depth,
                 "answer_presentation": presentation_policy,
                 "orchestration_policy": orchestration_policy,
+                "execution_policy": execution_policy,
                 "requirements": (
                     dict(self.last_requirements.as_dict())
                     if self.last_requirements is not None
@@ -369,6 +390,7 @@ class RouterV2:
                         "response_depth": response_depth,
                         "answer_presentation": presentation_policy,
                         "orchestration_policy": orchestration_policy,
+                        "execution_policy": execution_policy,
                     },
                 )
 
@@ -382,7 +404,9 @@ class RouterV2:
                 user_id=run_user_id,
                 actor_ref=run_actor_ref,
                 envelope=envelope,
+                execution_policy=execution_policy,
             )
+            routing_ms = int((time.monotonic() - route_t0) * 1000)
 
             if decision.reason == "explicit_provider":
                 provider_id = decision.provider_ids[0]
@@ -392,20 +416,32 @@ class RouterV2:
                         provider=provider_id,
                         mode=resolved_mode,
                     )
-                return await self.pipeline.execute(
+                result = await self.pipeline.execute(
                     composed,
                     selected=[(provider_id, agent)],
                     **exec_kwargs,
                 )
-
-            if not selected or any(agent is None for _, agent in selected):
+            elif not selected or any(agent is None for _, agent in selected):
                 raise NoProvidersAvailableError()
-
-            return await self.pipeline.execute(
-                composed,
-                selected=selected,
-                **exec_kwargs,
+            else:
+                result = await self.pipeline.execute(
+                    composed,
+                    selected=selected,
+                    **exec_kwargs,
+                )
+            pipe_latency = getattr(self.pipeline, "last_latency_ms", None)
+            self.last_latency_ms = sanitize_latency_ms(
+                {
+                    **(pipe_latency if isinstance(pipe_latency, dict) else {}),
+                    "routing_ms": routing_ms,
+                }
             )
+            if self.last_route_context is not None:
+                self.last_route_context = {
+                    **self.last_route_context,
+                    "latency_ms": dict(self.last_latency_ms),
+                }
+            return result
         except Exception as exc:
             if lifecycle is not None:
                 from workflow.engine import error_code_for

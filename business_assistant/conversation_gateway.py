@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
@@ -261,16 +262,24 @@ class WorkflowPandaConversationGateway:
             raise ConversationUnavailableError("empty_message")
         from business_assistant.follow_up import build_follow_up_prompt, resolve_follow_up
 
+        t0 = time.monotonic()
         resolution = resolve_follow_up(text, history=request.history or ())
         prompt = build_follow_up_prompt(text, resolution)
+        follow_up_ms = int((time.monotonic() - t0) * 1000)
         task_id = str(uuid.uuid4())
+
+        async def _run_router(**kwargs):
+            kwargs["follow_up_kind"] = resolution.kind
+            kwargs["classification_text"] = text
+            return await self._run_router(**kwargs)
+
         try:
             result = await self._workflow_engine.execute(
                 prompt,
                 self._mode,
                 self._role,
                 context_manager=self._context_manager,
-                run_router=self._run_router,
+                run_router=_run_router,
                 task_id=task_id,
                 tenant_id=request.tenant_id,
                 request_id=request.request_id or request.correlation_id,
@@ -280,6 +289,14 @@ class WorkflowPandaConversationGateway:
         except Exception as exc:
             raise ConversationUnavailableError(str(exc) or "panda_intelligence_failed") from exc
         reply = extract_assistant_text(result if isinstance(result, dict) else {})
+        router_obj = getattr(self._run_router, "__self__", None)
+        if router_obj is not None:
+            from agents.execution_policy import sanitize_latency_ms
+
+            merged = dict(getattr(router_obj, "last_latency_ms", {}) or {})
+            merged["follow_up_resolution_ms"] = follow_up_ms
+            merged["request_total_ms"] = int((time.monotonic() - t0) * 1000)
+            router_obj.last_latency_ms = sanitize_latency_ms(merged)
         return ConversationResult(
             text=reply,
             workflow_id=getattr(self._workflow_engine, "last_workflow_id", None),

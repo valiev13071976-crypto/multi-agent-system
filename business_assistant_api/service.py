@@ -168,7 +168,7 @@ class BusinessAssistantApiService:
         rec.workflow_id = ex.workflow_id
         rec.status = ST_COMPLETED
         rec.updated_at = _utc_iso()
-        self._event(rec, EV_REQUEST_COMPLETED, message=ex.summary, status=ST_COMPLETED)
+        self._event(rec, EV_REQUEST_COMPLETED, message="Request completed", status=ST_COMPLETED)
         self._persist(rec)
         if norm.conversation_id:
             self._append_message(
@@ -821,7 +821,7 @@ class BusinessAssistantApiService:
             self._event(rec, EV_PREVIEW_READY, message="Preview ready")
             self._event(rec, EV_APPROVAL_REQUIRED, message="Approval required")
         if mapped == ST_COMPLETED:
-            self._event(rec, EV_REQUEST_COMPLETED, message=redact(str(ex.summary)), status=ST_COMPLETED)
+            self._event(rec, EV_REQUEST_COMPLETED, message="Request completed", status=ST_COMPLETED)
             self._maybe_create_artifacts(rec, ex)
         elif mapped == ST_BLOCKED:
             self._event(rec, EV_REQUEST_BLOCKED, message="Request blocked", status=ST_BLOCKED)
