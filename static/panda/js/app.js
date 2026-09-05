@@ -643,7 +643,17 @@
             (m) => m.role === "assistant" && m.request_id === requestId
           );
           if (!already) {
-            if (!bubble || presentation.isInternalMetadata(bubble)) {
+            let content = bubble;
+            const artifacts = result.artifacts || [];
+            const imageLines = artifacts
+              .filter((a) => a && (a.artifact_type === "image" || a.type === "image"))
+              .map((a) => String(a.view_url || a.url || "").trim())
+              .filter((u) => u.startsWith("/") || u.startsWith("https://"))
+              .map((u) => `![изображение](${u})`);
+            if (imageLines.length) {
+              content = [bubble, ...imageLines].filter(Boolean).join("\n");
+            }
+            if (!content || presentation.isInternalMetadata(content)) {
               state.messages.push({
                 role: "system",
                 content: (window.PandaCopy && window.PandaCopy.MISSING_FINAL_ANSWER) ||
@@ -654,7 +664,7 @@
             } else {
               state.messages.push({
                 role: "assistant",
-                content: bubble,
+                content,
                 created_at: new Date().toISOString(),
                 request_id: requestId,
               });

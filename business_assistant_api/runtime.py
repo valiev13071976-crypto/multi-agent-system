@@ -60,6 +60,7 @@ def wire_panda_conversation_gateway(
     run_router,
     context_manager,
     logger: logging.Logger | None = None,
+    tool_gateway=None,
 ) -> bool:
     """Attach Panda conversational gateway; return False when engine unavailable."""
     log = logger or logging.getLogger(__name__)
@@ -73,9 +74,14 @@ def wire_panda_conversation_gateway(
             context_manager is not None,
         )
         raise RuntimeError("panda_conversation_gateway_wiring_incomplete")
+    gateway = tool_gateway
+    if gateway is None:
+        router_obj = getattr(run_router, "__self__", None)
+        gateway = getattr(router_obj, "tool_gateway", None)
     ba_service.conversation_gateway = WorkflowPandaConversationGateway(
         workflow_engine=workflow_engine,
         run_router=run_router,
         context_manager=context_manager,
+        tool_gateway=gateway,
     )
     return True

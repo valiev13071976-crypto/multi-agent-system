@@ -254,6 +254,11 @@ class BusinessAssistantService:
             summary=result.text,
         )
         self._executions[ex.execution_id] = ex
+        artifacts = []
+        if isinstance(result.metadata, dict):
+            artifacts = list(result.metadata.get("artifacts") or [])
+        if artifacts:
+            ex.artifacts.extend(artifacts)
         return ex
 
     async def respond_conversationally_async(

@@ -247,12 +247,130 @@ class WorkflowPandaConversationGateway:
         context_manager,
         mode: str = "auto",
         role: str = "auto",
+        tool_gateway=None,
+        action_store=None,
+        tool_capabilities=None,
     ):
         self._workflow_engine = workflow_engine
         self._run_router = run_router
         self._context_manager = context_manager
         self._mode = mode
         self._role = role
+        self._tool_gateway = tool_gateway
+        if action_store is None:
+            from business_assistant.action_continuation import ActiveTaskStore
+
+            action_store = ActiveTaskStore()
+        self._action_store = action_store
+        self._tool_capabilities = tool_capabilities
+        self._executed_keys: set[str] = set()
+        self.last_action_decision = None
+
+    def _record_latency(self, t0: float, follow_up_ms: int) -> None:
+        router_obj = getattr(self._run_router, "__self__", None)
+        if router_obj is None:
+            return
+        from agents.execution_policy import sanitize_latency_ms
+
+        merged = dict(getattr(router_obj, "last_latency_ms", {}) or {})
+        merged["follow_up_resolution_ms"] = follow_up_ms
+        merged["request_total_ms"] = int((time.monotonic() - t0) * 1000)
+        router_obj.last_latency_ms = sanitize_latency_ms(merged)
+
+    async def _invoke_tool(self, request: ConversationRequest, action) -> ConversationResult:
+        from business_assistant.action_continuation import (
+            CALL_TOOL,
+            artifacts_from_tool_data,
+            format_tool_user_text,
+            mark_executed,
+        )
+        from tools.models import ToolRequest
+
+        task = action.task
+        idem = str(action.idempotency_key or request.request_id or "")
+        family = getattr(task, "family", "")
+        if idem and idem in self._executed_keys:
+            return ConversationResult(
+                text=format_tool_user_text(family=family, data={}, success=True),
+                task_id=task.task_id if task else None,
+                metadata={
+                    "follow_up_kind": None,
+                    "action_decision": CALL_TOOL,
+                    "duplicate": True,
+                    "artifacts": [],
+                },
+            )
+        provided = ()
+        from business_assistant.action_continuation import CONTRACTS
+
+        contract = CONTRACTS.get(family)
+        if contract is not None:
+            provided = tuple(contract.required_capabilities)
+        if self._tool_capabilities is not None:
+            provided = tuple(self._tool_capabilities.capabilities) or provided
+        tool_request = ToolRequest(
+            request_id=str(request.request_id or uuid.uuid4()),
+            workflow_id="",
+            task_id=str(task.task_id if task else uuid.uuid4()),
+            tool_id=action.tool_id,
+            operation=action.operation or "generate",
+            arguments=dict(action.arguments or {}),
+            requested_capabilities=provided,
+            tenant_id=str(request.tenant_id or ""),
+            user_id=str(request.user_id or ""),
+            actor_id=f"{request.tenant_id}:{request.user_id}",
+            idempotency_key=idem or None,
+        )
+        try:
+            result = await self._tool_gateway.invoke(
+                tool_request,
+                capabilities=self._tool_capabilities,
+            )
+        except Exception:
+            if task is not None:
+                mark_executed(self._action_store, task, failed=True)
+            return ConversationResult(
+                text=format_tool_user_text(family=getattr(task, "family", ""), data=None, success=False),
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CALL_TOOL, "artifacts": []},
+            )
+        success = bool(getattr(result, "success", False))
+        data = dict(getattr(result, "data", None) or {})
+        error_code = str(getattr(result, "error_code", "") or "")
+        if error_code == "tool_approval_required":
+            if task is not None:
+                task.status = "WAITING_FOR_INPUT"
+                task.risk = "write_governed"
+                self._action_store.put(task)
+            return ConversationResult(
+                text="Это действие требует подтверждения.",
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": "REQUEST_APPROVAL", "artifacts": []},
+            )
+        if idem and success:
+            self._executed_keys.add(idem)
+        artifacts = artifacts_from_tool_data(data, tool_id=action.tool_id) if success else []
+        if task is not None:
+            mark_executed(
+                self._action_store,
+                task,
+                artifact_ids=tuple(str(a.get("ref") or "") for a in artifacts if a.get("ref")),
+                failed=not success,
+            )
+        reply = format_tool_user_text(
+            family=getattr(task, "family", ""),
+            data=data,
+            success=success,
+        )
+        return ConversationResult(
+            text=reply,
+            task_id=getattr(task, "task_id", None),
+            metadata={
+                "action_decision": CALL_TOOL,
+                "artifacts": artifacts,
+                "follow_up_kind": None,
+            },
+        )
 
     async def respond(self, request: ConversationRequest) -> ConversationResult:
         if self._workflow_engine is None or self._run_router is None or self._context_manager is None:
@@ -260,6 +378,14 @@ class WorkflowPandaConversationGateway:
         text = str(request.text or "").strip()
         if not text:
             raise ConversationUnavailableError("empty_message")
+        from business_assistant.action_continuation import (
+            ANSWER_TEXT,
+            ASK_CLARIFICATION,
+            CALL_TOOL,
+            FAIL_UNAVAILABLE,
+            REQUEST_APPROVAL,
+            resolve_action_turn,
+        )
         from business_assistant.follow_up import build_follow_up_prompt, resolve_follow_up
 
         t0 = time.monotonic()
@@ -267,6 +393,63 @@ class WorkflowPandaConversationGateway:
         prompt = build_follow_up_prompt(text, resolution)
         follow_up_ms = int((time.monotonic() - t0) * 1000)
         task_id = str(uuid.uuid4())
+
+        action = resolve_action_turn(
+            text,
+            tenant_id=request.tenant_id,
+            owner_id=request.user_id,
+            conversation_id=str(request.conversation_id or ""),
+            store=self._action_store,
+            follow_up=resolution,
+            gateway=self._tool_gateway,
+            request_id=str(request.request_id or request.correlation_id or ""),
+        )
+        self.last_action_decision = action
+
+        if action.decision == CALL_TOOL and self._tool_gateway is not None:
+            result = await self._invoke_tool(request, action)
+            self._record_latency(t0, follow_up_ms)
+            meta = dict(result.metadata or {})
+            meta["follow_up_kind"] = resolution.kind
+            meta["follow_up_target"] = resolution.target
+            return ConversationResult(
+                text=result.text,
+                workflow_id=result.workflow_id,
+                task_id=result.task_id or task_id,
+                metadata=meta,
+            )
+        if action.decision in {ASK_CLARIFICATION, FAIL_UNAVAILABLE, REQUEST_APPROVAL} or (
+            action.decision == ANSWER_TEXT and action.user_message
+        ):
+            self._record_latency(t0, follow_up_ms)
+            return ConversationResult(
+                text=action.user_message,
+                task_id=getattr(action.task, "task_id", None) or task_id,
+                metadata={
+                    "follow_up_kind": resolution.kind,
+                    "follow_up_target": resolution.target,
+                    "action_decision": action.decision,
+                    "artifacts": [],
+                },
+            )
+        if action.decision == CALL_TOOL and self._tool_gateway is None:
+            from business_assistant.action_continuation import (
+                FAMILY_IMAGE_GENERATE,
+                user_unavailable_message,
+            )
+
+            self._record_latency(t0, follow_up_ms)
+            family = getattr(action.task, "family", FAMILY_IMAGE_GENERATE)
+            return ConversationResult(
+                text=user_unavailable_message(family),
+                task_id=getattr(action.task, "task_id", None) or task_id,
+                metadata={
+                    "follow_up_kind": resolution.kind,
+                    "follow_up_target": resolution.target,
+                    "action_decision": FAIL_UNAVAILABLE,
+                    "artifacts": [],
+                },
+            )
 
         async def _run_router(**kwargs):
             kwargs["follow_up_kind"] = resolution.kind
@@ -289,14 +472,7 @@ class WorkflowPandaConversationGateway:
         except Exception as exc:
             raise ConversationUnavailableError(str(exc) or "panda_intelligence_failed") from exc
         reply = extract_assistant_text(result if isinstance(result, dict) else {})
-        router_obj = getattr(self._run_router, "__self__", None)
-        if router_obj is not None:
-            from agents.execution_policy import sanitize_latency_ms
-
-            merged = dict(getattr(router_obj, "last_latency_ms", {}) or {})
-            merged["follow_up_resolution_ms"] = follow_up_ms
-            merged["request_total_ms"] = int((time.monotonic() - t0) * 1000)
-            router_obj.last_latency_ms = sanitize_latency_ms(merged)
+        self._record_latency(t0, follow_up_ms)
         return ConversationResult(
             text=reply,
             workflow_id=getattr(self._workflow_engine, "last_workflow_id", None),
@@ -306,6 +482,7 @@ class WorkflowPandaConversationGateway:
                 "confidence": (result or {}).get("confidence") if isinstance(result, dict) else None,
                 "follow_up_kind": resolution.kind,
                 "follow_up_target": resolution.target,
+                "action_decision": action.decision,
             },
         )
 

@@ -37,6 +37,12 @@
           const li = document.createElement("div");
           li.textContent = trimmed.replace(/^[-*]\s+/, "• ");
           el.appendChild(li);
+        } else if (/^!\[[^\]]*]\((\/[^)]+|https:\/\/[^)]+)\)$/.test(trimmed)) {
+          const match = trimmed.match(/^!\[([^\]]*)]\(([^)]+)\)$/);
+          const img = document.createElement("img");
+          img.alt = match[1] || "";
+          img.src = match[2];
+          el.appendChild(img);
         } else if (/^https?:\/\//i.test(trimmed)) {
           const a = document.createElement("a");
           a.href = trimmed;
