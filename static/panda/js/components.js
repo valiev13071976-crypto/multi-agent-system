@@ -106,11 +106,27 @@
   function renderArtifacts(artifacts) {
     const root = document.createDocumentFragment();
     (artifacts || []).forEach((a) => {
+      if (!a || typeof a !== "object") return;
       const item = el("div", "artifact-item");
-      const left = el("div");
-      left.appendChild(el("div", "", a.artifact_type || a.ref || "файл"));
-      left.appendChild(el("div", "muted", a.filename || a.ref || ""));
-      item.appendChild(left);
+      const kind = a.artifact_type || a.type || a.ref || "файл";
+      if (String(kind) === "image" || String(a.mime_type || "").startsWith("image/")) {
+        const url = String(a.view_url || a.url || "").trim();
+        if (url.startsWith("/") || url.startsWith("https://")) {
+          const img = document.createElement("img");
+          img.alt = "изображение";
+          img.src = url;
+          item.appendChild(img);
+        } else {
+          const left = el("div");
+          left.appendChild(el("div", "", "изображение"));
+          item.appendChild(left);
+        }
+      } else {
+        const left = el("div");
+        left.appendChild(el("div", "", String(kind)));
+        left.appendChild(el("div", "muted", a.filename || a.ref || ""));
+        item.appendChild(left);
+      }
       item.appendChild(el("div", "muted", a.created_at || ""));
       root.appendChild(item);
     });
