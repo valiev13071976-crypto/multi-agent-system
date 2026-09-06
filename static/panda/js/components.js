@@ -80,6 +80,30 @@
     return wrap;
   }
 
+  /** Block 3.5 final closure: transient in-conversation live-generation
+   * placeholder (ChatGPT-like) -- rendered directly in the timeline flow
+   * right where the assistant's result will appear, so the user can never
+   * mistake a slow request for a frozen app. Not part of the persisted
+   * message model: app.js appends/removes this node directly and it is
+   * never written into state.messages, so a reload/history restore can
+   * never resurrect a stale "generating" bubble. */
+  function renderPendingAssistant() {
+    const wrap = el("article", "msg assistant pending");
+    const body = el("div", "body");
+    const indicator = document.createElement("span");
+    indicator.className = "pending-indicator";
+    indicator.setAttribute("role", "status");
+    indicator.setAttribute("aria-live", "polite");
+    indicator.setAttribute("aria-label", "Panda генерирует ответ");
+    const dot = document.createElement("span");
+    dot.className = "pending-dot";
+    dot.setAttribute("aria-hidden", "true");
+    indicator.appendChild(dot);
+    body.appendChild(indicator);
+    wrap.appendChild(body);
+    return wrap;
+  }
+
   function renderProgressItem(event) {
     const li = el("li");
     const label = event.message || event.event_type || "событие";
@@ -242,6 +266,7 @@
 
   global.PandaComponents = {
     renderMessage,
+    renderPendingAssistant,
     renderProgressItem,
     renderPlan,
     renderPreview,

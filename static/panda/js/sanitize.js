@@ -55,44 +55,41 @@
             ? url.replace(/\/view$/, "/download")
             : url + (url.includes("?") ? "&" : "?") + "download=1";
           wrap.appendChild(img);
-          // Production acceptance defect closure: every generated image is
-          // now delivered through the canonical /artifacts/{id}/view route
-          // (see conversation_gateway._invoke_tool), so its artifact_id is
+          // Production acceptance defect closure / final ChatGPT 1:1 UX
+          // closure: every generated image is delivered through the
+          // canonical /artifacts/{id}/view route (see
+          // conversation_gateway._invoke_tool), so its artifact_id is
           // recoverable straight from the URL -- no extra message field, no
-          // extra request. Direct Edit/Download actions render right below
-          // the image itself, without requiring the lightbox to be opened
-          // first (ChatGPT-like model). Images without a recoverable
-          // artifact_id (e.g. any legacy /media/{version_id} link) render
-          // exactly as before, unchanged.
+          // extra request. Edit/Download render as overlay controls INSIDE
+          // the image itself (bottom-left / bottom-right), matching the
+          // ChatGPT reference composition, without requiring the lightbox
+          // to be opened first. Images without a recoverable artifact_id
+          // (e.g. any legacy /media/{version_id} link) render exactly as
+          // before, unchanged.
           const artifactMatch = url.match(/\/artifacts\/([^/]+)\/view(?:[/?]|$)/);
           if (artifactMatch) {
             const artifactId = decodeURIComponent(artifactMatch[1]);
             img.dataset.artifactId = artifactId;
             wrap.classList.add("has-actions");
-            const actions = document.createElement("div");
-            actions.className = "msg-image-actions";
-            // UI pixel-closure: compact icon-only controls (ChatGPT-like
-            // reference) -- the accessible label lives in aria-label/title
-            // rather than visible text, keeping the row light and out of
-            // the image's way while still being reachable by keyboard
-            // (focus-visible) and screen readers.
+            // Edit: labelled control (never icon-only -- ChatGPT reference
+            // shows visible "Редактировать" text), bottom-left overlay.
             const editBtn = document.createElement("button");
             editBtn.type = "button";
-            editBtn.className = "msg-image-action msg-image-edit-btn";
+            editBtn.className = "msg-image-overlay msg-image-edit-btn";
             editBtn.dataset.artifactId = artifactId;
             editBtn.title = "Редактировать изображение";
             editBtn.setAttribute("aria-label", "Редактировать изображение");
-            editBtn.textContent = "✏️";
-            actions.appendChild(editBtn);
+            editBtn.textContent = "Редактировать";
+            wrap.appendChild(editBtn);
+            // Download: icon-only circular overlay, bottom-right.
             const downloadBtn = document.createElement("a");
-            downloadBtn.className = "msg-image-action msg-image-download-btn";
+            downloadBtn.className = "msg-image-overlay msg-image-download-btn";
             downloadBtn.href = img.dataset.downloadUrl;
             downloadBtn.setAttribute("download", "");
             downloadBtn.title = "Скачать изображение";
             downloadBtn.setAttribute("aria-label", "Скачать изображение");
             downloadBtn.textContent = "⬇";
-            actions.appendChild(downloadBtn);
-            wrap.appendChild(actions);
+            wrap.appendChild(downloadBtn);
           }
           el.appendChild(wrap);
         } else if (/^https?:\/\//i.test(trimmed)) {

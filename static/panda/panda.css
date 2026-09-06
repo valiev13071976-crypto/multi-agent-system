@@ -341,57 +341,93 @@ html.panda-chat body {
   border: 1px solid var(--border);
 }
 
-/* UI pixel-closure (ChatGPT-like reference): direct Edit/Download actions
-   for a generated image, visible in the normal conversation view without
-   opening the lightbox. Additive to the click-to-enlarge affordance above
-   -- .msg-image-wrap without .has-actions (e.g. uploaded attachment
-   thumbnails) is unaffected. Deliberately NOT pill/toolbar-styled: a plain,
-   left-aligned row of small icon-only controls sitting directly under the
-   image, matching its left edge, so they read as part of the image message
-   rather than a separate Panda button bar. */
+/* Final ChatGPT 1:1 generated-image UX closure: Edit/Download render as
+   overlay controls INSIDE the image itself (bottom-left / bottom-right),
+   never as a detached row underneath it. .msg-image-wrap without
+   .has-actions (e.g. uploaded attachment thumbnails) is unaffected. The
+   wrap is the shared positioning context for both overlays -- coordinates
+   below are relative to the image container, never the message card. */
 .msg-image-wrap.has-actions {
-  display: inline-flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.2rem;
-  line-height: normal;
+  position: relative;
+  display: inline-block;
   max-width: 100%;
+  line-height: 0;
 }
 
-.msg-image-actions {
-  display: flex;
-  align-items: center;
-  gap: 0.1rem;
-  max-width: 100%;
-}
-
-.msg-image-action {
+.msg-image-overlay {
+  position: absolute;
+  bottom: 0.55rem;
+  z-index: 1;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 1.85rem;
-  height: 1.85rem;
-  flex: 0 0 auto;
-  padding: 0;
-  font-size: 0.95rem;
-  line-height: 1;
   border: none;
-  border-radius: var(--radius-sm);
-  background: transparent;
-  color: var(--text-secondary);
-  text-decoration: none;
+  line-height: 1;
+  background: rgba(15, 17, 23, 0.55);
+  color: #fff;
   cursor: pointer;
 }
 
-.msg-image-action:hover,
-.msg-image-action:focus-visible {
-  background: var(--surface-secondary);
-  color: var(--text-primary);
+.msg-image-overlay:hover,
+.msg-image-overlay:focus-visible {
+  background: rgba(15, 17, 23, 0.75);
 }
 
-.msg-image-action:focus-visible {
-  outline: 2px solid var(--focus);
+.msg-image-overlay:focus-visible {
+  outline: 2px solid #fff;
   outline-offset: 1px;
+}
+
+/* Edit: visible-label pill, bottom-left, inset from the image edges. */
+.msg-image-edit-btn {
+  left: 0.55rem;
+  max-width: calc(100% - 3.4rem);
+  padding: 0.32rem 0.7rem;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 0.78rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Download: icon-only circular control, bottom-right, inset from the
+   image edges. */
+.msg-image-download-btn {
+  right: 0.55rem;
+  width: 1.9rem;
+  height: 1.9rem;
+  border-radius: 50%;
+  font-size: 0.95rem;
+  text-decoration: none;
+  flex: 0 0 auto;
+}
+
+/* Block 3.5 final closure: minimal in-conversation live generation
+   indicator (ChatGPT-like) -- a small accent-coloured dot that visibly
+   pulses while a request is genuinely in flight (see app.js
+   show/hidePendingIndicator, tied to the real submitRequest/editImage
+   promise). Never a spinner/modal/progress bar/fake percentage. */
+.msg.assistant.pending {
+  width: fit-content;
+}
+
+.pending-indicator {
+  display: inline-flex;
+  align-items: center;
+}
+
+.pending-dot {
+  width: 0.6rem;
+  height: 0.6rem;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: panda-pending-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes panda-pending-pulse {
+  0%, 100% { transform: scale(0.7); opacity: 0.45; }
+  50% { transform: scale(1); opacity: 1; }
 }
 
 .image-edit-input {
@@ -793,4 +829,5 @@ button.danger {
 
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
+  .pending-dot { animation: none; opacity: 0.85; }
 }
