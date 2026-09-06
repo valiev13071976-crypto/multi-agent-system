@@ -365,6 +365,9 @@ class ToolGateway:
         mono0 = (
             self.observability.monotonic_ms() if self.observability is not None else None
         )
+        # Trusted only: sourced from RunEnvelope / server-set ToolRequest.metadata,
+        # never from request.arguments (user-controlled tool call payload).
+        workload_class = str((request.metadata or {}).get("workload_class") or "") or None
         self.audit.record(
             EVENT_TOOL_REQUESTED,
             request_id=request.request_id,
@@ -373,6 +376,7 @@ class ToolGateway:
             workflow_id=request.workflow_id,
             task_id=request.task_id,
             dry_run=bool(request.dry_run),
+            workload_class=workload_class,
         )
         self._obs_emit(
             "tool.requested",
@@ -384,6 +388,7 @@ class ToolGateway:
                 "request_id": request.request_id,
                 "dry_run": bool(request.dry_run),
                 "observability_event_id": None,
+                "workload_class": workload_class,
             },
             update_metrics=False,
         )
@@ -399,6 +404,7 @@ class ToolGateway:
                 request,
                 capability=capability,
                 capabilities=capabilities,
+                workload_class=workload_class,
             )
             descriptor = route.descriptor
             self.audit.record(
@@ -408,6 +414,8 @@ class ToolGateway:
                 selected_version=route.selected_version,
                 policy_decision=route.policy_decision,
                 trust_decision=route.trust_decision,
+                workload_class=workload_class,
+                workload_mismatch=bool(route.routing_metadata.get("workload_mismatch")),
             )
             if request.operation not in descriptor.operations:
                 raise ToolOperationNotAllowedError()

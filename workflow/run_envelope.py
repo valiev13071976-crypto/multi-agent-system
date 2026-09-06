@@ -93,6 +93,7 @@ class RunEnvelope:
     auth_context_version: str | None = None
     capability_scope_ref: str | None = None
     data_scope_ref: str | None = None
+    workload_class: str = ""
 
     def __post_init__(self):
         version = str(self.schema_version or "").strip()
@@ -152,6 +153,13 @@ class RunEnvelope:
             )
         if self.data_scope_ref is not None:
             object.__setattr__(self, "data_scope_ref", str(self.data_scope_ref))
+        raw_workload = str(self.workload_class or "").strip()
+        if raw_workload:
+            from task_queue.lanes import normalize_workload
+
+            object.__setattr__(self, "workload_class", normalize_workload(raw_workload))
+        else:
+            object.__setattr__(self, "workload_class", "")
 
     @classmethod
     def create(
@@ -173,6 +181,7 @@ class RunEnvelope:
         auth_context_version: str | None = None,
         capability_scope_ref: str | None = None,
         data_scope_ref: str | None = None,
+        workload_class: str = "",
         schema_version: str = RUN_ENVELOPE_SCHEMA_VERSION,
     ) -> "RunEnvelope":
         return cls(
@@ -193,6 +202,7 @@ class RunEnvelope:
             auth_context_version=auth_context_version,
             capability_scope_ref=capability_scope_ref,
             data_scope_ref=data_scope_ref,
+            workload_class=workload_class,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -214,6 +224,7 @@ class RunEnvelope:
             "auth_context_version": self.auth_context_version,
             "capability_scope_ref": self.capability_scope_ref,
             "data_scope_ref": self.data_scope_ref,
+            "workload_class": self.workload_class,
         }
 
     @classmethod
@@ -254,4 +265,5 @@ class RunEnvelope:
             auth_context_version=data.get("auth_context_version"),
             capability_scope_ref=data.get("capability_scope_ref"),
             data_scope_ref=data.get("data_scope_ref"),
+            workload_class=str(data.get("workload_class") or ""),
         )
