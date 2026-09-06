@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from dataclasses import asdict
 from datetime import datetime
@@ -62,6 +63,15 @@ def _version_payload(version: MediaAssetVersion) -> dict:
 class SqliteMediaStore(MediaStore):
     def __init__(self, path: str = ":memory:"):
         self._path = path
+        # A configured on-disk path (e.g. a Railway volume mount) whose parent
+        # directory does not yet exist would otherwise raise
+        # sqlite3.OperationalError("unable to open database file") at startup --
+        # silently disabling the entire product-media subsystem (and therefore
+        # image.generate) rather than persisting real generated artifacts.
+        if path not in (":memory:", "") and not path.startswith("file:"):
+            parent = os.path.dirname(path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._init_schema()
