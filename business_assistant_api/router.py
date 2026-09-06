@@ -17,14 +17,16 @@ from security.rbac import PERM_ANALYZE_EXECUTE, PERM_HITL_APPROVE, PERM_WORKFLOW
 _router = APIRouter(prefix=f"/api/{API_VERSION}/business-assistant", tags=["business-assistant"])
 _service: BusinessAssistantApiService | None = None
 _upload_dir: str = ""
+_media_provider: Any | None = None
 
 
 def configure_business_assistant_api_router(
-    service: BusinessAssistantApiService, *, upload_dir: str = ""
+    service: BusinessAssistantApiService, *, upload_dir: str = "", media_provider: Any | None = None
 ) -> APIRouter:
-    global _service, _upload_dir
+    global _service, _upload_dir, _media_provider
     _service = service
     _upload_dir = upload_dir or getattr(service, "upload_dir", "")
+    _media_provider = media_provider
     return _router
 
 
@@ -254,6 +256,39 @@ async def upload_attachment(
         filename=out["filename"],
         size_bytes=out["size_bytes"],
         mime_type=out["mime_type"],
+    )
+
+
+@_router.get("/media/{version_id}")
+async def get_media(
+    version_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    """Safe, tenant-authorized retrieval of a persisted generated image artifact.
+
+    Reuses the existing auth boundary (session cookie for the Panda web UI, or
+    X-API-Key/Bearer for other clients) plus tenant-scoped access checks already
+    enforced by ProductMediaService — no new artifact or auth system.
+    """
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
+    provider = _media_provider
+    if provider is None:
+        raise HTTPException(status_code=404, detail={"code": "media_unavailable"})
+    version = provider.get(tenant_id=ctx.tenant_id, version_id=version_id)
+    if version is None:
+        raise HTTPException(status_code=404, detail={"code": "media_not_found"})
+    blob = provider.get_blob(tenant_id=ctx.tenant_id, version_id=version_id)
+    if blob is None:
+        raise HTTPException(status_code=404, detail={"code": "media_not_found"})
+    return Response(
+        content=blob,
+        media_type=str(getattr(version, "mime_type", "") or "application/octet-stream"),
+        headers={
+            "Cache-Control": "private, no-store",
+            "Content-Length": str(len(blob)),
+        },
     )
 
 

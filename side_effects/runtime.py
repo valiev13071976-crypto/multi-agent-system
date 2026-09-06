@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from types import MappingProxyType
 
@@ -158,6 +159,7 @@ class SideEffectRuntime:
     seo_marketing_runtime: object | None = None
     b2b_commerce_runtime: object | None = None
     payments_runtime: object | None = None
+    product_media_service: object | None = None
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -794,7 +796,8 @@ def _finalize_runtime(
     try:
         from product_media.runtime import build_product_media_runtime
 
-        pm_path = str(env.get("PRODUCT_MEDIA_DB_PATH") or ":memory:")
+        _pm_env = env if env is not None else os.environ
+        pm_path = str(_pm_env.get("PRODUCT_MEDIA_DB_PATH") or ":memory:")
         product_media_runtime = build_product_media_runtime(db_path=pm_path)
         engine.product_media_service = product_media_runtime
     except Exception:
@@ -1088,6 +1091,7 @@ def _finalize_runtime(
         seo_marketing_runtime=seo_marketing_runtime,
         b2b_commerce_runtime=b2b_commerce_runtime,
         payments_runtime=payments_runtime,
+        product_media_service=product_media_runtime,
     )
 
 

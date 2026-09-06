@@ -343,6 +343,10 @@ wire_panda_conversation_gateway(
     workflow_engine=getattr(router, "workflow_engine", None),
     run_router=getattr(router, "run", None),
     context_manager=context_manager,
+    # Use the fully-registered platform ToolGateway (image.generate, excel.inspect, ...)
+    # instead of RouterV2's bare search-only gateway, so live tool actions (e.g. image
+    # generation) resolve their capability instead of reporting CAPABILITY_UNAVAILABLE.
+    tool_gateway=getattr(side_effect_runtime, "tool_gateway", None),
 )
 _persistence = getattr(side_effect_runtime, "persistence", None)
 _pf_connection = getattr(_persistence, "connection", None) if _persistence else None
@@ -477,7 +481,11 @@ app.include_router(configure_saas_product_router(saas_runtime.service))
 app.include_router(configure_accounts_router(accounts_runtime.service))
 app.include_router(configure_operational_activation_router(operational_activation_runtime))
 app.include_router(
-    configure_business_assistant_api_router(ba_api_runtime.service, upload_dir=ba_api_runtime.upload_dir)
+    configure_business_assistant_api_router(
+        ba_api_runtime.service,
+        upload_dir=ba_api_runtime.upload_dir,
+        media_provider=getattr(side_effect_runtime, "product_media_service", None),
+    )
 )
 if tg_interface_runtime is not None:
     app.include_router(
