@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
-from runtime.alerts import AlertCondition, AlertThresholds, evaluate_alert_conditions
+from runtime.alerts import (
+    AlertCondition,
+    AlertDebouncer,
+    AlertThresholds,
+    evaluate_alert_conditions,
+)
 from runtime.capacity_snapshot import CapacitySnapshot, build_capacity_snapshot
 from runtime.metrics import RUNTIME_COUNTERS, RuntimeMetricsCounters
 
 __all__ = [
     "AlertCondition",
+    "AlertDebouncer",
     "AlertThresholds",
     "CapacitySnapshot",
     "RUNTIME_COUNTERS",

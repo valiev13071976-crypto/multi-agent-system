@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+
+from runtime.fleet_registry import FleetRegistry
+from runtime.instance_identity import instance_id as _resolve_instance_id
 
 from task_queue.errors import QueueDuplicateExecutionError
 from task_queue.models import PRIORITY_NORMAL
@@ -68,6 +72,13 @@ class WorkflowRuntimeBundle:
     runtime_role: str = field(default="combined")
     admission: AdmissionController | None = field(default=None, repr=False)
     _claims_stopped: bool = field(default=False, repr=False)
+    # Shared fleet/runtime health (Scale 3.29): optional -- when unset,
+    # behavior is identical to before this block (no heartbeat writes).
+    fleet_registry: FleetRegistry | None = field(default=None, repr=False)
+    instance_id: str = field(default_factory=_resolve_instance_id)
+    runtime_version: str = field(default="")
+    _fleet_heartbeat_min_interval: float = field(default=5.0, repr=False)
+    _last_fleet_heartbeat_monotonic: float = field(default=0.0, repr=False)
 
     def record_startup_recovery_failure(self, exc: BaseException) -> None:
         """Surface startup recovery failure without silent swallow.
@@ -159,11 +170,65 @@ class WorkflowRuntimeBundle:
                             self._inflight.add(
                                 asyncio.create_task(self._run_worker_slot())
                             )
+                    self.fleet_heartbeat_now()
                 except Exception:
                     pass
                 await asyncio.sleep(poll_interval)
 
         self._worker_task = asyncio.create_task(_loop())
+
+    def fleet_heartbeat_now(self, *, now=None, force: bool = False) -> bool:
+        """Write this instance's shared health row (Scale 3.29).
+
+        Throttled to at most once per ``_fleet_heartbeat_min_interval``
+        seconds (wall clock) to avoid excessive writes from a tight poll
+        loop; ``force=True`` bypasses the throttle (used by tests and by
+        explicit registration/deregistration paths). No-op when
+        ``fleet_registry`` is not configured (default: single-instance mode
+        unaffected).
+        """
+
+        if self.fleet_registry is None:
+            return False
+        nowt = time.monotonic()
+        if not force and (nowt - self._last_fleet_heartbeat_monotonic) < max(
+            0.0, float(self._fleet_heartbeat_min_interval)
+        ):
+            return False
+        self._last_fleet_heartbeat_monotonic = nowt
+        snap = self.concurrency_snapshot()
+        allowed = getattr(self.worker.config, "allowed_lanes", None) or getattr(
+            self.queue, "allowed_lanes", None
+        )
+        lanes = tuple(sorted(allowed)) if allowed else ()
+        pressure: dict[str, Any] = {}
+        try:
+            from observability.runtime_metrics import collect_queue_snapshot
+
+            qsnap = collect_queue_snapshot(self.queue)
+            pressure = {
+                "pending_global": qsnap.get("pending_global", 0),
+                "running_global": qsnap.get("running_global", 0),
+            }
+        except Exception:
+            pressure = {}
+        try:
+            self.fleet_registry.heartbeat(
+                instance_id=self.instance_id,
+                pool_name=snap.get("pool_name", ""),
+                lanes=lanes,
+                runtime_role=self.runtime_role,
+                runtime_version=self.runtime_version,
+                draining=snap.get("draining", False),
+                active_jobs=snap.get("active", 0),
+                max_concurrency=snap.get("max_concurrency", 0),
+                available_concurrency=snap.get("available", 0),
+                queue_pressure=pressure,
+                now=now,
+            )
+        except Exception:
+            return False
+        return True
 
     def concurrency_snapshot(self) -> dict[str, Any]:
         """Stable pool-concurrency signal (Scale 3.15 / 3.24 autoscaling contract)."""
@@ -207,11 +272,21 @@ class WorkflowRuntimeBundle:
             if not t.done():
                 t.cancel()
         self._inflight = {t for t in self._inflight if not t.done()}
+        if self.fleet_registry is not None:
+            try:
+                self.fleet_registry.deregister(self.instance_id)
+            except Exception:
+                pass
 
     def stop_new_claims(self) -> None:
         """Graceful worker shutdown: stop scheduler/queue claims; leases remain."""
 
         self._claims_stopped = True
+        # Propagate draining=True to the shared fleet view immediately
+        # (Scale 3.29/3.31 Scenario 7): other instances must see this
+        # instance stop accepting new work without waiting for the next
+        # throttled heartbeat tick.
+        self.fleet_heartbeat_now(force=True)
 
     async def tick_schedules(self) -> list[str]:
         from datetime import timedelta

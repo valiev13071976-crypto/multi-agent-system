@@ -115,3 +115,18 @@ class ToolCancelledError(ToolError):
 class ToolUnavailableError(ToolError):
     def __init__(self, error_code: str = "tool_unavailable"):
         super().__init__(error_code)
+
+
+class ToolShadowNotEligibleError(ToolError):
+    """Fail-closed shadow-traffic side-effect firewall (Scale 3.36).
+
+    Raised by ToolGateway.invoke itself -- not merely by caller discipline --
+    whenever a request is flagged ``traffic_mode=="shadow"`` (trusted,
+    server-set ``ToolRequest.metadata``, never user tool arguments) and the
+    resolved descriptor is not proven side-effect-safe (``read_only`` or
+    ``side_effect_level`` in {none, read}). Any tool/action not proven
+    shadow-safe fails closed for shadow execution.
+    """
+
+    def __init__(self, error_code: str = "SHADOW_NOT_ELIGIBLE"):
+        super().__init__(error_code)

@@ -21,6 +21,16 @@ COUNTER_NAMES = (
     "reclaim",
     "quota_reject",
     "overload_reject",
+    # Scale 3.27+: DLQ redrive, system load-shed decisions.
+    "redrive",
+    "load_shed",
+    # Scale 3.36: shadow traffic outcomes (bounded: executed vs blocked).
+    "shadow_executed",
+    "shadow_blocked",
+    # Scale 3.37/3.38: canary assignment + rollback outcomes.
+    "canary_stable",
+    "canary_candidate",
+    "canary_rollback",
 )
 
 

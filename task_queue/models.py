@@ -77,6 +77,58 @@ def utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+@dataclass(frozen=True)
+class DeadLetterReplayRecord:
+    """Read-only diagnostic view of a dead-lettered task (Scale 3.27 REPLAY).
+
+    Distinct from redrive: viewing a replay record never mutates queue state
+    and never re-enters execution. It exposes only the trusted execution
+    context needed for diagnosis; metadata is pre-sanitized by the queue
+    (secrets/prompts are never stored here in the first place).
+    """
+
+    queue_task_id: str
+    workflow_id: str
+    task_id: str
+    execution_key: str
+    tenant_id: str
+    workload_class: str
+    execution_lane: str
+    attempt: int
+    max_attempts: int
+    error_code: str | None
+    failed_at: datetime | None
+    correlation_id: str | None
+    trace_id: str | None
+    redrive_count: int
+    redrive_eligible: bool
+    safe_metadata: Mapping[str, object] = field(default_factory=dict)
+    viewed_by: str = ""
+    viewed_at: datetime | None = None
+
+    def as_dict(self) -> dict:
+        return {
+            "queue_task_id": self.queue_task_id,
+            "workflow_id": self.workflow_id,
+            "task_id": self.task_id,
+            "execution_key": self.execution_key,
+            "tenant_id": self.tenant_id,
+            "workload_class": self.workload_class,
+            "execution_lane": self.execution_lane,
+            "attempt": self.attempt,
+            "max_attempts": self.max_attempts,
+            "error_code": self.error_code,
+            "failed_at": self.failed_at.isoformat() if self.failed_at else None,
+            "correlation_id": self.correlation_id,
+            "trace_id": self.trace_id,
+            "redrive_count": self.redrive_count,
+            "redrive_eligible": self.redrive_eligible,
+            "safe_metadata": dict(self.safe_metadata),
+            "viewed_by": self.viewed_by,
+            "viewed_at": self.viewed_at.isoformat() if self.viewed_at else None,
+        }
+
+
 def _meta(value) -> Mapping[str, object]:
     return MappingProxyType(dict(value or {}))
 

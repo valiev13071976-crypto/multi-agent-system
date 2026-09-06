@@ -6,8 +6,10 @@ from typing import Mapping
 
 from security.redaction import redact
 from task_queue.errors import (
+    QueueDLQIneligibleError,
     QueueDuplicateExecutionError,
     QueueLeaseError,
+    QueueRedriveRejectedError,
     QueueTaskNotFoundError,
     QueueTenantOwnershipError,
     QueueTransitionError,
@@ -25,6 +27,7 @@ from task_queue.models import (
     STATUS_RETRY_WAIT,
     STATUS_RUNNING,
     TERMINAL_STATUSES,
+    DeadLetterReplayRecord,
     QueueTask,
     utc_now,
 )
@@ -32,6 +35,25 @@ from task_queue.retry import RetryPolicy, is_retryable
 from task_queue.store import InMemoryTaskQueueStore, TaskQueueStore
 
 DEFERRED_UNTIL = datetime(9999, 12, 31, tzinfo=timezone.utc)
+
+# Bounded redrive-loop protection (Scale 3.27): a DLQ entry may be redriven at
+# most this many times before an operator must intervene with a new task.
+# Prevents an accidental infinite redrive loop from silently consuming
+# capacity forever. Configurable; safe (>=1) default when unset/invalid.
+DEFAULT_MAX_REDRIVES = 5
+
+
+def _max_redrives() -> int:
+    import os
+
+    raw = os.environ.get("DLQ_MAX_REDRIVES")
+    if raw is None or str(raw).strip() == "":
+        return DEFAULT_MAX_REDRIVES
+    try:
+        value = int(str(raw).strip())
+    except ValueError:
+        return DEFAULT_MAX_REDRIVES
+    return value if value >= 1 else DEFAULT_MAX_REDRIVES
 
 FORBIDDEN_METADATA_KEYS = (
     "prompt",
@@ -654,7 +676,13 @@ class TaskQueue:
         """Operator redrive: DLQ → queued. Does NOT bypass approval — just requeues.
 
         Fail-closed on tenant mismatch. Preserves execution_key / idempotency_key
-        metadata; clears lease; increments attempt.
+        metadata (and hence business-side-effect idempotency guarantees at the
+        tool/side-effect layer); clears lease; increments attempt lineage.
+
+        Bounded redrive-loop protection (Scale 3.27): a task tracks
+        ``redrive_count`` in its metadata and is rejected with
+        ``QueueRedriveRejectedError`` once ``DLQ_MAX_REDRIVES`` is exceeded, so
+        repeated automated/accidental redrive cannot loop forever.
         """
 
         from task_queue.errors import QueueError
@@ -672,12 +700,17 @@ class TaskQueue:
             if str(getattr(task, "tenant_id", "") or "").strip() != tid:
                 raise QueueTenantOwnershipError("tenant_mismatch")
             if task.status != STATUS_DEAD_LETTERED:
-                raise QueueTransitionError(task.status, STATUS_QUEUED)
+                raise QueueDLQIneligibleError("not_dead_lettered")
 
             meta = dict(task.metadata or {})
+            redrive_count = int(meta.get("redrive_count") or 0)
+            if redrive_count >= _max_redrives():
+                raise QueueRedriveRejectedError("redrive_limit_exceeded")
+
             # Preserve idempotency_key if present; never invent one.
             meta["redriven_by"] = actor
             meta["redriven_at"] = stamp.isoformat()
+            meta["redrive_count"] = redrive_count + 1
             meta.pop("last_failure_metadata", None)
 
             redriven = self._transition(
@@ -705,9 +738,86 @@ class TaskQueue:
                     "tenant_id": tid,
                     "execution_key": redriven.execution_key,
                     "idempotency_key": meta.get("idempotency_key"),
+                    "redrive_count": meta["redrive_count"],
                 },
             )
+            try:
+                from runtime.metrics import RUNTIME_COUNTERS
+
+                RUNTIME_COUNTERS.inc(
+                    "redrive", lane=getattr(redriven, "execution_lane", "") or ""
+                )
+            except Exception:
+                pass
             return redriven
+
+    def replay_dead_letter(
+        self,
+        queue_task_id: str,
+        *,
+        actor_ref: str,
+        tenant_id: str,
+        now: datetime | None = None,
+    ) -> DeadLetterReplayRecord:
+        """Read-only diagnostic REPLAY of a dead-lettered task (Scale 3.27).
+
+        Distinct from ``redrive_dead_letter``: this NEVER mutates queue state
+        and NEVER re-enters execution, so it cannot create duplicate business
+        side effects. It reconstructs the trusted execution context preserved
+        on the DLQ entry (identity, tenant, workload_class, lane, attempt
+        lineage, failure category/timestamp, correlation/trace identity, and
+        already-sanitized error metadata) for authorized diagnosis, and is
+        idempotent by construction (repeated calls never change state).
+
+        Fail-closed on tenant mismatch or a malformed/ineligible (non-DLQ)
+        task, mirroring ``redrive_dead_letter``'s trust boundary.
+        """
+
+        from task_queue.errors import QueueError
+
+        stamp = now or self.now()
+        tid = str(tenant_id or "").strip()
+        if not tid:
+            raise QueueTenantOwnershipError("tenant_id_required")
+        actor = str(actor_ref or "").strip()
+        if not actor:
+            raise QueueError("actor_ref_required")
+
+        task = self.get_for_tenant(queue_task_id, tid)
+        if task is None:
+            raise QueueTenantOwnershipError("tenant_mismatch_or_not_found")
+        if task.status != STATUS_DEAD_LETTERED:
+            raise QueueDLQIneligibleError("not_dead_lettered")
+
+        meta = dict(task.metadata or {})
+        redrive_count = int(meta.get("redrive_count") or 0)
+        record = DeadLetterReplayRecord(
+            queue_task_id=task.queue_task_id,
+            workflow_id=task.workflow_id,
+            task_id=task.task_id,
+            execution_key=task.execution_key,
+            tenant_id=tid,
+            workload_class=str(meta.get("workload_class") or ""),
+            execution_lane=task.execution_lane,
+            attempt=int(task.attempt),
+            max_attempts=int(task.max_attempts),
+            error_code=task.error_code,
+            failed_at=task.failed_at,
+            correlation_id=(meta.get("correlation_id") or None),
+            trace_id=(meta.get("trace_id") or None),
+            redrive_count=redrive_count,
+            redrive_eligible=redrive_count < _max_redrives(),
+            safe_metadata=sanitize_metadata(meta),
+            viewed_by=actor,
+            viewed_at=stamp,
+        )
+        self._obs_emit(
+            "queue.dlq_replay_viewed",
+            task,
+            status="dead_lettered",
+            metadata={"actor_ref": actor, "tenant_id": tid},
+        )
+        return record
 
     def cancel(self, queue_task_id: str, *, now: datetime | None = None) -> QueueTask:
         with self._lock:
