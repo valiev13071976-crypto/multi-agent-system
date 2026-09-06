@@ -1,21 +1,19 @@
-"""Secure upload handling for Business Assistant API inputs."""
+"""Secure upload handling for Business Assistant API inputs.
+
+Allow-list/size-limit/safe-filename logic now lives in the canonical
+``artifacts.validation`` module (Block 3.5) -- re-exported here so existing
+imports of these names keep working unchanged.
+"""
 
 from __future__ import annotations
 
-import re
 import uuid
 from pathlib import Path
 
-ALLOWED_EXTENSIONS = frozenset({".xlsx", ".xls", ".csv", ".pdf", ".docx", ".png", ".jpg", ".jpeg", ".webp", ".txt"})
-MAX_UPLOAD_BYTES = 10 * 1024 * 1024
+from artifacts.validation import ALLOWED_EXTENSIONS, MAX_ARTIFACT_BYTES as MAX_UPLOAD_BYTES
+from artifacts.validation import safe_filename
 
-_SAFE_NAME = re.compile(r"[^a-zA-Z0-9._-]+")
-
-
-def safe_filename(name: str) -> str:
-    base = Path(name or "upload.bin").name
-    cleaned = _SAFE_NAME.sub("_", base).strip("._") or "upload.bin"
-    return cleaned[:200]
+__all__ = ["ALLOWED_EXTENSIONS", "MAX_UPLOAD_BYTES", "safe_filename", "save_upload"]
 
 
 def save_upload(

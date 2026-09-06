@@ -211,6 +211,16 @@ def collect_operational_metrics(
     except Exception:
         queue_lifecycle_counters = {}
 
+    # Block 3.5.17: bounded-cardinality upload/registration/open/download/
+    # access-denied counters for the canonical artifact layer, surfaced the
+    # same way as the queue lifecycle counters above.
+    try:
+        from artifacts.metrics import ARTIFACT_METRICS
+
+        artifact_counters = ARTIFACT_METRICS.as_dict()
+    except Exception:
+        artifact_counters = {}
+
     # Scale 3.29/3.31: fleet-wide instance visibility, bounded (no per-tenant
     # cardinality; instance_id is a small, bounded set in practice).
     fleet_summary: dict[str, Any] = {}
@@ -270,6 +280,10 @@ def collect_operational_metrics(
         # Scale 3.34: lane-bounded lifecycle counters (enqueue/claim/complete/
         # fail/retry/dlq/reclaim/quota_reject/overload_reject/redrive/load_shed).
         "queue_lifecycle_counters": queue_lifecycle_counters,
+        # Block 3.5.17: artifact upload/registration/open/download/access-
+        # denied counters, bucketed by artifact_kind/failure_category/
+        # size_bucket only (never artifact_id/tenant_id/filename).
+        "artifact_counters": artifact_counters,
         # Scale 3.29/3.31: fleet-wide instance visibility (bounded cardinality;
         # empty dict when no fleet_registry is configured -- single-instance
         # mode is unaffected).

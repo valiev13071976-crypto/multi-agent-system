@@ -137,6 +137,9 @@ class BusinessAssistantApiService:
         self.store = store
         self.ba = ba_service or BusinessAssistantService()
         self.upload_dir = ""
+        # Canonical artifact layer (Block 3.5) -- optional so existing callers
+        # that never wire it (e.g. older tests) keep working unchanged.
+        self.artifact_service = None
 
     def close(self) -> None:
         self.store.close()
@@ -171,12 +174,18 @@ class BusinessAssistantApiService:
         self._event(rec, EV_REQUEST_COMPLETED, message="Request completed", status=ST_COMPLETED)
         self._persist(rec)
         if norm.conversation_id:
+            # Non-image artifacts (PDF/XLSX/DOCX/CSV/TXT/generic) generated during
+            # this turn are referenced on the assistant message so they survive
+            # reload/resume (3.5.3, 3.5.11, 3.5.18-F). Images keep using the
+            # existing inline markdown/view_url rendering path unchanged.
+            artifact_refs = self._non_image_artifact_refs(getattr(ex, "artifacts", None))
             self._append_message(
                 tenant,
                 norm.conversation_id,
                 role="assistant",
                 content=select_canonical_final_answer({"summary": ex.summary, "final_answer": ex.summary}),
                 request_id=request_id,
+                artifact_refs=artifact_refs,
             )
             self.store.touch_conversation(
                 conversation_id=norm.conversation_id, tenant_id=tenant, owner_id=owner_id
@@ -216,6 +225,7 @@ class BusinessAssistantApiService:
                 role="assistant",
                 content=self._safe_summary(rec),
                 request_id=request_id,
+                artifact_refs=self._non_image_artifact_refs(getattr(ex, "artifacts", None)),
             )
             self.store.touch_conversation(
                 conversation_id=norm.conversation_id, tenant_id=tenant, owner_id=owner_id
@@ -264,9 +274,18 @@ class BusinessAssistantApiService:
         correlation_id = str(uuid.uuid4())
         now = _utc_iso()
         if norm.conversation_id:
+            # 3.5.3: persist the user's attached artifact refs on the message
+            # itself so they survive reload/resume, independent of request state.
             self._append_message(
-                tenant, norm.conversation_id, role="user", content=norm.message, request_id=request_id
+                tenant,
+                norm.conversation_id,
+                role="user",
+                content=norm.message,
+                request_id=request_id,
+                artifact_refs=tuple(norm.artifact_refs or ()),
             )
+            for ref in tuple(norm.artifact_refs or ()):
+                self._attach_artifact_to_conversation(tenant, ref, norm.conversation_id)
             conv = self.store.get_conversation(
                 tenant_id=tenant, owner_id=owner_id, conversation_id=norm.conversation_id
             )
@@ -712,6 +731,16 @@ class BusinessAssistantApiService:
         )
         if not deleted:
             raise BusinessAssistantApiError(BAA_NOT_FOUND, http_status=404)
+        # Block 3.5.13: cascade-retire this conversation's attachments/
+        # generated files too -- best-effort, never blocks the (already
+        # committed) conversation deletion above.
+        if self.artifact_service is not None:
+            try:
+                self.artifact_service.delete_artifacts_for_conversation(
+                    tenant_id=tenant, conversation_id=conversation_id
+                )
+            except Exception:
+                pass
 
     def list_conversations(self, *, tenant_id: str, owner_id: str, limit: int = 50) -> list[dict]:
         rows = self.store.list_conversations(tenant_id=require_tenant_id(tenant_id), owner_id=owner_id, limit=limit)
@@ -756,10 +785,11 @@ class BusinessAssistantApiService:
     ) -> dict:
         from business_assistant_api.uploads import save_upload
 
+        tenant = require_tenant_id(tenant_id)
         try:
-            return save_upload(
+            out = save_upload(
                 base_dir=upload_base_dir,
-                tenant_id=require_tenant_id(tenant_id),
+                tenant_id=tenant,
                 owner_id=owner_id,
                 filename=filename,
                 content=content,
@@ -769,6 +799,33 @@ class BusinessAssistantApiService:
             code = str(exc)
             status = 413 if "too_large" in code else 422
             raise BusinessAssistantApiError(code, http_status=status) from exc
+        # 3.5.1/3.5.2: also register through the canonical artifact layer so
+        # this same file gets a stable artifact_id usable with the generic
+        # metadata/download/view endpoints (additive -- the legacy
+        # artifact://upload/... ref and filesystem write above are unchanged).
+        if self.artifact_service is not None:
+            try:
+                rec = self.artifact_service.register_upload(
+                    tenant_id=tenant,
+                    owner_id=owner_id,
+                    filename=filename,
+                    content=content,
+                    mime_type=mime_type,
+                    legacy_ref=out.get("artifact_ref", ""),
+                )
+                out["artifact_id"] = rec.artifact_id
+                # 3.5.16: let the composer render an immediate, correct
+                # preview/download affordance for this exact upload without
+                # a second round-trip to GET /artifacts/{id}.
+                public = rec.as_public_dict()
+                out["kind"] = public["kind"]
+                out["view_url"] = public["view_url"]
+                out["download_url"] = public["download_url"]
+            except Exception:
+                out["artifact_id"] = ""
+        else:
+            out["artifact_id"] = ""
+        return out
 
     # --- internals ---
 
@@ -926,7 +983,14 @@ class BusinessAssistantApiService:
         )
 
     def _append_message(
-        self, tenant: str, conversation_id: str, *, role: str, content: str, request_id: str
+        self,
+        tenant: str,
+        conversation_id: str,
+        *,
+        role: str,
+        content: str,
+        request_id: str,
+        artifact_refs: tuple[str, ...] = (),
     ) -> None:
         self.store.save_message(
             MessageRecord(
@@ -937,8 +1001,35 @@ class BusinessAssistantApiService:
                 content=redact(content)[:8000],
                 created_at=_utc_iso(),
                 request_id=request_id,
+                artifact_refs=tuple(artifact_refs or ()),
             )
         )
+
+    def _non_image_artifact_refs(self, artifacts) -> tuple[str, ...]:
+        """Canonical artifact_ids for non-image artifacts only -- images keep
+        using the existing inline markdown/view_url rendering path so this
+        never duplicates an already-working image display (3.5.11)."""
+
+        out: list[str] = []
+        for art in artifacts or ():
+            if not isinstance(art, dict):
+                continue
+            kind = str(art.get("artifact_type") or art.get("type") or "")
+            if kind == "image":
+                continue
+            aid = str(art.get("artifact_id") or "")
+            if aid:
+                out.append(aid)
+        return tuple(out)
+
+    def _attach_artifact_to_conversation(self, tenant: str, ref: str, conversation_id: str) -> None:
+        svc = self.artifact_service
+        if svc is None:
+            return
+        try:
+            svc.attach_to_conversation(tenant_id=tenant, artifact_id=ref, conversation_id=conversation_id)
+        except Exception:
+            pass
 
     def _safe_summary(self, rec: ApiRequestRecord) -> str:
         if rec.execution_id:

@@ -7,6 +7,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, File, HTTPException, Query, Response, UploadFile
 from pydantic import BaseModel, Field
 
+from artifacts.errors import ArtifactError
 from business_assistant_api.errors import BusinessAssistantApiError
 from business_assistant_api.models import API_VERSION
 from business_assistant_api.service import BusinessAssistantApiService
@@ -18,16 +19,40 @@ _router = APIRouter(prefix=f"/api/{API_VERSION}/business-assistant", tags=["busi
 _service: BusinessAssistantApiService | None = None
 _upload_dir: str = ""
 _media_provider: Any | None = None
+_artifact_service: Any | None = None
 
 
 def configure_business_assistant_api_router(
-    service: BusinessAssistantApiService, *, upload_dir: str = "", media_provider: Any | None = None
+    service: BusinessAssistantApiService,
+    *,
+    upload_dir: str = "",
+    media_provider: Any | None = None,
+    artifact_service: Any | None = None,
 ) -> APIRouter:
-    global _service, _upload_dir, _media_provider
+    global _service, _upload_dir, _media_provider, _artifact_service
     _service = service
     _upload_dir = upload_dir or getattr(service, "upload_dir", "")
     _media_provider = media_provider
+    _artifact_service = artifact_service or getattr(service, "artifact_service", None)
     return _router
+
+
+def _artifacts() -> Any:
+    if _artifact_service is None:
+        raise HTTPException(status_code=503, detail={"code": "artifact_service_unavailable"})
+    return _artifact_service
+
+
+def _artifact_err(exc: ArtifactError) -> HTTPException:
+    return HTTPException(status_code=exc.http_status, detail={"code": exc.code, "message": exc.message})
+
+
+def _content_disposition(kind: str, safe_name: str) -> str:
+    import urllib.parse
+
+    ascii_name = safe_name.encode("ascii", "ignore").decode("ascii") or "file"
+    quoted = urllib.parse.quote(safe_name)
+    return f'{kind}; filename="{ascii_name}"; filename*=UTF-8\'\'{quoted}'
 
 
 def _svc() -> BusinessAssistantApiService:
@@ -127,6 +152,25 @@ class UploadResponse(BaseModel):
     filename: str
     size_bytes: int
     mime_type: str
+    artifact_id: str = ""
+    kind: str = ""
+    view_url: str = ""
+    download_url: str = ""
+
+
+class ArtifactMetadataResponse(BaseModel):
+    artifact_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int
+    kind: str
+    created_at: str
+    source: str
+    status: str
+    conversation_id: str = ""
+    derived_from_artifact_id: str = ""
+    view_url: str = ""
+    download_url: str = ""
 
 
 class CreateConversationBody(BaseModel):
@@ -256,6 +300,10 @@ async def upload_attachment(
         filename=out["filename"],
         size_bytes=out["size_bytes"],
         mime_type=out["mime_type"],
+        artifact_id=out.get("artifact_id", ""),
+        kind=out.get("kind", ""),
+        view_url=out.get("view_url", ""),
+        download_url=out.get("download_url", ""),
     )
 
 
@@ -264,12 +312,18 @@ async def get_media(
     version_id: str,
     response: Response,
     ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+    download: bool = Query(default=False),
 ):
     """Safe, tenant-authorized retrieval of a persisted generated image artifact.
 
     Reuses the existing auth boundary (session cookie for the Panda web UI, or
     X-API-Key/Bearer for other clients) plus tenant-scoped access checks already
     enforced by ProductMediaService — no new artifact or auth system.
+
+    ``?download=1`` (3.5.7/3.5.8) additively switches the response to an
+    explicit attachment disposition for the full-size-preview Download
+    action; the default (omitted) behavior is byte-for-byte unchanged so
+    existing inline ``<img>`` rendering keeps working exactly as before.
     """
     _no_cache(response)
     get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
@@ -282,14 +336,92 @@ async def get_media(
     blob = provider.get_blob(tenant_id=ctx.tenant_id, version_id=version_id)
     if blob is None:
         raise HTTPException(status_code=404, detail={"code": "media_not_found"})
-    return Response(
-        content=blob,
-        media_type=str(getattr(version, "mime_type", "") or "application/octet-stream"),
-        headers={
-            "Cache-Control": "private, no-store",
-            "Content-Length": str(len(blob)),
-        },
-    )
+    mime = str(getattr(version, "mime_type", "") or "application/octet-stream")
+    headers = {
+        "Cache-Control": "private, no-store",
+        "Content-Length": str(len(blob)),
+    }
+    if download:
+        from artifacts.validation import safe_download_filename
+
+        ext = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}.get(mime, "")
+        name = safe_download_filename(f"image-{version_id}{ext}")
+        headers["Content-Disposition"] = _content_disposition("attachment", name)
+    return Response(content=blob, media_type=mime, headers=headers)
+
+
+def _serve_artifact(artifact_id: str, ctx: RequestSecurityContext, *, disposition: str) -> Response:
+    svc = _artifacts()
+    try:
+        rec, blob = svc.get_blob(tenant_id=ctx.tenant_id, artifact_id=artifact_id)
+    except ArtifactError as exc:
+        try:
+            from artifacts.errors import ArtifactNotFoundError
+
+            svc.record_download_failed(
+                failure_category="not_found" if isinstance(exc, ArtifactNotFoundError) else "access_denied"
+            )
+        except Exception:
+            pass
+        raise _artifact_err(exc) from exc
+    headers = {"Cache-Control": "private, no-store", "Content-Length": str(len(blob))}
+    headers["Content-Disposition"] = _content_disposition(disposition, rec.safe_filename)
+    if disposition == "attachment":
+        svc.record_downloaded(rec)
+    else:
+        svc.record_opened(rec)
+    return Response(content=blob, media_type=rec.mime_type, headers=headers)
+
+
+@_router.get("/artifacts/{artifact_id:path}/download")
+async def download_artifact(
+    artifact_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    """Explicit original-bytes download (3.5.7) — Content-Disposition: attachment.
+
+    ``artifact_id`` uses the ``:path`` converter (not the default single-
+    segment matcher) because a legacy ``artifact://upload/...`` ref contains
+    ``/`` -- registered *before* the bare metadata route below so a longer,
+    more specific path always wins the match (Starlette resolves routes in
+    registration order; a greedy ``:path`` metadata route checked first
+    would otherwise swallow these suffixed paths too).
+    """
+
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
+    return _serve_artifact(artifact_id, ctx, disposition="attachment")
+
+
+@_router.get("/artifacts/{artifact_id:path}/view")
+async def view_artifact(
+    artifact_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    """Inline/preview retrieval (3.5.6, 3.5.9) — browser-native rendering (e.g. PDF)."""
+
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
+    return _serve_artifact(artifact_id, ctx, disposition="inline")
+
+
+@_router.get("/artifacts/{artifact_id:path}", response_model=ArtifactMetadataResponse)
+async def get_artifact_metadata(
+    artifact_id: str,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    """Canonical artifact metadata (3.5.6) — tenant-scoped, fails closed."""
+
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
+    try:
+        rec = _artifacts().get_metadata(tenant_id=ctx.tenant_id, artifact_id=artifact_id)
+    except ArtifactError as exc:
+        raise _artifact_err(exc) from exc
+    return ArtifactMetadataResponse(**rec.as_public_dict())
 
 
 @_router.post("/requests", response_model=RequestSummaryResponse)

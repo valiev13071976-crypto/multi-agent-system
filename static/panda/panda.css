@@ -328,6 +328,124 @@ html.panda-chat body {
   height: auto;
 }
 
+/* Block 3.5.8: click-to-enlarge affordance for chat/attachment images. */
+.msg-image-wrap {
+  display: inline-block;
+  max-width: 100%;
+  line-height: 0;
+}
+
+.msg-image {
+  cursor: zoom-in;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border);
+}
+
+/* Block 3.5.9/3.5.10/3.5.16: generated/attached non-image files. */
+.msg-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.6rem;
+}
+
+.file-card {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+  text-decoration: none;
+  max-width: 16rem;
+  min-width: 0;
+}
+
+.file-card:hover { background: var(--surface); }
+
+.file-card-icon {
+  font-size: 1.4rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.file-card-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 0.1rem;
+}
+
+.file-card-name {
+  font-size: 0.85rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-card-size {
+  font-size: 0.72rem;
+  color: var(--text-secondary);
+}
+
+/* Block 3.5.8: full-size image preview + explicit download action. */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: grid;
+  place-items: center;
+  padding: 1.5rem;
+  background: rgba(16, 24, 40, 0.75);
+}
+
+.image-lightbox.hidden,
+.image-lightbox[hidden] {
+  display: none !important;
+}
+
+.image-lightbox-card {
+  position: relative;
+  max-width: min(92vw, 60rem);
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.image-lightbox-card img {
+  max-width: 100%;
+  max-height: 78vh;
+  border-radius: var(--radius);
+  box-shadow: var(--shadow-md);
+  background: var(--surface);
+}
+
+.image-lightbox-close {
+  position: absolute;
+  top: -0.5rem;
+  right: -0.5rem;
+  background: var(--surface);
+}
+
+.image-lightbox-download {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 999px;
+  padding: 0.55rem 1.1rem;
+  text-decoration: none;
+  font-size: 0.9rem;
+  min-height: 44px;
+}
+
+.image-lightbox-download:hover { background: var(--accent-hover); }
+
 .table-scroll {
   width: 100%;
   max-width: 100%;

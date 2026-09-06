@@ -10,12 +10,73 @@
     return node;
   }
 
-  function renderMessage(role, content, meta) {
+  const FILE_ICONS = {
+    pdf: "📕",
+    spreadsheet: "📊",
+    document: "📄",
+    text: "📝",
+  };
+
+  function fileIconFor(kind) {
+    return FILE_ICONS[String(kind || "")] || "📎";
+  }
+
+  function formatFileSize(bytes) {
+    const n = Number(bytes) || 0;
+    if (n <= 0) return "";
+    if (n < 1024) return `${n} B`;
+    if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} КБ`;
+    return `${(n / 1024 / 1024).toFixed(1)} МБ`;
+  }
+
+  /** Block 3.5.8/3.5.9/3.5.10: one attachment -- image thumbnail (lightbox-
+   * ready, matching the markdown-image wrapper in sanitize.js) or a generic
+   * file card (pdf/spreadsheet/document/text/other) with a download link. */
+  function renderAttachmentCard(meta) {
+    const a = meta || {};
+    const kind = String(a.kind || "");
+    const isImage = kind === "image" || String(a.mime_type || "").startsWith("image/");
+    const viewUrl = String(a.view_url || "").trim();
+    const downloadUrl = String(a.download_url || "").trim();
+    if (isImage && (viewUrl || downloadUrl)) {
+      const wrap = el("span", "msg-image-wrap");
+      const img = document.createElement("img");
+      img.className = "msg-image";
+      img.alt = a.filename || "изображение";
+      img.src = viewUrl || downloadUrl;
+      img.dataset.fullUrl = viewUrl || downloadUrl;
+      img.dataset.downloadUrl = downloadUrl || viewUrl;
+      wrap.appendChild(img);
+      return wrap;
+    }
+    const card = document.createElement("a");
+    card.className = "file-card";
+    card.href = downloadUrl || viewUrl || "#";
+    card.target = "_blank";
+    card.rel = "noopener noreferrer";
+    if (downloadUrl) card.setAttribute("download", a.filename || "");
+    card.appendChild(el("span", "file-card-icon", fileIconFor(kind)));
+    const info = el("span", "file-card-info");
+    info.appendChild(el("span", "file-card-name", a.filename || "Файл"));
+    const size = formatFileSize(a.size_bytes);
+    if (size) info.appendChild(el("span", "file-card-size", size));
+    card.appendChild(info);
+    return card;
+  }
+
+  function renderMessage(role, content, meta, attachments) {
     const wrap = el("article", `msg ${role}`);
     if (meta) wrap.appendChild(el("div", "meta", meta));
     const body = el("div", "body");
     renderRichText(body, content);
     wrap.appendChild(body);
+    if (attachments && attachments.length) {
+      const list = el("div", "msg-attachments");
+      attachments.forEach((a) => {
+        if (a) list.appendChild(renderAttachmentCard(a));
+      });
+      wrap.appendChild(list);
+    }
     return wrap;
   }
 
@@ -186,6 +247,7 @@
     renderPreview,
     renderResult,
     renderArtifacts,
+    renderAttachmentCard,
     renderConversationButton,
     renderConversationItem,
     el,

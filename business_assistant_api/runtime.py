@@ -6,6 +6,8 @@ import logging
 import os
 from dataclasses import dataclass
 
+from artifacts.service import ArtifactService
+from artifacts.store import SqliteArtifactStore
 from business_assistant.conversation_gateway import WorkflowPandaConversationGateway
 from business_assistant.service import BusinessAssistantService
 from business_assistant_api.service import BusinessAssistantApiService
@@ -20,6 +22,7 @@ class BusinessAssistantApiRuntime:
     service: BusinessAssistantApiService
     store: SqliteBusinessAssistantApiStore
     upload_dir: str
+    artifact_service: ArtifactService | None = None
 
     def close(self) -> None:
         self.service.close()
@@ -31,6 +34,8 @@ def build_business_assistant_api_runtime(
     db_path: str | None = None,
     with_integration: bool = True,
     conversation_gateway=None,
+    media_provider=None,
+    artifact_service: ArtifactService | None = None,
 ) -> BusinessAssistantApiRuntime:
     env = dict(env or os.environ)
     path = db_path or env.get("BA_API_DB_PATH") or os.path.join(
@@ -50,7 +55,22 @@ def build_business_assistant_api_runtime(
     )
     svc = BusinessAssistantApiService(store=store, ba_service=ba)
     svc.upload_dir = upload_dir
-    return BusinessAssistantApiRuntime(service=svc, store=store, upload_dir=upload_dir)
+    if artifact_service is None:
+        # Block 3.5: reuse the same PANDA_ARTIFACT_ROOT already reserved (but
+        # previously unused) for "governed generated artifacts and uploads"
+        # in production_foundation.storage's inventory.
+        artifact_db_path = env.get("ARTIFACT_DB_PATH") or os.path.join(
+            env.get("PANDA_ARTIFACT_ROOT")
+            or os.path.join(os.environ.get("PANDA_DATA_DIR", "."), "artifacts"),
+            "artifacts.sqlite3",
+        )
+        artifact_service = ArtifactService(
+            store=SqliteArtifactStore(artifact_db_path), media_provider=media_provider
+        )
+    svc.artifact_service = artifact_service
+    return BusinessAssistantApiRuntime(
+        service=svc, store=store, upload_dir=upload_dir, artifact_service=artifact_service
+    )
 
 
 def wire_panda_conversation_gateway(
@@ -61,6 +81,7 @@ def wire_panda_conversation_gateway(
     context_manager,
     logger: logging.Logger | None = None,
     tool_gateway=None,
+    artifact_service=None,
 ) -> bool:
     """Attach Panda conversational gateway; return False when engine unavailable."""
     log = logger or logging.getLogger(__name__)
@@ -83,5 +104,6 @@ def wire_panda_conversation_gateway(
         run_router=run_router,
         context_manager=context_manager,
         tool_gateway=gateway,
+        artifact_service=artifact_service,
     )
     return True

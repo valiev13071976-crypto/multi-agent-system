@@ -314,7 +314,9 @@ accounts_runtime = build_accounts_runtime(
 )
 configure_accounts_auth(accounts_runtime.service)
 install_dual_auth()
-ba_api_runtime = build_business_assistant_api_runtime()
+ba_api_runtime = build_business_assistant_api_runtime(
+    media_provider=getattr(side_effect_runtime, "product_media_service", None),
+)
 tg_interface_runtime = None
 if telegram_interface_enabled():
     tg_interface_runtime = build_telegram_interface_runtime(
@@ -362,6 +364,7 @@ wire_panda_conversation_gateway(
     # instead of RouterV2's bare search-only gateway, so live tool actions (e.g. image
     # generation) resolve their capability instead of reporting CAPABILITY_UNAVAILABLE.
     tool_gateway=getattr(side_effect_runtime, "tool_gateway", None),
+    artifact_service=ba_api_runtime.artifact_service,
 )
 _persistence = getattr(side_effect_runtime, "persistence", None)
 _pf_connection = getattr(_persistence, "connection", None) if _persistence else None

@@ -22,6 +22,10 @@ class ConversationRequest:
     conversation_id: str | None = None
     correlation_id: str | None = None
     history: tuple = ()
+    # Block 3.5.4: user-attached artifact refs from the current turn's
+    # conversation context. These are resolved server-side (tenant/ownership
+    # verified) before ever reaching a tool call -- never trusted as-is.
+    attachment_refs: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -250,6 +254,7 @@ class WorkflowPandaConversationGateway:
         tool_gateway=None,
         action_store=None,
         tool_capabilities=None,
+        artifact_service=None,
     ):
         self._workflow_engine = workflow_engine
         self._run_router = run_router
@@ -257,6 +262,10 @@ class WorkflowPandaConversationGateway:
         self._mode = mode
         self._role = role
         self._tool_gateway = tool_gateway
+        # Block 3.5.4/3.5.5: optional canonical artifact layer -- trusted
+        # attachment resolution for tool calls, and registration of
+        # generated image artifacts. None is safe (feature is additive).
+        self._artifact_service = artifact_service
         if action_store is None:
             from business_assistant.action_continuation import ActiveTaskStore
 
@@ -309,13 +318,31 @@ class WorkflowPandaConversationGateway:
             provided = tuple(contract.required_capabilities)
         if self._tool_capabilities is not None:
             provided = tuple(self._tool_capabilities.capabilities) or provided
+
+        arguments = dict(action.arguments or {})
+        # Block 3.5.4: resolve any user-attached refs through the trusted
+        # server-side artifact layer and inject the safe, verified
+        # descriptors under a reserved key -- always overwritten here (after
+        # merging action.arguments) so message text/tool arguments/raw user
+        # input can never spoof ownership of another tenant's file.
+        if self._artifact_service is not None and request.attachment_refs:
+            try:
+                resolved = self._artifact_service.resolve_trusted_refs(
+                    tenant_id=str(request.tenant_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    refs=tuple(request.attachment_refs),
+                )
+            except Exception:
+                resolved = []
+            arguments["attachment_refs"] = resolved
+
         tool_request = ToolRequest(
             request_id=str(request.request_id or uuid.uuid4()),
             workflow_id="",
             task_id=str(task.task_id if task else uuid.uuid4()),
             tool_id=action.tool_id,
             operation=action.operation or "generate",
-            arguments=dict(action.arguments or {}),
+            arguments=arguments,
             requested_capabilities=provided,
             # Server-classified: every Business Assistant tool call is a live user
             # waiting synchronously for a reply. Never sourced from `action.arguments`
@@ -372,6 +399,32 @@ class WorkflowPandaConversationGateway:
             if not has_required_artifact:
                 success = False
                 artifacts = []
+        if success and artifacts and self._artifact_service is not None:
+            # Block 3.5.5: register image artifacts through the canonical
+            # artifact layer (thin wrapper -- bytes stay in product_media,
+            # existing generation/persistence is untouched). Best-effort: a
+            # registration failure must never break the already-working
+            # image delivery/view_url path.
+            for art in artifacts:
+                if str(art.get("artifact_type") or art.get("type") or "") != "image":
+                    continue
+                version_id = str(art.get("artifact_id") or art.get("ref") or "")
+                if not version_id:
+                    continue
+                try:
+                    rec = self._artifact_service.register_external_image(
+                        tenant_id=str(request.tenant_id or ""),
+                        owner_id=str(request.user_id or ""),
+                        version_id=version_id,
+                        mime_type=str(art.get("mime_type") or "image/png"),
+                        conversation_id=str(request.conversation_id or ""),
+                        request_id=str(request.request_id or ""),
+                        tool_id=str(action.tool_id or ""),
+                    )
+                    art["artifact_id"] = rec.artifact_id
+                    art["download_url"] = f"/api/v1/business-assistant/artifacts/{rec.artifact_id}/download"
+                except Exception:
+                    pass
         if idem and success:
             self._executed_keys.add(idem)
         if task is not None:

@@ -231,6 +231,7 @@ class BusinessAssistantService:
             conversation_id=conversation_id,
             correlation_id=req.correlation_id,
             history=tuple(history or ()),
+            attachment_refs=tuple(req.artifact_refs or ()),
         )
 
     def _execution_from_conversation(
