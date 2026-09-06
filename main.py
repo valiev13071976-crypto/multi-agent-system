@@ -1,7 +1,22 @@
+import logging
 import os
 import uuid
 from contextlib import asynccontextmanager
 from typing import Annotated, Literal
+
+# Configure the root logger BEFORE any other module-level import can emit a
+# log record. Nothing in this app's startup path previously called
+# logging.basicConfig() (Python's root logger defaults to WARNING with no
+# handler), so every INFO-level structured diagnostic anywhere in the
+# codebase -- including product_media's image_generation_started/
+# succeeded/failed events and side_effects.runtime's construction-failure
+# log -- was silently dropped before ever reaching stdout/Railway logs,
+# regardless of what actually happened at runtime. This is why repeated
+# production smoke tests never showed ANY image_generation_* log line, even
+# across attempts that must have reached that code (success or failure):
+# the evidence itself was never capturable, not proof the code path was
+# unreached.
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
 from dotenv import load_dotenv
 
