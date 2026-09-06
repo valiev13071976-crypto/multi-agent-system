@@ -33,6 +33,20 @@ _DALLE2_SIZES = ("256x256", "512x512", "1024x1024")
 # hosted "url" (which this adapter cannot ingest).
 _RESPONSE_FORMAT_MODEL_PREFIXES = ("dall-e",)
 
+# BoundedHttpClient's generic default (1 MiB) is sized for typical JSON API
+# responses across OTHER production providers -- it is far too small for a
+# b64_json image response. A real 1024x1024 (or larger, e.g. 1536x1024)
+# generated image commonly decodes to several hundred KB to a few MB of raw
+# PNG bytes; base64 inflates that by ~4/3, plus JSON wrapping overhead. Any
+# real image above roughly 750 KB raw would silently trip the 1 MiB generic
+# cap and be discarded as "response_too_large" even though OpenAI's HTTP
+# call itself succeeded -- this is indistinguishable from a genuine provider
+# failure without inspecting this specific limit. Sized generously above the
+# downstream MediaResourcePolicy.max_sync_bytes (8 MiB raw) decode ceiling so
+# the HTTP layer is never the bottleneck; validate_and_extract_image() still
+# enforces the real, intentional size policy on the decoded bytes.
+_MAX_IMAGE_RESPONSE_BYTES = 16 * 1024 * 1024
+
 
 @dataclass
 class OpenAIImageGenerationProvider:
@@ -46,7 +60,11 @@ class OpenAIImageGenerationProvider:
     def __post_init__(self) -> None:
         if not self.api_key:
             raise ProductionProviderError(ProviderErrorCategory.CONFIGURATION_ERROR, message="image_key_missing", provider_id="media_image")
-        self._http = BoundedHttpClient(provider_id="media_image", timeout_seconds=self.timeout_seconds)
+        self._http = BoundedHttpClient(
+            provider_id="media_image",
+            timeout_seconds=self.timeout_seconds,
+            max_response_bytes=_MAX_IMAGE_RESPONSE_BYTES,
+        )
 
     def _resolve_size(self, width: int, height: int) -> str:
         model = str(self.model or "").strip().lower()

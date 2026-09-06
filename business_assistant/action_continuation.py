@@ -911,18 +911,31 @@ def format_tool_user_text(*, family: str, data: Mapping[str, Any] | None, succes
         return _user_tool_error()
     payload = dict(data or {})
     if family == FAMILY_IMAGE_GENERATE:
-        urls = []
-        for key in ("view_url", "url"):
-            value = payload.get(key)
-            if isinstance(value, str) and value.startswith("/") or (
-                isinstance(value, str) and value.startswith("https://")
-            ):
-                urls.append(value)
-        for item in payload.get("assets") or payload.get("version_ids") or []:
-            if isinstance(item, dict):
-                url = str(item.get("view_url") or item.get("url") or "")
-                if url.startswith("/") or url.startswith("https://"):
-                    urls.append(url)
+        urls: list[str] = []
+        seen: set[str] = set()
+
+        def _add(url: str) -> None:
+            if (url.startswith("/") or url.startswith("https://")) and url not in seen:
+                seen.add(url)
+                urls.append(url)
+
+        # Prefer the per-item "assets" list (one dict per generated variant,
+        # each with its OWN view_url); it is a superset of the top-level
+        # "view_url"/"url" convenience mirror (== the first asset's URL).
+        # Consulting BOTH sources unconditionally previously double-added the
+        # first image's URL -- rendering the same generated image twice in a
+        # single-variant response. Bare "version_ids" (plain id strings, no
+        # per-item URL) fall back to the single top-level view_url/url.
+        assets = payload.get("assets")
+        if isinstance(assets, list) and assets:
+            for item in assets:
+                if isinstance(item, dict):
+                    _add(str(item.get("view_url") or item.get("url") or ""))
+        else:
+            for key in ("view_url", "url"):
+                value = payload.get(key)
+                if isinstance(value, str):
+                    _add(value)
         lines = [_user_success_image()]
         for url in urls[:8]:
             lines.append(f"![изображение]({url})")
