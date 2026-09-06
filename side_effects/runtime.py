@@ -311,6 +311,16 @@ class SideEffectRuntime:
             meta["b2b_commerce"] = dict(self.b2b_commerce_runtime.health())
         if self.payments_runtime is not None:
             meta["payments"] = dict(self.payments_runtime.health())
+        if self.product_media_service is not None:
+            try:
+                from product_media.readiness import check_image_generation_readiness
+
+                meta["image_generation_readiness"] = check_image_generation_readiness(
+                    env=os.environ,
+                    tool_registry=self.tool_registry,
+                ).as_dict()
+            except Exception:
+                pass
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,

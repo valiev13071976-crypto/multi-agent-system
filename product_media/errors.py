@@ -2,11 +2,22 @@
 
 from __future__ import annotations
 
+# Coarse failure-stage classification for safe structured diagnostics (never
+# a secret, never a full provider response body) -- reuses the existing
+# MediaError type rather than introducing a parallel exception hierarchy.
+STAGE_CONFIGURATION = "configuration"
+STAGE_PROVIDER_REQUEST = "provider_request"
+STAGE_PROVIDER_RESPONSE = "provider_response"
+STAGE_DECODE = "decode"
+STAGE_PERSISTENCE = "persistence"
+STAGE_ARTIFACT_DELIVERY = "artifact_delivery"
+
 
 class MediaError(RuntimeError):
-    def __init__(self, code: str, message: str = ""):
+    def __init__(self, code: str, message: str = "", *, stage: str = ""):
         self.code = code
         self.reason = code
+        self.stage = stage
         super().__init__(message or code)
 
 

@@ -2,8 +2,25 @@
 
 from __future__ import annotations
 
+import logging
+
 from product_media.errors import MediaBatchRequired, MediaError
 from tools.errors import ToolNotFoundError
+
+# Structured, secret-free diagnostics at the image-generation boundary. The existing
+# ProviderObservability/MediaObservability event buffers are in-memory only and never
+# reach Railway's log output; this uses the standard logging module (stdout) so the
+# NEXT production failure can be diagnosed from Railway logs without a code change.
+_log = logging.getLogger("product_media.image_generation")
+
+_SAFE_LOG_KEYS = ("event", "provider", "model", "request_id", "tool_id", "failure_stage", "error_type", "provider_error_code", "artifact_count", "persistence_status")
+
+
+def _log_image_event(**fields) -> None:
+    # Defense in depth: never let a logging call accidentally include a raw
+    # provider payload/base64/secret even if a future edit passes one in.
+    safe = {k: v for k, v in fields.items() if k in _SAFE_LOG_KEYS}
+    _log.info(" ".join(f"{k}={v}" for k, v in safe.items() if v not in (None, "")))
 
 # Relative path prefix for the safe, authorized artifact URL served by the existing
 # business_assistant_api auth boundary (session cookie or X-API-Key — see
@@ -51,9 +68,9 @@ class ProductMediaToolAdapter:
         tenant = self._tenant(request)
         op = request.operation
         if request.tool_id == _CHAT_IMAGE_GENERATE_TOOL_ID:
-            return self._chat_generate(tenant, args)
+            return self._chat_generate(tenant, args, request_id=str(getattr(request, "request_id", "") or ""))
         if request.tool_id == _CHAT_IMAGE_EDIT_TOOL_ID:
-            return self._chat_edit(tenant, args)
+            return self._chat_edit(tenant, args, request_id=str(getattr(request, "request_id", "") or ""))
         payload = {"tenant_id": tenant, **args}
         if op in {"get", "analyze", "find_similar", "find_duplicates"}:
             mapping = {
@@ -69,7 +86,22 @@ class ProductMediaToolAdapter:
             return self.service.dispatch(mapping.get(op, f"media.{op}"), payload)
         raise ToolNotFoundError("operation_not_supported")
 
-    def _chat_generate(self, tenant: str, args: dict) -> dict:
+    def _provider_id(self) -> str:
+        return str(getattr(getattr(self.service, "generator", None), "provider_id", "") or "unknown")
+
+    def _model_id(self) -> str:
+        return str(getattr(getattr(self.service, "generator", None), "model", "") or "")
+
+    def _chat_generate(self, tenant: str, args: dict, *, request_id: str = "") -> dict:
+        provider = self._provider_id()
+        model = self._model_id()
+        _log_image_event(
+            event="image_generation_started",
+            provider=provider,
+            model=model,
+            request_id=request_id,
+            tool_id=_CHAT_IMAGE_GENERATE_TOOL_ID,
+        )
         try:
             result = self.service.generate_from_brief(
                 tenant_id=tenant,
@@ -80,6 +112,16 @@ class ProductMediaToolAdapter:
                 media_brief_id=str(args.get("media_brief_id") or ""),
             )
         except MediaError as exc:
+            _log_image_event(
+                event="image_generation_failed",
+                failure_stage=str(getattr(exc, "stage", "") or "unknown"),
+                error_type=type(exc).__name__,
+                provider=provider,
+                model=model,
+                request_id=request_id,
+                tool_id=_CHAT_IMAGE_GENERATE_TOOL_ID,
+                provider_error_code=str(exc) or str(exc.code or ""),
+            )
             return {"status": "error", "reason": exc.code}
         version_ids = [str(v) for v in (result.get("version_ids") or [])]
         assets = []
@@ -87,14 +129,51 @@ class ProductMediaToolAdapter:
         for vid in version_ids:
             version = self.service.get(tenant_id=tenant, version_id=vid)
             mime_type = str(getattr(version, "mime_type", "") or mime_type)
+            view_url = media_view_url(vid)
+            if not view_url:
+                # Persisted asset exists but a safe authorized URL could not be
+                # produced -- artifact delivery has failed even though generation
+                # and persistence succeeded; do not surface a partial/broken asset.
+                _log_image_event(
+                    event="image_generation_failed",
+                    failure_stage="artifact_delivery",
+                    error_type="ImageArtifactDeliveryError",
+                    provider=provider,
+                    model=model,
+                    request_id=request_id,
+                    tool_id=_CHAT_IMAGE_GENERATE_TOOL_ID,
+                    provider_error_code="empty_view_url",
+                )
+                return {"status": "error", "reason": "MEDIA_GENERATION_FAILED"}
             assets.append(
                 {
                     "version_id": vid,
                     "artifact_type": "image",
                     "mime_type": mime_type,
-                    "view_url": media_view_url(vid),
+                    "view_url": view_url,
                 }
             )
+        if not assets:
+            _log_image_event(
+                event="image_generation_failed",
+                failure_stage="provider_response",
+                error_type="ImageProviderResponseError",
+                provider=provider,
+                model=model,
+                request_id=request_id,
+                tool_id=_CHAT_IMAGE_GENERATE_TOOL_ID,
+                provider_error_code="no_artifacts_produced",
+            )
+            return {"status": "error", "reason": "MEDIA_GENERATION_FAILED"}
+        _log_image_event(
+            event="image_generation_succeeded",
+            provider=provider,
+            model=model,
+            request_id=request_id,
+            tool_id=_CHAT_IMAGE_GENERATE_TOOL_ID,
+            artifact_count=len(assets),
+            persistence_status="success",
+        )
         return {
             "version_ids": version_ids,
             "assets": assets,
@@ -104,7 +183,9 @@ class ProductMediaToolAdapter:
             "failed": result.get("failed", 0),
         }
 
-    def _chat_edit(self, tenant: str, args: dict) -> dict:
+    def _chat_edit(self, tenant: str, args: dict, *, request_id: str = "") -> dict:
+        provider = self._provider_id()
+        model = self._model_id()
         try:
             version = self.service.edit(
                 tenant_id=tenant,
@@ -113,8 +194,39 @@ class ProductMediaToolAdapter:
                 mask_version_id=args.get("mask_version_id"),
             )
         except MediaError as exc:
+            _log_image_event(
+                event="image_generation_failed",
+                failure_stage=str(getattr(exc, "stage", "") or "unknown"),
+                error_type=type(exc).__name__,
+                provider=provider,
+                model=model,
+                request_id=request_id,
+                tool_id=_CHAT_IMAGE_EDIT_TOOL_ID,
+                provider_error_code=str(exc) or str(exc.code or ""),
+            )
             return {"status": "error", "reason": exc.code}
         url = media_view_url(version.version_id)
+        if not url:
+            _log_image_event(
+                event="image_generation_failed",
+                failure_stage="artifact_delivery",
+                error_type="ImageArtifactDeliveryError",
+                provider=provider,
+                model=model,
+                request_id=request_id,
+                tool_id=_CHAT_IMAGE_EDIT_TOOL_ID,
+                provider_error_code="empty_view_url",
+            )
+            return {"status": "error", "reason": "MEDIA_GENERATION_FAILED"}
+        _log_image_event(
+            event="image_generation_succeeded",
+            provider=provider,
+            model=model,
+            request_id=request_id,
+            tool_id=_CHAT_IMAGE_EDIT_TOOL_ID,
+            artifact_count=1,
+            persistence_status="success",
+        )
         return {
             "version_id": version.version_id,
             "version_ids": [version.version_id],

@@ -22,6 +22,8 @@ from product_media.errors import (
     MEDIA_REVIEW_REQUIRED,
     MEDIA_TRANSFORM_FAILED,
     MEDIA_CANCELLED,
+    STAGE_DECODE,
+    STAGE_PERSISTENCE,
     MediaError,
 )
 from product_media.fingerprint import compute_dhash
@@ -344,10 +346,16 @@ class ProductMediaService:
         self.obs.emit("media.generation.started", metadata={"variants": variant_count, "brief_id": media_brief_id})
         versions: list[str] = []
         failures = 0
+        last_error: MediaError | None = None
         for _ in range(variant_count):
             try:
                 result = self.generator.generate(prompt=scene_description, width=width, height=height)
-                validated = validate_and_extract_image(result.data, policy=self.policy)
+                try:
+                    validated = validate_and_extract_image(result.data, policy=self.policy)
+                except MediaError as exc:
+                    if not exc.stage:
+                        exc.stage = STAGE_DECODE
+                    raise
                 media_id = str(uuid.uuid4())
                 version_id = str(uuid.uuid4())
                 version = MediaAssetVersion(
@@ -367,18 +375,33 @@ class ProductMediaService:
                     artifact_id=version_id,
                     metadata_safe={"brief_id": media_brief_id, "prompt_excerpt": scene_description[:80]},
                 )
-                self.store.save_version(version, blob=validated.canonical_data)
+                try:
+                    self.store.save_version(version, blob=validated.canonical_data)
+                except MediaError:
+                    raise
+                except Exception as exc:
+                    # Persisted artifact storage failed even though generation succeeded --
+                    # the overall operation must still fail closed (no fake artifact), with
+                    # a typed, diagnosable stage instead of an unhandled crash.
+                    raise MediaError(MEDIA_GENERATION_FAILED, "persistence_failed", stage=STAGE_PERSISTENCE) from exc
                 self._index_fingerprint(version, validated.canonical_data)
                 versions.append(version_id)
-            except MediaError:
+            except MediaError as exc:
                 failures += 1
+                last_error = exc
         status = "completed" if failures == 0 else "partial"
         self.obs.emit(
             "media.generation.completed",
             metadata={"generated": len(versions), "failed": failures, "status": status},
         )
         if not versions and failures:
-            raise MediaError(MEDIA_GENERATION_FAILED)
+            # Preserve the specific failure's stage/reason (e.g. provider_request/http_400,
+            # provider_response/empty_image, decode/invalid_base64, persistence_failed) so
+            # callers can log an accurate failure_stage instead of a generic, undiagnosable
+            # MEDIA_GENERATION_FAILED with no further detail.
+            reason = str(last_error) if last_error is not None else ""
+            stage = getattr(last_error, "stage", "") or ""
+            raise MediaError(MEDIA_GENERATION_FAILED, reason, stage=stage) from last_error
         return {"version_ids": versions, "failed": failures, "status": status}
 
     def edit(
