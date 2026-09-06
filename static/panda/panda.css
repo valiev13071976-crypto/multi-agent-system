@@ -889,4 +889,66 @@ button.danger {
 @media (prefers-reduced-motion: reduce) {
   * { scroll-behavior: auto !important; }
   .pending-dot { animation: none; opacity: 0.85; }
+  .mic-btn.is-listening .mic-icon { animation: none; }
 }
+
+/* Block 4 — realtime voice: mic button state + live transcript caption. */
+.mic-btn.is-listening {
+  background: var(--danger);
+  color: #fff;
+}
+.mic-btn.is-listening .mic-icon { animation: panda-mic-pulse 1.2s ease-in-out infinite; }
+.mic-btn.is-thinking,
+.mic-btn.is-speaking {
+  background: var(--accent);
+  color: #fff;
+}
+.mic-btn.is-connecting { opacity: 0.6; cursor: wait; }
+.mic-btn.is-error { background: var(--danger); color: #fff; opacity: 0.7; }
+
+@keyframes panda-mic-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
+.voice-live-caption {
+  font-size: 0.85rem;
+  color: var(--text-secondary);
+  padding: 0.2rem 0.75rem 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.voice-live-caption.hidden { display: none; }
+
+.msg.assistant.streaming .body::after {
+  content: "▍";
+  margin-left: 0.1rem;
+  animation: panda-mic-pulse 1s steps(2) infinite;
+}
+
+/* Block 4.30 — personalization settings dialog. */
+.personalization-card {
+  width: min(26rem, 100%);
+  text-align: left;
+  display: grid;
+  gap: 0.6rem;
+  max-height: min(85vh, 640px);
+  overflow-y: auto;
+}
+.personalization-card h3 { margin: 0; font-size: 1.05rem; }
+.personalization-hint { margin: 0 0 0.25rem; font-size: 0.85rem; }
+.pz-field { display: grid; gap: 0.3rem; }
+.pz-field label { font-size: 0.85rem; color: var(--text-secondary); }
+.pz-field select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.4rem 0.55rem;
+  background: var(--surface);
+  color: var(--text-primary);
+  font: inherit;
+}
+.pz-voice-row { display: flex; gap: 0.5rem; align-items: center; }
+.pz-voice-row select { flex: 1; }

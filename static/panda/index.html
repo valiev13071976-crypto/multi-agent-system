@@ -48,6 +48,7 @@
         <button id="sidebar-toggle" type="button" class="icon-btn" aria-label="Открыть меню" aria-controls="sidebar" aria-expanded="false">☰</button>
         <h2 id="chat-title" class="chat-title">Новый чат</h2>
         <span id="request-status" class="status-pill" role="status" aria-live="polite"></span>
+        <button id="personalization-btn" type="button" class="icon-btn" aria-label="Настройки Panda" title="Настройки Panda">⚙</button>
       </header>
 
       <div class="chat-scroll">
@@ -99,12 +100,16 @@
       <footer class="composer-dock">
         <div class="composer chat-column" id="composer-shell">
           <div id="attachment-chips" class="attachment-chips" aria-label="Вложения"></div>
+          <div id="voice-live-caption" class="voice-live-caption hidden" role="status" aria-live="polite"></div>
           <div class="composer-row">
             <label class="composer-tool" for="file-input" aria-label="Прикрепить файл">
               <span aria-hidden="true">📎</span>
             </label>
             <input id="file-input" type="file" multiple hidden accept=".xlsx,.xls,.csv,.pdf,.docx,.png,.jpg,.jpeg,.webp,.txt">
             <textarea id="composer-input" rows="1" placeholder="Спросите Panda…" aria-label="Сообщение" enterkeyhint="send"></textarea>
+            <button id="mic-btn" type="button" class="composer-tool mic-btn" aria-label="Голосовой ввод" aria-pressed="false" title="Голосовой ввод">
+              <span aria-hidden="true" class="mic-icon">🎤</span>
+            </button>
             <button id="send-btn" type="button" class="composer-send" aria-label="Отправить" disabled>
               <span aria-hidden="true">➤</span>
             </button>
@@ -145,6 +150,63 @@
     </div>
   </div>
 
+  <div id="personalization-dialog" class="chat-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="personalization-title" hidden>
+    <div class="chat-confirm-card personalization-card">
+      <h3 id="personalization-title">Настройки Panda</h3>
+      <p class="muted personalization-hint">Как Panda общается с вами — стиль, тон, длина ответов, язык и голос.</p>
+      <div class="pz-field">
+        <label for="pz-style">Стиль общения</label>
+        <select id="pz-style">
+          <option value="default">Обычный</option>
+          <option value="professional">Деловой</option>
+          <option value="friendly">Дружелюбный</option>
+          <option value="concise">Лаконичный</option>
+          <option value="detailed">Подробный</option>
+        </select>
+      </div>
+      <div class="pz-field">
+        <label for="pz-tone">Тон</label>
+        <select id="pz-tone">
+          <option value="">Авто (по стилю)</option>
+          <option value="neutral">Нейтральный</option>
+          <option value="formal">Формальный</option>
+          <option value="conversational">Разговорный</option>
+          <option value="friendly">Дружелюбный</option>
+        </select>
+      </div>
+      <div class="pz-field">
+        <label for="pz-length">Длина ответа</label>
+        <select id="pz-length">
+          <option value="concise">Кратко</option>
+          <option value="balanced">Сбалансированно</option>
+          <option value="detailed">Подробно</option>
+        </select>
+      </div>
+      <div class="pz-field">
+        <label for="pz-language">Язык ответа</label>
+        <select id="pz-language">
+          <option value="auto">Авто (как пишете вы)</option>
+          <option value="ru">Русский</option>
+          <option value="en">English</option>
+        </select>
+      </div>
+      <div class="pz-field">
+        <label for="pz-voice">Голос Panda</label>
+        <div class="pz-voice-row">
+          <select id="pz-voice"></select>
+          <button id="pz-voice-preview" type="button" class="icon-btn" aria-label="Прослушать голос" title="Прослушать голос">▶</button>
+        </div>
+      </div>
+      <p id="personalization-error" class="error-text" role="alert"></p>
+      <div class="chat-confirm-actions">
+        <button type="button" id="personalization-save" class="primary">Сохранить</button>
+        <button type="button" id="personalization-cancel">Отмена</button>
+      </div>
+    </div>
+  </div>
+
+  <audio id="realtime-audio-player" hidden></audio>
+
   <script src="/static/shared/brand.js"></script>
   <script src="/static/shared/copy.js"></script>
   <script src="/static/shared/presentation.js"></script>
@@ -152,6 +214,8 @@
   <script src="/static/panda/js/sanitize.js"></script>
   <script src="/static/panda/js/api-client.js"></script>
   <script src="/static/panda/js/components.js"></script>
+  <script src="/static/panda/js/realtime.js"></script>
+  <script src="/static/panda/js/personalization.js"></script>
   <script src="/static/panda/js/app.js"></script>
 </body>
 </html>
