@@ -101,6 +101,11 @@ const documentStub = {
   createElement(tag) {
     return new NodeStub(tag);
   },
+  createElementNS(ns, tag) {
+    const node = new NodeStub(tag);
+    node.namespaceURI = ns;
+    return node;
+  },
   createTextNode(text) {
     return new TextNodeStub(text);
   },
@@ -127,7 +132,7 @@ loadScript("static/panda/js/sanitize.js");
 loadScript("static/panda/js/components.js");
 
 function serialize(node) {
-  const out = { imgs: [], anchors: [], texts: [], pres: [], buttons: [], spans: [] };
+  const out = { imgs: [], anchors: [], texts: [], pres: [], buttons: [], spans: [], svgs: [] };
   function walk(n) {
     if (!n) return;
     if (n.nodeType === 3) {
@@ -176,6 +181,15 @@ function serialize(node) {
     }
     if (n.tagName === "pre") {
       out.pres.push(n.textContent);
+    }
+    if (n.tagName === "svg") {
+      out.svgs.push({
+        className: n.className,
+        viewBox: n.getAttribute("viewBox") ?? null,
+        ariaHidden: n.getAttribute("aria-hidden") ?? null,
+        stroke: n.getAttribute("stroke") ?? null,
+        pathCount: (n.children || []).filter((c) => c.tagName === "path").length,
+      });
     }
     (n.children || []).forEach(walk);
   }

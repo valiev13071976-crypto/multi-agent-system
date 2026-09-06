@@ -346,17 +346,43 @@ html.panda-chat body {
    never as a detached row underneath it. .msg-image-wrap without
    .has-actions (e.g. uploaded attachment thumbnails) is unaffected. The
    wrap is the shared positioning context for both overlays -- coordinates
-   below are relative to the image container, never the message card. */
+   below are relative to the image container, never the message card.
+   overflow: hidden + a matching border-radius clip the bottom gradient
+   (::after, below) to the same rounded corners as the <img> itself, so the
+   gradient reads as part of the image, not a separate rectangle. */
 .msg-image-wrap.has-actions {
   position: relative;
   display: inline-block;
   max-width: 100%;
   line-height: 0;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+
+/* Reference-parity bottom fade: a purely decorative gradient layer inside
+   the image boundary that the reference composition uses to integrate the
+   action controls with arbitrary underlying image content -- transparent
+   over the upper part of the image, darkening toward the bottom edge.
+   pointer-events: none is mandatory: this layer must never intercept
+   clicks meant for the lightbox-open image beneath it. z-index: 0 keeps it
+   below the controls (z-index: 1) while staying above the plain <img>. */
+.msg-image-wrap.has-actions::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: linear-gradient(
+    to bottom,
+    rgba(0, 0, 0, 0) 58%,
+    rgba(0, 0, 0, 0.32) 80%,
+    rgba(0, 0, 0, 0.58) 100%
+  );
 }
 
 .msg-image-overlay {
   position: absolute;
-  bottom: 0.55rem;
+  bottom: 0.75rem;
   z-index: 1;
   display: inline-flex;
   align-items: center;
@@ -390,9 +416,9 @@ html.panda-chat body {
    and asserting a real line-height here fixes it without touching the
    shared .msg-image-overlay rule or any other control. */
 .msg-image-edit-btn {
-  left: 0.55rem;
-  max-width: calc(100% - 3.4rem);
-  padding: 0.4rem 0.85rem;
+  left: 0.75rem;
+  max-width: calc(100% - 3.75rem);
+  padding: 0.45rem 0.95rem;
   border-radius: 999px;
   font-family: inherit;
   font-weight: 500;
@@ -403,17 +429,25 @@ html.panda-chat body {
   text-overflow: ellipsis;
 }
 
-/* Download: icon-only circular control, bottom-right, inset from the
-   image edges. */
+/* Download: circular control, bottom-right, inset from the image edges.
+   Icon is an inline SVG (see sanitize.js) rendered via `currentColor` so it
+   always matches this rule's `color`, never a Unicode glyph (font/emoji
+   rendering of "⬇"/"⇩" is inconsistent across OSes and does not reproduce
+   the reference's tray-style download icon). */
 .msg-image-download-btn {
-  right: 0.55rem;
-  width: 2.1rem;
-  height: 2.1rem;
+  right: 0.75rem;
+  width: 2.2rem;
+  height: 2.2rem;
   border-radius: 50%;
-  font-size: 1.05rem;
   line-height: 1;
   text-decoration: none;
   flex: 0 0 auto;
+}
+
+.msg-image-download-btn svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  display: block;
 }
 
 /* Root-cause fix (production visual acceptance defect): the pre-existing

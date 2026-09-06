@@ -90,7 +90,18 @@ class FrontendProbeTests(unittest.TestCase):
         r = results["img"]
         self.assertEqual(len(r["anchors"]), 1)
         dl = r["anchors"][0]
-        self.assertEqual(dl["text"], "⬇", "Download must be icon-only per the ChatGPT reference")
+        # Reference-parity closure: Download must be icon-only, and that icon
+        # must be a real tray-style SVG, never a Unicode arrow glyph (font/
+        # emoji rendering of "⬇"/"⇩" is inconsistent across OSes).
+        self.assertEqual(dl["text"], "", "Download must be icon-only (no visible text)")
+        self.assertNotIn("⬇", dl["text"])
+        self.assertNotIn("⇩", dl["text"])
+        self.assertEqual(len(r["svgs"]), 1, "exactly one SVG download icon, no duplicates")
+        icon = r["svgs"][0]
+        self.assertEqual(icon["viewBox"], "0 0 24 24")
+        self.assertEqual(icon["ariaHidden"], "true", "icon is decorative; accessible name comes from aria-label")
+        self.assertEqual(icon["stroke"], "currentColor", "icon must inherit the control's foreground color")
+        self.assertGreaterEqual(icon["pathCount"], 2, "arrow + tray strokes present (tray-style download icon)")
         self.assertIn("msg-image-download-btn", dl["className"])
         self.assertIn("msg-image-overlay", dl["className"])
         self.assertEqual(dl["download"], "")
@@ -269,6 +280,35 @@ class StaticWiringTests(unittest.TestCase):
         # Old pill/toolbar-underneath-image layout must be gone.
         self.assertNotIn(".msg-image-actions {", css)
         self.assertNotIn(".msg-image-action {", css)
+
+    # -- Reference-parity closure: bottom gradient + real SVG icon ----------
+
+    def test_css_bottom_gradient_is_decorative_and_layered_below_controls(self):
+        css = _read("static", "panda", "panda.css")
+        self.assertIn(".msg-image-wrap.has-actions::after {", css)
+        gradient_rule = css.split(".msg-image-wrap.has-actions::after {", 1)[1].split("}", 1)[0]
+        self.assertIn("pointer-events: none", gradient_rule, "gradient must never intercept clicks")
+        self.assertIn("position: absolute", gradient_rule)
+        self.assertIn("linear-gradient(", gradient_rule)
+        self.assertIn("z-index: 0", gradient_rule, "must sit below the z-index: 1 controls")
+        overlay_rule = css.split(".msg-image-overlay {", 1)[1].split("}", 1)[0]
+        self.assertIn("z-index: 1", overlay_rule, "controls must render above the decorative gradient")
+        # The wrap clips both the <img> and the gradient to the same rounded
+        # corners so the gradient reads as part of the image, not a separate
+        # rectangle glued underneath it.
+        wrap_rule = css.split(".msg-image-wrap.has-actions {", 1)[1].split("}", 1)[0]
+        self.assertIn("overflow: hidden", wrap_rule)
+        self.assertIn("border-radius:", wrap_rule)
+
+    def test_sanitize_js_never_uses_unicode_arrow_glyph_for_download_icon(self):
+        js = _read("static", "panda", "js", "sanitize.js")
+        # Only permitted inside the explanatory comment listing the glyphs
+        # this closure explicitly forbids as *rendered content* -- never as
+        # an actual assigned textContent/attribute value.
+        self.assertNotIn('textContent = "⬇"', js)
+        self.assertNotIn('textContent = "⇩"', js)
+        self.assertIn("createElementNS", js, "download icon must be a real SVG, not a text glyph")
+        self.assertIn("createDownloadIcon", js)
 
     def test_css_pending_dot_is_small_animated_and_respects_reduced_motion(self):
         css = _read("static", "panda", "panda.css")

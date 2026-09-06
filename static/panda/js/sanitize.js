@@ -21,6 +21,37 @@
     });
   }
 
+  // Reference-parity closure: the Download control must render a real
+  // tray-style download icon, never a Unicode arrow glyph ("⬇"/"⇩"), whose
+  // appearance is inconsistent across OS/browser emoji fonts. Built via
+  // createElementNS (SVG namespace) rather than innerHTML, consistent with
+  // this file's "never inject raw HTML" invariant -- every node here is
+  // constructed programmatically, never parsed from a string. stroke uses
+  // currentColor so the icon always matches .msg-image-download-btn's own
+  // `color` (see panda.css) with no separate color to keep in sync.
+  function createDownloadIcon() {
+    const svgNs = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(svgNs, "svg");
+    svg.setAttribute("viewBox", "0 0 24 24");
+    svg.setAttribute("fill", "none");
+    svg.setAttribute("stroke", "currentColor");
+    svg.setAttribute("stroke-width", "2");
+    svg.setAttribute("stroke-linecap", "round");
+    svg.setAttribute("stroke-linejoin", "round");
+    svg.setAttribute("aria-hidden", "true");
+    svg.setAttribute("focusable", "false");
+    const stem = document.createElementNS(svgNs, "path");
+    stem.setAttribute("d", "M12 3v11");
+    const arrowhead = document.createElementNS(svgNs, "path");
+    arrowhead.setAttribute("d", "M7 10l5 5 5-5");
+    const tray = document.createElementNS(svgNs, "path");
+    tray.setAttribute("d", "M5 20h14");
+    svg.appendChild(stem);
+    svg.appendChild(arrowhead);
+    svg.appendChild(tray);
+    return svg;
+  }
+
   function renderRichText(el, text) {
     el.textContent = "";
     const blocks = String(text ?? "").split(/```/);
@@ -88,7 +119,7 @@
             downloadBtn.setAttribute("download", "");
             downloadBtn.title = "Скачать изображение";
             downloadBtn.setAttribute("aria-label", "Скачать изображение");
-            downloadBtn.textContent = "⬇";
+            downloadBtn.appendChild(createDownloadIcon());
             wrap.appendChild(downloadBtn);
           }
           el.appendChild(wrap);
