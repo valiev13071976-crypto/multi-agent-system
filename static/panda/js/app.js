@@ -649,6 +649,9 @@
               .filter((a) => a && (a.artifact_type === "image" || a.type === "image"))
               .map((a) => String(a.view_url || a.url || "").trim())
               .filter((u) => u.startsWith("/") || u.startsWith("https://"))
+              // The assistant text (bubble) may already embed this exact artifact link
+              // (see format_tool_user_text); never render the same image twice.
+              .filter((u) => !bubble.includes(u))
               .map((u) => `![изображение](${u})`);
             if (imageLines.length) {
               content = [bubble, ...imageLines].filter(Boolean).join("\n");

@@ -933,6 +933,31 @@ def format_tool_user_text(*, family: str, data: Mapping[str, Any] | None, succes
 def artifacts_from_tool_data(data: Mapping[str, Any] | None, *, tool_id: str) -> list[dict[str, Any]]:
     payload = dict(data or {})
     out: list[dict[str, Any]] = []
+    # Prefer the per-item "assets" list (ProductMediaToolAdapter always provides one) so
+    # each artifact gets its OWN view_url/mime_type. The version_ids-only fallback below
+    # previously reused the single top-level "view_url" (the first generated image) for
+    # every version_id -- correct for variant_count=1, but silently wrong for >1 variants
+    # (every additional generated image pointed at the first image's URL).
+    assets = payload.get("assets")
+    if isinstance(assets, list) and assets:
+        for item in assets:
+            if not isinstance(item, dict):
+                continue
+            vid = str(item.get("version_id") or item.get("ref") or "")
+            if not vid:
+                continue
+            out.append(
+                {
+                    "type": "image",
+                    "artifact_type": str(item.get("artifact_type") or "image"),
+                    "ref": vid,
+                    "artifact_id": vid,
+                    "mime_type": str(item.get("mime_type") or payload.get("mime_type") or "image/png"),
+                    "view_url": str(item.get("view_url") or ""),
+                }
+            )
+        if out:
+            return out
     version_ids = list(payload.get("version_ids") or [])
     if not version_ids and payload.get("version_id"):
         version_ids = [payload.get("version_id")]

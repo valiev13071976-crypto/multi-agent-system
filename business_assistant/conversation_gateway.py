@@ -301,7 +301,7 @@ class WorkflowPandaConversationGateway:
                 },
             )
         provided = ()
-        from business_assistant.action_continuation import CONTRACTS
+        from business_assistant.action_continuation import CONTRACTS, RISK_GENERATE
 
         contract = CONTRACTS.get(family)
         if contract is not None:
@@ -347,9 +347,28 @@ class WorkflowPandaConversationGateway:
                 task_id=getattr(task, "task_id", None),
                 metadata={"action_decision": "REQUEST_APPROVAL", "artifacts": []},
             )
+        artifacts = artifacts_from_tool_data(data, tool_id=action.tool_id) if success else []
+        # Strict artifact-required success invariant for artifact-generating capabilities
+        # (risk=RISK_GENERATE, e.g. image.generate/image.edit -- not generic read/search/write
+        # tools). The ToolGateway only reports "no exception raised" as success; adapters such
+        # as ProductMediaToolAdapter can legitimately return {"status": "error", ...} without
+        # raising when the provider/persistence chain yields no usable image. artifacts_from_
+        # tool_data() falls back to a generic "tool_result" pseudo-artifact for ANY non-empty
+        # payload (including that error dict), so success must require an artifact of the
+        # capability's declared artifact_type specifically -- never say "Готово."/cache
+        # idempotent success without at least one real, persisted image artifact.
+        if success and contract is not None and contract.risk == RISK_GENERATE:
+            required_type = contract.artifact_type
+            has_required_artifact = (
+                any(str(a.get("artifact_type") or a.get("type") or "") == required_type for a in artifacts)
+                if required_type
+                else bool(artifacts)
+            )
+            if not has_required_artifact:
+                success = False
+                artifacts = []
         if idem and success:
             self._executed_keys.add(idem)
-        artifacts = artifacts_from_tool_data(data, tool_id=action.tool_id) if success else []
         if task is not None:
             mark_executed(
                 self._action_store,
