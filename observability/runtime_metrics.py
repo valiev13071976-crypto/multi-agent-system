@@ -110,6 +110,11 @@ def collect_queue_snapshot(queue_or_store) -> dict[str, Any]:
     elif hasattr(store, "count_by_status"):
         try:
             counts = store.count_by_status()
+            dlq_depth = 0
+            try:
+                dlq_depth = len(store.get_dead_letters())
+            except Exception:
+                dlq_depth = 0
             return {
                 "queue_depth_by_lane": dict(counts.get("pending_by_lane") or {}),
                 "running_by_lane": dict(counts.get("running_by_lane") or {}),
@@ -121,6 +126,7 @@ def collect_queue_snapshot(queue_or_store) -> dict[str, Any]:
                 "interactive_oldest_queue_age": None,
                 "sqlite_busy_count": getattr(store, "sqlite_busy_count", 0),
                 "capacity_throttle_count": getattr(store, "capacity_throttle_count", 0),
+                "dlq_depth": dlq_depth,
             }
         except Exception:
             pass
@@ -156,6 +162,16 @@ def collect_queue_snapshot(queue_or_store) -> dict[str, Any]:
             running_global += 1
             running_by_tenant[tenant] = running_by_tenant.get(tenant, 0) + 1
 
+    dlq_depth = 0
+    try:
+        dlq_getter = getattr(store, "get_dead_letters", None)
+        if callable(dlq_getter):
+            dlq_depth = len(dlq_getter())
+        else:
+            dlq_depth = sum(1 for item in items if getattr(item, "status", "") == "dead_lettered")
+    except Exception:
+        dlq_depth = 0
+
     return {
         "queue_depth_by_lane": depth_by_lane,
         "oldest_queue_age_by_lane": oldest_age_by_lane,
@@ -166,6 +182,7 @@ def collect_queue_snapshot(queue_or_store) -> dict[str, Any]:
         "interactive_oldest_queue_age": interactive_oldest,
         "sqlite_busy_count": getattr(store, "sqlite_busy_count", 0),
         "capacity_throttle_count": getattr(store, "capacity_throttle_count", 0),
+        "dlq_depth": dlq_depth,
     }
 
 
@@ -176,6 +193,7 @@ def collect_operational_metrics(
     metrics_registry: RuntimeMetricsRegistry | None = None,
     health_tracker=None,
     runtime_stats=None,
+    fleet_registry=None,
 ) -> dict[str, Any]:
     from agents.routing_state_scope import routing_coordination_capabilities
 
@@ -183,6 +201,27 @@ def collect_operational_metrics(
     wr = getattr(side_effect_runtime, "workflow_runtime", None) if side_effect_runtime else None
     queue = getattr(wr, "queue", None) if wr is not None else None
     qsnap = collect_queue_snapshot(queue) if queue is not None else {}
+
+    # Scale 3.34: lane-bounded queue/runtime lifecycle counters (never keyed
+    # by request/run/task id or raw tenant id).
+    try:
+        from runtime.metrics import RUNTIME_COUNTERS
+
+        queue_lifecycle_counters = RUNTIME_COUNTERS.as_dict()
+    except Exception:
+        queue_lifecycle_counters = {}
+
+    # Scale 3.29/3.31: fleet-wide instance visibility, bounded (no per-tenant
+    # cardinality; instance_id is a small, bounded set in practice).
+    fleet_summary: dict[str, Any] = {}
+    fr = fleet_registry or getattr(side_effect_runtime, "fleet_registry", None)
+    if fr is not None:
+        try:
+            fleet_summary = fr.fleet_summary()
+        except Exception:
+            fleet_summary = {}
+
+    worker_drain_state = bool(getattr(wr, "_claims_stopped", False)) if wr is not None else False
 
     breaker_states = {}
     provider_active = 0
@@ -228,6 +267,16 @@ def collect_operational_metrics(
         "budget_reservation_latency": reg.budget_reserve_latency.as_dict(),
         "governor_acquire_latency": reg.governor_acquire_latency.as_dict(),
         "routing_coordination": routing_caps,
+        # Scale 3.34: lane-bounded lifecycle counters (enqueue/claim/complete/
+        # fail/retry/dlq/reclaim/quota_reject/overload_reject/redrive/load_shed).
+        "queue_lifecycle_counters": queue_lifecycle_counters,
+        # Scale 3.29/3.31: fleet-wide instance visibility (bounded cardinality;
+        # empty dict when no fleet_registry is configured -- single-instance
+        # mode is unaffected).
+        "fleet_summary": fleet_summary,
+        # Scale 3.33: local process drain flag surfaced alongside fleet-wide
+        # readiness/liveness signals for operator dashboards.
+        "worker_drain_state": worker_drain_state,
         "interactive_slo": {
             "interactive_queue_wait": reg.interactive_queue_wait.as_dict(),
             "interactive_execution_latency": reg.interactive_execution_latency.as_dict(),
