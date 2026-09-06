@@ -36,6 +36,12 @@ class CapacitySnapshot:
     dlq_depth: int = 0
     running_by_lane: dict[str, int] = field(default_factory=dict)
     checked_at: str = ""
+    # Optional per-pool concurrency signal (Scale 3.15/3.24), e.g.
+    # {"interactive": {"pool_name": "interactive", "max_concurrency": 3,
+    # "active": 1, "available": 2, "draining": False}}. Populated only when a
+    # caller supplies live WorkflowRuntimeBundle.concurrency_snapshot() data;
+    # empty otherwise (no behavior change for existing callers).
+    pool_concurrency: dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, Any]:
         return {
@@ -48,6 +54,7 @@ class CapacitySnapshot:
             "dlq_depth": int(self.dlq_depth),
             "running_by_lane": dict(self.running_by_lane),
             "checked_at": self.checked_at,
+            "pool_concurrency": dict(self.pool_concurrency),
         }
 
 
@@ -57,6 +64,7 @@ def build_capacity_snapshot(
     admission_metrics: Mapping[str, int] | None = None,
     max_running_global: int | None = None,
     now: datetime | None = None,
+    pool_concurrency: Mapping[str, Mapping[str, Any]] | None = None,
 ) -> CapacitySnapshot:
     stamp = now or _utc_now()
     store = getattr(queue, "store", None)
@@ -147,4 +155,7 @@ def build_capacity_snapshot(
         dlq_depth=dlq,
         running_by_lane=running,
         checked_at=stamp.isoformat(),
+        pool_concurrency={
+            str(k): dict(v) for k, v in dict(pool_concurrency or {}).items()
+        },
     )

@@ -16,6 +16,7 @@ from task_queue.lanes import (
     LaneCapacityConfig,
     parse_worker_lanes,
 )
+from task_queue.pools import PoolConfig
 from workflow.admission import AdmissionLimits
 from workflow.runtime_role import (
     ROLE_API,
@@ -148,6 +149,8 @@ class RuntimeConfig:
     admission: AdmissionLimits
     lane_capacity: LaneCapacityConfig
     governor: GovernorLimits
+    worker_pool_name: str
+    worker_pool_max_concurrency: int
     lease_seconds: float
     heartbeat_interval_seconds: float
     poll_interval_seconds: float
@@ -224,6 +227,9 @@ def validate_runtime_config(
     admission = AdmissionLimits.from_env(merged)
     lane_cfg = LaneCapacityConfig.from_env(merged)
     governor = GovernorLimits.from_env(merged)
+    # PoolConfig.from_env already clamps to a safe (>=1) default; no separate
+    # error branch is needed since it never yields an invalid value (Scale 3.15).
+    pool_cfg = PoolConfig.from_env(merged)
 
     lease = _env_float(merged, "WORKER_LEASE_SECONDS", 300.0)
     heartbeat = _env_float(merged, "WORKER_HEARTBEAT_INTERVAL_SECONDS", 30.0)
@@ -299,6 +305,8 @@ def validate_runtime_config(
         side_effect_db_path=db,
         budget_db_path=budget_db,
         governor_db_path=gov_db,
+        worker_pool_name=pool_cfg.name,
+        worker_pool_max_concurrency=pool_cfg.max_concurrency,
         errors=tuple(errors),
         warnings=tuple(warnings),
     )

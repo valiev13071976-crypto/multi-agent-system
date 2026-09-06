@@ -6,6 +6,7 @@ import asyncio
 import os
 import uuid
 from dataclasses import dataclass, field
+from typing import Any
 
 from task_queue.errors import QueueDuplicateExecutionError
 from task_queue.models import PRIORITY_NORMAL
@@ -57,6 +58,9 @@ class WorkflowRuntimeBundle:
     _worker_task: asyncio.Task | None = field(default=None, repr=False)
     _scheduler_task: asyncio.Task | None = field(default=None, repr=False)
     _stop: asyncio.Event | None = field(default=None, repr=False)
+    # Bounded set of concurrently-executing worker slots (Scale 3.15). Size is
+    # capped at worker.config.max_concurrency; never unbounded.
+    _inflight: set = field(default_factory=set, repr=False)
     _startup_recovery_ran: bool = field(default=False, repr=False)
     last_startup_recovery_error: str | None = field(default=None, repr=False)
     last_startup_recovery_result: dict | None = field(default=None, repr=False)
@@ -109,12 +113,28 @@ class WorkflowRuntimeBundle:
                 metadata=meta,
             )
 
+    def _pool_max_concurrency(self) -> int:
+        """Deterministic, always-safe (>=1) pool concurrency limit (Scale 3.15)."""
+
+        raw = getattr(self.worker.config, "max_concurrency", 1)
+        try:
+            return max(1, int(raw or 1))
+        except (TypeError, ValueError):
+            return 1
+
+    async def _run_worker_slot(self) -> None:
+        try:
+            await self.worker.run_once()
+        except Exception:
+            pass
+
     async def start_background(self, *, poll_interval: float = 0.25) -> None:
         if self._worker_task is not None:
             return
         if not role_runs_worker_loops(self.runtime_role):
             return
         self._claims_stopped = False
+        self._inflight = set()
         # Startup: recover + re-enqueue before draining the queue (worker/combined only).
         try:
             self.recover_and_reenqueue_persisted()
@@ -129,17 +149,53 @@ class WorkflowRuntimeBundle:
                         await self.tick_schedules()
                         self.reenqueue_due_retries()
                         self.queue.recover_stuck_running(force=False)
-                        await self.worker.run_once()
+                        limit = self._pool_max_concurrency()
+                        # Drop finished slots, then top up to the pool's concurrency
+                        # limit. Each slot claims and executes at most one task, so
+                        # the number of concurrently in-flight tasks for this pool
+                        # never exceeds `limit` (Scale 3.15 deterministic enforcement).
+                        self._inflight = {t for t in self._inflight if not t.done()}
+                        while len(self._inflight) < limit:
+                            self._inflight.add(
+                                asyncio.create_task(self._run_worker_slot())
+                            )
                 except Exception:
                     pass
                 await asyncio.sleep(poll_interval)
 
         self._worker_task = asyncio.create_task(_loop())
 
-    async def stop_background(self) -> None:
+    def concurrency_snapshot(self) -> dict[str, Any]:
+        """Stable pool-concurrency signal (Scale 3.15 / 3.24 autoscaling contract)."""
+
+        limit = self._pool_max_concurrency()
+        active = sum(1 for t in self._inflight if not t.done())
+        return {
+            "pool_name": getattr(self.worker.config, "pool_name", ""),
+            "max_concurrency": limit,
+            "active": active,
+            "available": max(0, limit - active),
+            "draining": bool(self._claims_stopped),
+        }
+
+    async def stop_background(self, *, drain_timeout_seconds: float = 5.0) -> None:
+        """Bounded graceful drain: stop new claims, await in-flight, then stop.
+
+        A permanently-stuck handler must never block shutdown forever -- any
+        slot still running once `drain_timeout_seconds` elapses is cancelled
+        (its durable lease simply expires and is reclaimed on restart via the
+        existing lease-recovery contract; see recover_stuck_running/3.26).
+        """
+
         self.stop_new_claims()
         if self._stop is not None:
             self._stop.set()
+        pending = [t for t in self._inflight if not t.done()]
+        if pending:
+            try:
+                await asyncio.wait(pending, timeout=max(0.0, float(drain_timeout_seconds)))
+            except Exception:
+                pass
         if self._worker_task is not None:
             self._worker_task.cancel()
             try:
@@ -147,6 +203,10 @@ class WorkflowRuntimeBundle:
             except asyncio.CancelledError:
                 pass
             self._worker_task = None
+        for t in list(self._inflight):
+            if not t.done():
+                t.cancel()
+        self._inflight = {t for t in self._inflight if not t.done()}
 
     def stop_new_claims(self) -> None:
         """Graceful worker shutdown: stop scheduler/queue claims; leases remain."""
@@ -914,11 +974,21 @@ def build_workflow_runtime(
         tq.lane_config = lane_cfg
     if getattr(tq, "allowed_lanes", None) is None:
         tq.allowed_lanes = worker_lanes
+    from task_queue.pools import PoolConfig
+
+    # Pool identity/concurrency (Scale 3.14/3.15) is resolved independently of
+    # lane membership above: `worker_lanes` (WORKER_LANES) already governs which
+    # lanes this process may claim, so `allowed_lanes` is left unset here to
+    # avoid overriding that queue-level binding (see TaskWorker.__init__).
+    pool_cfg = PoolConfig.from_env(env)
     worker = TaskWorker(
         tq,
         engine=workflow_engine,
         registry=registry,
-        config=WorkerConfig(max_concurrency=1),
+        config=WorkerConfig(
+            max_concurrency=pool_cfg.max_concurrency,
+            pool_name=pool_cfg.name,
+        ),
     )
     return WorkflowRuntimeBundle(
         platform=platform,
