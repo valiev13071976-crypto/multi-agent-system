@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from dataclasses import dataclass, field
 from types import MappingProxyType
@@ -36,6 +37,14 @@ from tools.router import ToolRouter
 from observability.runtime import ObservabilityRuntime, build_observability_runtime
 from workflow.engine import WorkflowEngine
 from workflow.state_manager import StateManager
+
+
+# Standard logging (stdout) so a product_media construction failure -- e.g. a
+# fail-closed CONFIGURATION_ERROR from a missing image-provider API key, or any
+# other startup defect -- reaches Railway's log output instead of vanishing into
+# the bare except below with zero trace. See the except block around
+# build_product_media_runtime() for the failure mode this diagnoses.
+_log = logging.getLogger("side_effects.runtime")
 
 
 def _meta(value):
@@ -160,6 +169,7 @@ class SideEffectRuntime:
     b2b_commerce_runtime: object | None = None
     payments_runtime: object | None = None
     product_media_service: object | None = None
+    product_media_construction_error: str = ""
     _start_completed: bool = field(default=False, repr=False)
 
     def health(self):
@@ -311,16 +321,30 @@ class SideEffectRuntime:
             meta["b2b_commerce"] = dict(self.b2b_commerce_runtime.health())
         if self.payments_runtime is not None:
             meta["payments"] = dict(self.payments_runtime.health())
-        if self.product_media_service is not None:
-            try:
-                from product_media.readiness import check_image_generation_readiness
+        # Always evaluate readiness (env/registry inspection only, no network, no
+        # dependency on product_media_service) so a construction failure -- the exact
+        # case that most needs a diagnosable signal -- is never hidden by this being
+        # gated on the very service instance that failed to come up.
+        try:
+            from product_media.readiness import check_image_generation_readiness
 
-                meta["image_generation_readiness"] = check_image_generation_readiness(
-                    env=os.environ,
-                    tool_registry=self.tool_registry,
-                ).as_dict()
-            except Exception:
-                pass
+            readiness = check_image_generation_readiness(
+                env=os.environ,
+                tool_registry=self.tool_registry,
+            ).as_dict()
+            readiness["reasons"].append(
+                "PRODUCT_MEDIA_SERVICE="
+                + (
+                    "CONSTRUCTED"
+                    if self.product_media_service is not None
+                    else f"CONSTRUCTION_FAILED({self.product_media_construction_error or 'unknown'})"
+                )
+            )
+            if self.product_media_service is None:
+                readiness["status"] = "NOT_READY"
+            meta["image_generation_readiness"] = readiness
+        except Exception:
+            pass
         return type(health)(
             adapter_id=health.adapter_id,
             activation_state=health.activation_state,
@@ -803,6 +827,7 @@ def _finalize_runtime(
 
     content_intelligence_runtime = None
     product_media_runtime = None
+    product_media_construction_error = ""
     try:
         from product_media.runtime import build_product_media_runtime
 
@@ -810,8 +835,27 @@ def _finalize_runtime(
         pm_path = str(_pm_env.get("PRODUCT_MEDIA_DB_PATH") or ":memory:")
         product_media_runtime = build_product_media_runtime(db_path=pm_path)
         engine.product_media_service = product_media_runtime
-    except Exception:
+    except Exception as exc:
+        # This previously swallowed EVERY construction failure silently --
+        # including the intentional fail-closed ProductionProviderError raised
+        # by build_image_provider() when MEDIA_IMAGE_PROVIDER is set to a real
+        # provider (e.g. "openai") but the API key is missing/misconfigured, and
+        # any other startup defect (e.g. an unwritable PRODUCT_MEDIA_DB_PATH
+        # directory). image.generate then became permanently unavailable with
+        # ZERO log trace anywhere: every real request failed closed with the
+        # generic "Не получилось выполнить действие", matching reports of
+        # HTTP 200s with no visible provider/media exception in application
+        # logs. str(exc) here is safe -- ProductionProviderError.__str__ is
+        # "{category}:{provider_id}:{message}" (no secret values ever placed
+        # in message), and other realistic construction exceptions (sqlite
+        # path errors, etc.) carry no credentials either.
         product_media_runtime = None
+        product_media_construction_error = f"{type(exc).__name__}:{exc}"
+        _log.error(
+            "event=product_media_construction_failed error_type=%s error_message_safe=%s",
+            type(exc).__name__,
+            exc,
+        )
 
     try:
         from content_intel.runtime import build_content_intelligence_runtime
@@ -1102,6 +1146,7 @@ def _finalize_runtime(
         b2b_commerce_runtime=b2b_commerce_runtime,
         payments_runtime=payments_runtime,
         product_media_service=product_media_runtime,
+        product_media_construction_error=product_media_construction_error,
     )
 
 
