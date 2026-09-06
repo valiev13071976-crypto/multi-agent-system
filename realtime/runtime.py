@@ -6,6 +6,7 @@ import os
 from dataclasses import dataclass
 
 from business_assistant_api.service import BusinessAssistantApiService
+from finops.service import FinOpsService
 from integrations.production.adapters.speech import build_speech_providers
 from ui_chat.voice.stt import SpeechToTextProvider
 from ui_chat.voice.tts import TextToSpeechProvider
@@ -28,6 +29,7 @@ def build_realtime_runtime(
     *,
     ba_api: BusinessAssistantApiService,
     personalization: PersonalizationService | None = None,
+    finops: FinOpsService | None = None,
     env: dict | None = None,
     stt: SpeechToTextProvider | None = None,
     tts: TextToSpeechProvider | None = None,
@@ -37,5 +39,7 @@ def build_realtime_runtime(
         built_stt, built_tts = build_speech_providers(env)
         stt = stt or built_stt
         tts = tts or built_tts
-    bridge = RealtimeConversationBridge(ba_api=ba_api, stt=stt, tts=tts, personalization=personalization)
+    bridge = RealtimeConversationBridge(
+        ba_api=ba_api, stt=stt, tts=tts, personalization=personalization, finops=finops
+    )
     return RealtimeRuntime(bridge=bridge)

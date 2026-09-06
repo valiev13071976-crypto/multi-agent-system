@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime, timezone
 from typing import Any
 
 from business_assistant_api.models import (
@@ -44,6 +45,8 @@ from voice_interface.approval_intent import (
     normalize_transcript,
 )
 
+from finops.models import UsageRecord
+from finops.service import FinOpsService
 from personalization.models import DEFAULT_VOICE_ID
 from personalization.service import PersonalizationService
 from realtime.errors import (
@@ -118,12 +121,48 @@ class RealtimeConversationBridge:
         stt: SpeechToTextProvider,
         tts: TextToSpeechProvider,
         personalization: PersonalizationService | None = None,
+        finops: FinOpsService | None = None,
     ):
         self.ba_api = ba_api
         self.stt = stt
         self.tts = tts
         self.personalization = personalization
+        # Block 4.37: the SAME shared FinOpsService the rest of the platform
+        # attributes model/provider cost to (agents.router_v2.RouterV2.finops,
+        # wired in main.py) -- never a second, realtime-only cost ledger.
+        # Optional so existing callers/tests that never wire it keep working.
+        self.finops = finops
         self._sessions: dict[str, RealtimeSession] = {}
+
+    def _record_speech_usage(self, session: RealtimeSession, *, capability: str, turn_id: str = "") -> None:
+        """Block 4.37: best-effort STT/TTS cost attribution by
+        (tenant, owner/session, provider, capability) -- never blocks or
+        fails a turn; no fabricated token/cost numbers (the reused STT/TTS
+        provider interfaces do not report token counts, so cost is recorded
+        as "unknown" here, exactly the existing FinOpsService unknown-cost
+        semantics already used elsewhere, not a Block-4-invented policy)."""
+
+        if self.finops is None:
+            return
+        try:
+            self.finops.record_usage(
+                UsageRecord(
+                    task_id=turn_id or session.session_id,
+                    provider_id=f"speech_{capability}",
+                    model_id="realtime",
+                    input_tokens=None,
+                    output_tokens=None,
+                    total_tokens=None,
+                    estimated_cost=None,
+                    currency="USD",
+                    timestamp=datetime.now(timezone.utc),
+                    tenant_id=session.tenant_id,
+                    user_id=session.owner_id,
+                    request_id=turn_id,
+                )
+            )
+        except Exception:
+            pass
 
     # --- session lifecycle -------------------------------------------------
 
@@ -321,6 +360,7 @@ class RealtimeConversationBridge:
                 )
             )
             REALTIME_METRICS.inc("stt_call")
+            self._record_speech_usage(session, capability="stt")
         except Exception:
             REALTIME_METRICS.inc_error("stt_failed")
             await session.sink.send_event(
@@ -487,6 +527,7 @@ class RealtimeConversationBridge:
         try:
             audio_bytes = self.tts.synthesize(text=text, voice=session.voice_id, mime_type="audio/wav")
             REALTIME_METRICS.inc("tts_call")
+            self._record_speech_usage(session, capability="tts", turn_id=turn_id)
         except Exception:
             REALTIME_METRICS.inc_error("tts_failed")
             await session.sink.send_event(

@@ -22,6 +22,7 @@ from business_assistant.conversation_gateway import (
 )
 from business_assistant_api.runtime import build_business_assistant_api_runtime
 from business_assistant_api.models import ST_WAITING_FOR_APPROVAL
+from finops.service import FinOpsService
 from personalization.models import LANGUAGE_RU, STYLE_PROFESSIONAL
 from personalization.service import PersonalizationService
 from personalization.store import SqlitePersonalizationStore
@@ -395,6 +396,42 @@ class PersonalizationRealtimeIntegrationTests(RealtimeBridgeTestBase):
 
         prefs = self.pz.get_preferences(tenant_id="t1", owner_id="u1")
         self.assertEqual(prefs.voice_id, "nova", "voice selection persists (4.29.2)")
+
+
+class FinOpsUsageAttributionTests(RealtimeBridgeTestBase):
+    """Block 4.37: STT/TTS usage is attributed to the SAME shared FinOps
+    ledger by (tenant, owner, provider/capability) -- no paid call, no
+    fabricated token/cost numbers, never blocks the turn."""
+
+    async def test_stt_and_tts_calls_recorded_against_correct_tenant_and_owner(self):
+        self.rt.service.ba.conversation_gateway = FakePandaConversationGateway(response="Ответ")
+        finops = FinOpsService()
+        bridge = RealtimeConversationBridge(
+            ba_api=self.rt.service, stt=self.stt, tts=self.tts, personalization=self.pz, finops=finops
+        )
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="tenant-fin", owner_id="user-fin", sink=sink)
+        await bridge.on_audio_chunk(session, _stt_bytes("Привет"))
+        await bridge.on_audio_commit(session)
+        await session.current_task
+
+        records = finops._store.records()
+        by_capability = {r.provider_id: r for r in records}
+        self.assertIn("speech_stt", by_capability)
+        self.assertIn("speech_tts", by_capability)
+        for rec in records:
+            self.assertEqual(rec.tenant_id, "tenant-fin")
+            self.assertEqual(rec.user_id, "user-fin")
+
+    async def test_missing_finops_never_breaks_the_turn(self):
+        self.rt.service.ba.conversation_gateway = FakePandaConversationGateway(response="Ответ")
+        bridge = self._bridge()  # finops=None by default
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+        await bridge.on_audio_chunk(session, _stt_bytes("Привет"))
+        await bridge.on_audio_commit(session)
+        await session.current_task
+        self.assertTrue(any(e.type == "assistant.text.completed" for e in sink.events))
 
 
 class ResumeExistingConversationTests(RealtimeBridgeTestBase):

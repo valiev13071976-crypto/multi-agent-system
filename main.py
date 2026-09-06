@@ -344,7 +344,12 @@ if realtime_enabled():
     # conversation_gateway to below) -- voice turns dispatch through the
     # exact same submit_async()/ToolGateway/HITL/idempotency boundary as text.
     realtime_runtime = build_realtime_runtime(
-        ba_api=ba_api_runtime.service, personalization=personalization_runtime.service
+        ba_api=ba_api_runtime.service,
+        personalization=personalization_runtime.service,
+        # Block 4.37: the SAME shared cost ledger every other model/provider
+        # call already attributes to (agents.router_v2.RouterV2.finops) --
+        # not a second, realtime-only FinOps instance.
+        finops=getattr(router, "finops", None),
     )
 ops_admin_runtime = build_operations_admin_runtime(
     side_effect_runtime=side_effect_runtime,
