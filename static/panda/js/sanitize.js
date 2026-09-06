@@ -39,10 +39,23 @@
           el.appendChild(li);
         } else if (/^!\[[^\]]*]\((\/[^)]+|https:\/\/[^)]+)\)$/.test(trimmed)) {
           const match = trimmed.match(/^!\[([^\]]*)]\(([^)]+)\)$/);
+          const url = match[2];
+          const wrap = document.createElement("span");
+          wrap.className = "msg-image-wrap";
           const img = document.createElement("img");
+          img.className = "msg-image";
           img.alt = match[1] || "";
-          img.src = match[2];
-          el.appendChild(img);
+          img.src = url;
+          img.dataset.fullUrl = url;
+          // Block 3.5.8: derive the explicit-download variant of whichever
+          // image endpoint produced this URL (existing /media/{id} inline
+          // rendering, or the new canonical /artifacts/{id}/view) without
+          // changing the URL this <img> actually loads.
+          img.dataset.downloadUrl = url.includes("/artifacts/") && url.endsWith("/view")
+            ? url.replace(/\/view$/, "/download")
+            : url + (url.includes("?") ? "&" : "?") + "download=1";
+          wrap.appendChild(img);
+          el.appendChild(wrap);
         } else if (/^https?:\/\//i.test(trimmed)) {
           const a = document.createElement("a");
           a.href = trimmed;

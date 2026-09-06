@@ -24,6 +24,11 @@
     pendingDeleteId: null,
   };
 
+  // Block 3.5.6/3.5.16: per-session cache so a reloaded conversation only
+  // fetches each attachment's metadata (filename/kind/urls) once, even if
+  // it appears on multiple messages.
+  const artifactMetaCache = new Map();
+
   const els = {
     authGate: document.getElementById("auth-gate"),
     app: document.getElementById("app"),
@@ -73,6 +78,10 @@
     confirmText: document.getElementById("chat-confirm-text"),
     confirmOk: document.getElementById("chat-confirm-ok"),
     confirmCancel: document.getElementById("chat-confirm-cancel"),
+    lightbox: document.getElementById("image-lightbox"),
+    lightboxImg: document.getElementById("image-lightbox-img"),
+    lightboxDownload: document.getElementById("image-lightbox-download"),
+    lightboxClose: document.getElementById("image-lightbox-close"),
   };
 
   function show(el) { if (el) el.classList.remove("hidden"); }
@@ -393,10 +402,58 @@
         content = (window.PandaCopy && window.PandaCopy.MISSING_FINAL_ANSWER) ||
           "Panda не смогла сформировать ответ. Попробуйте ещё раз.";
       }
-      els.timeline.appendChild(ui.renderMessage(role, content, null));
+      els.timeline.appendChild(ui.renderMessage(role, content, null, m.attachments));
     });
     syncWelcome();
     if (stick) scrollTimelineToBottom(true);
+  }
+
+  /** Block 3.5.6/3.5.9/3.5.10/3.5.16: resolve each persisted message's
+   * canonical/legacy artifact_refs into renderable attachment metadata
+   * (filename/kind/view+download URLs), caching per artifact ref so a
+   * reload never re-fetches the same file's metadata twice. Best-effort --
+   * a single unreadable/foreign ref must never block the rest of the
+   * conversation from rendering. */
+  async function hydrateAttachments(messages) {
+    const jobs = [];
+    (messages || []).forEach((m) => {
+      if (m.attachments || !m.artifact_refs || !m.artifact_refs.length) return;
+      m.attachments = [];
+      m.artifact_refs.forEach((ref) => {
+        if (!ref) return;
+        const job = (async () => {
+          let meta = artifactMetaCache.get(ref);
+          if (!meta) {
+            try {
+              meta = await api.getArtifactMetadata(ref);
+            } catch (_) {
+              meta = null;
+            }
+            artifactMetaCache.set(ref, meta);
+          }
+          if (meta) m.attachments.push(meta);
+        })();
+        jobs.push(job);
+      });
+    });
+    if (jobs.length) await Promise.all(jobs);
+  }
+
+  function openLightbox(fullUrl, downloadUrl) {
+    if (!els.lightbox || !fullUrl) return;
+    els.lightboxImg.src = fullUrl;
+    if (els.lightboxDownload) {
+      els.lightboxDownload.href = downloadUrl || fullUrl;
+    }
+    show(els.lightbox);
+    els.lightbox.removeAttribute("hidden");
+  }
+
+  function closeLightbox() {
+    if (!els.lightbox) return;
+    hide(els.lightbox);
+    els.lightbox.setAttribute("hidden", "");
+    if (els.lightboxImg) els.lightboxImg.src = "";
   }
 
   function autoGrowComposer() {
@@ -477,7 +534,7 @@
   function renderAttachmentChips() {
     els.attachmentChips.innerHTML = "";
     state.attachments.forEach((a, idx) => {
-      const chip = ui.el("span", "chip", `${a.filename} (${a.size_bytes || 0} B)`);
+      const chip = ui.el("span", "chip", `📎 ${a.filename} (${a.size_bytes || 0} B)`);
       const rm = ui.el("button", "", "×");
       rm.type = "button";
       rm.setAttribute("aria-label", "Удалить вложение");
@@ -514,6 +571,7 @@
     } catch (_) {
       state.messages = [];
     }
+    await hydrateAttachments(state.messages);
     renderTimeline({ forceScroll: true });
     closeSidebar();
     const saved = loadActiveRequest();
@@ -709,7 +767,24 @@
     els.composerError.textContent = "";
     const idempotencyKey = api.uuid();
 
-    state.messages.push({ role: "user", content: text, created_at: new Date().toISOString() });
+    // Block 3.5.16: attach the already-known upload metadata directly so
+    // this message's file cards/image thumbnail render immediately -- no
+    // need to wait for a reload + GET /artifacts/{id} round-trip.
+    const sentAttachments = state.attachments.map((a) => ({
+      artifact_id: a.artifact_id,
+      filename: a.filename,
+      mime_type: a.mime_type,
+      size_bytes: a.size_bytes,
+      kind: a.kind,
+      view_url: a.view_url,
+      download_url: a.download_url,
+    }));
+    state.messages.push({
+      role: "user",
+      content: text,
+      created_at: new Date().toISOString(),
+      attachments: sentAttachments,
+    });
     renderTimeline({ forceScroll: true });
     els.composer.value = "";
     autoGrowComposer();
@@ -799,6 +874,10 @@
     if (els.sidebarBackdrop) els.sidebarBackdrop.onclick = closeSidebar;
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        if (els.lightbox && !els.lightbox.hasAttribute("hidden")) {
+          closeLightbox();
+          return;
+        }
         if (state.pendingDeleteId) {
           hideConfirm();
           return;
@@ -837,6 +916,21 @@
       });
     }
     els.fileInput.onchange = (e) => onFiles(Array.from(e.target.files || []));
+    // Block 3.5.8: click-to-enlarge + download for any rendered image
+    // (assistant-generated inline markdown image or an uploaded image
+    // attachment card) -- delegated so it works for messages rendered
+    // both now and after future re-renders.
+    els.timeline.addEventListener("click", (e) => {
+      const img = e.target.closest(".msg-image");
+      if (!img) return;
+      openLightbox(img.dataset.fullUrl || img.src, img.dataset.downloadUrl);
+    });
+    if (els.lightboxClose) els.lightboxClose.onclick = closeLightbox;
+    if (els.lightbox) {
+      els.lightbox.addEventListener("click", (e) => {
+        if (e.target === els.lightbox) closeLightbox();
+      });
+    }
     if (els.suggestedPrompts) {
       els.suggestedPrompts.addEventListener("click", (e) => {
         const chip = e.target.closest("[data-prompt]");

@@ -109,6 +109,15 @@
     listArtifacts(requestId) {
       return request(`/requests/${encodeURIComponent(requestId)}/artifacts`);
     },
+    getArtifactMetadata(artifactRef) {
+      return request(`/artifacts/${encodeURIComponent(artifactRef)}`);
+    },
+    artifactViewUrl(artifactRef) {
+      return `${BASE}/artifacts/${encodeURIComponent(artifactRef)}/view`;
+    },
+    artifactDownloadUrl(artifactRef) {
+      return `${BASE}/artifacts/${encodeURIComponent(artifactRef)}/download`;
+    },
     approve(requestId, body) {
       return request(`/requests/${encodeURIComponent(requestId)}/approve`, {
         method: "POST",
