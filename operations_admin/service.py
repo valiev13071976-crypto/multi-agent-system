@@ -494,13 +494,22 @@ class OperationsAdminService:
         return [FailureView(failure_id=d.task_id, tenant_id=d.tenant_id, operation=d.operation, error_code=d.error_code or "unknown", created_at=d.created_at, summary=d.summary) for d in dlq], total
 
     def redrive_dlq(self, ctx, cmd: RedriveDLQCommand) -> dict:
+        from task_queue.errors import QueueError
+
         self.access.require(ctx, PERM_OPS_RECOVERY)
         self.access.assert_tenant_scope(ctx, cmd.tenant_id)
         key = f"redrive:{cmd.idempotency_key}"
         if key in self._processed_idempotency:
             return {"status": "already_redriven", "task_id": cmd.task_id}
         q = getattr(self.workflow_runtime, "queue", None)
-        task = q.redrive_dead_letter(cmd.task_id, actor_ref=ctx.actor_ref(), tenant_id=cmd.tenant_id)
+        try:
+            task = q.redrive_dead_letter(cmd.task_id, actor_ref=ctx.actor_ref(), tenant_id=cmd.tenant_id)
+        except QueueError as exc:
+            # Fail-safe, structured surface (Scale 3.27): malformed/ineligible
+            # jobs and bounded-redrive-loop rejections never leak as 500s, and
+            # never silently succeed.
+            self._audit(ctx, capability=PERM_OPS_RECOVERY, action="dlq.redrive", target_type="queue_task", target_id=cmd.task_id, result="denied", reason=str(exc), tenant_scope=cmd.tenant_id)
+            raise AdminError(ADMIN_REDRIVE_NOT_ALLOWED, message=str(exc)) from exc
         self._processed_idempotency.add(key)
         self._audit(ctx, capability=PERM_OPS_RECOVERY, action="dlq.redrive", target_type="queue_task", target_id=cmd.task_id, result="ok", reason=cmd.reason, tenant_scope=cmd.tenant_id)
         self.obs.emit("admin.dlq.redrive", metadata={"task_id": cmd.task_id})

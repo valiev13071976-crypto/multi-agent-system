@@ -40,3 +40,27 @@ class QueueTenantOwnershipError(QueueError):
     def __init__(self, reason: str = "tenant_mismatch"):
         self.reason = str(reason)
         super().__init__(self.reason)
+
+
+class QueueDLQIneligibleError(QueueError):
+    """DLQ operation (replay/redrive) targets a task that is not eligible
+    (Scale 3.27): wrong status, missing task, or malformed identifiers.
+    """
+
+    error_code = "DLQ_INELIGIBLE"
+
+    def __init__(self, reason: str = "dlq_ineligible"):
+        self.reason = str(reason)
+        super().__init__(self.reason)
+
+
+class QueueRedriveRejectedError(QueueError):
+    """Redrive rejected by a safety policy (Scale 3.27), e.g. the bounded
+    redrive-count guard that prevents an accidental infinite redrive loop.
+    """
+
+    error_code = "REDRIVE_REJECTED"
+
+    def __init__(self, reason: str = "redrive_rejected"):
+        self.reason = str(reason)
+        super().__init__(self.reason)
