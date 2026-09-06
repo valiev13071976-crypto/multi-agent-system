@@ -299,6 +299,7 @@ class WorkflowEngine:
         request_id: str | None = None,
         user_id: str | None = None,
         actor_ref: str | None = None,
+        workload_class: str | None = None,
     ):
         from security.tenant import require_tenant_id
 
@@ -346,6 +347,7 @@ class WorkflowEngine:
             trace_id=trace,
             user_id=str(user_id or ""),
             actor_ref=str(resolved_actor or ""),
+            workload_class=str(workload_class or ""),
         )
         self.last_run_envelope = envelope
         try:

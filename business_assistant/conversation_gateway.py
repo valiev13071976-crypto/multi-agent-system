@@ -284,6 +284,7 @@ class WorkflowPandaConversationGateway:
             format_tool_user_text,
             mark_executed,
         )
+        from task_queue.lanes import WORKLOAD_INTERACTIVE
         from tools.models import ToolRequest
 
         task = action.task
@@ -316,6 +317,10 @@ class WorkflowPandaConversationGateway:
             operation=action.operation or "generate",
             arguments=dict(action.arguments or {}),
             requested_capabilities=provided,
+            # Server-classified: every Business Assistant tool call is a live user
+            # waiting synchronously for a reply. Never sourced from `action.arguments`
+            # (user-controlled) so it cannot be spoofed by request content.
+            metadata={"workload_class": WORKLOAD_INTERACTIVE},
             tenant_id=str(request.tenant_id or ""),
             user_id=str(request.user_id or ""),
             actor_id=f"{request.tenant_id}:{request.user_id}",
@@ -406,6 +411,7 @@ class WorkflowPandaConversationGateway:
             resolve_action_turn,
         )
         from business_assistant.follow_up import build_follow_up_prompt, resolve_follow_up
+        from task_queue.lanes import WORKLOAD_INTERACTIVE
 
         t0 = time.monotonic()
         resolution = resolve_follow_up(text, history=request.history or ())
@@ -487,6 +493,10 @@ class WorkflowPandaConversationGateway:
                 request_id=request.request_id or request.correlation_id,
                 user_id=request.user_id,
                 actor_ref=f"{request.tenant_id}:{request.user_id}",
+                # Business Assistant conversational replies are always a live user
+                # waiting synchronously for a response -- server-classified, never
+                # derived from request.text, so it cannot be spoofed by message content.
+                workload_class=WORKLOAD_INTERACTIVE,
             )
         except Exception as exc:
             raise ConversationUnavailableError(str(exc) or "panda_intelligence_failed") from exc

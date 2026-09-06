@@ -82,6 +82,7 @@ class UnifiedToolExecutor:
             envelope_ref = str(getattr(envelope, "execution_id", "") or "")
             req_id = request_id or str(getattr(envelope, "request_id", "") or uuid.uuid4())
             idem = idempotency_key or getattr(envelope, "idempotency_key", None)
+            envelope_workload_class = str(getattr(envelope, "workload_class", "") or "")
         else:
             workflow_id = str(ctx.get("workflow_id") or "")
             task_id = str(ctx.get("task_id") or "")
@@ -96,6 +97,13 @@ class UnifiedToolExecutor:
             envelope_ref = str(ctx.get("envelope_ref") or "")
             req_id = request_id or str(uuid.uuid4())
             idem = idempotency_key
+            envelope_workload_class = ""
+
+        trusted_metadata = dict(metadata or {})
+        # RunEnvelope wins over any explicitly-passed metadata for this trusted
+        # field -- it is the identity source of truth (see module docstring).
+        if envelope_workload_class:
+            trusted_metadata["workload_class"] = envelope_workload_class
 
         return ToolRequest(
             request_id=str(req_id),
@@ -113,7 +121,7 @@ class UnifiedToolExecutor:
             tenant_id=tenant_id,
             user_id=user_id,
             capability_context=capability_context,
-            metadata=sanitize_metadata(dict(metadata or {})),
+            metadata=sanitize_metadata(trusted_metadata),
             tool_version=str(tool_version or ctx.get("tool_version") or ""),
             execution_id=execution_id,
             data_scope_ref=data_scope_ref,
