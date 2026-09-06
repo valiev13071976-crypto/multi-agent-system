@@ -341,42 +341,58 @@ html.panda-chat body {
   border: 1px solid var(--border);
 }
 
-/* Production acceptance defect closure: direct Edit/Download actions for a
-   generated image, visible in the normal conversation view without opening
-   the lightbox (ChatGPT-like model). Additive to the click-to-enlarge
-   affordance above -- .msg-image-wrap without .has-actions (e.g. uploaded
-   attachment thumbnails) is unaffected. */
+/* UI pixel-closure (ChatGPT-like reference): direct Edit/Download actions
+   for a generated image, visible in the normal conversation view without
+   opening the lightbox. Additive to the click-to-enlarge affordance above
+   -- .msg-image-wrap without .has-actions (e.g. uploaded attachment
+   thumbnails) is unaffected. Deliberately NOT pill/toolbar-styled: a plain,
+   left-aligned row of small icon-only controls sitting directly under the
+   image, matching its left edge, so they read as part of the image message
+   rather than a separate Panda button bar. */
 .msg-image-wrap.has-actions {
   display: inline-flex;
   flex-direction: column;
   align-items: flex-start;
-  gap: 0.4rem;
+  gap: 0.2rem;
   line-height: normal;
+  max-width: 100%;
 }
 
 .msg-image-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 0.4rem;
+  align-items: center;
+  gap: 0.1rem;
+  max-width: 100%;
 }
 
 .msg-image-action {
   display: inline-flex;
   align-items: center;
-  gap: 0.3rem;
-  font: inherit;
-  font-size: 0.8rem;
-  padding: 0.35rem 0.7rem;
-  border-radius: 999px;
-  border: 1px solid var(--border);
-  background: var(--surface-secondary);
-  color: var(--text-primary);
+  justify-content: center;
+  width: 1.85rem;
+  height: 1.85rem;
+  flex: 0 0 auto;
+  padding: 0;
+  font-size: 0.95rem;
+  line-height: 1;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
   text-decoration: none;
   cursor: pointer;
-  min-height: 32px;
 }
 
-.msg-image-action:hover { background: var(--surface); }
+.msg-image-action:hover,
+.msg-image-action:focus-visible {
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+}
+
+.msg-image-action:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
+}
 
 .image-edit-input {
   width: 100%;
