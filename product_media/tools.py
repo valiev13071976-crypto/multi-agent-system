@@ -5,6 +5,27 @@ from __future__ import annotations
 from product_media.errors import MediaBatchRequired, MediaError
 from tools.errors import ToolNotFoundError
 
+# Relative path prefix for the safe, authorized artifact URL served by the existing
+# business_assistant_api auth boundary (session cookie or X-API-Key — see
+# business_assistant_api.router.get_media). Kept as a local literal (not an import of
+# business_assistant_api) to avoid a layering dependency from product_media -> the API layer.
+_MEDIA_VIEW_URL_PREFIX = "/api/v1/business-assistant/media"
+
+# Conversational chat tool ids (Panda action-continuation). Distinct from the governed
+# "media.generate"/"media.edit" business-publishing tools which remain write-governed.
+_CHAT_IMAGE_GENERATE_TOOL_ID = "image.generate"
+_CHAT_IMAGE_EDIT_TOOL_ID = "image.edit"
+
+
+def media_view_url(version_id: str) -> str:
+    """Safe, tenant-authorized artifact URL for a persisted media version.
+
+    The URL itself carries no secret/tenant data; the serving endpoint re-derives the
+    tenant from the authenticated request and denies cross-tenant access.
+    """
+    vid = str(version_id or "").strip()
+    return f"{_MEDIA_VIEW_URL_PREFIX}/{vid}" if vid else ""
+
 
 class ProductMediaToolAdapter:
     adapter_id = "product_media"
@@ -29,6 +50,10 @@ class ProductMediaToolAdapter:
         args = dict(request.arguments or {})
         tenant = self._tenant(request)
         op = request.operation
+        if request.tool_id == _CHAT_IMAGE_GENERATE_TOOL_ID:
+            return self._chat_generate(tenant, args)
+        if request.tool_id == _CHAT_IMAGE_EDIT_TOOL_ID:
+            return self._chat_edit(tenant, args)
         payload = {"tenant_id": tenant, **args}
         if op in {"get", "analyze", "find_similar", "find_duplicates"}:
             mapping = {
@@ -43,6 +68,68 @@ class ProductMediaToolAdapter:
                 return {"duplicates": self.service.find_duplicates(tenant_id=tenant, version_id=str(args["version_id"]))}
             return self.service.dispatch(mapping.get(op, f"media.{op}"), payload)
         raise ToolNotFoundError("operation_not_supported")
+
+    def _chat_generate(self, tenant: str, args: dict) -> dict:
+        try:
+            result = self.service.generate_from_brief(
+                tenant_id=tenant,
+                scene_description=str(args.get("scene_description") or args.get("prompt") or ""),
+                aspect_ratio=str(args.get("aspect_ratio") or "1:1"),
+                variant_count=int(args.get("variant_count") or 1),
+                bulk=bool(args.get("bulk", False)),
+                media_brief_id=str(args.get("media_brief_id") or ""),
+            )
+        except MediaError as exc:
+            return {"status": "error", "reason": exc.code}
+        version_ids = [str(v) for v in (result.get("version_ids") or [])]
+        assets = []
+        mime_type = "image/png"
+        for vid in version_ids:
+            version = self.service.get(tenant_id=tenant, version_id=vid)
+            mime_type = str(getattr(version, "mime_type", "") or mime_type)
+            assets.append(
+                {
+                    "version_id": vid,
+                    "artifact_type": "image",
+                    "mime_type": mime_type,
+                    "view_url": media_view_url(vid),
+                }
+            )
+        return {
+            "version_ids": version_ids,
+            "assets": assets,
+            "mime_type": mime_type,
+            "view_url": assets[0]["view_url"] if assets else "",
+            "status": result.get("status"),
+            "failed": result.get("failed", 0),
+        }
+
+    def _chat_edit(self, tenant: str, args: dict) -> dict:
+        try:
+            version = self.service.edit(
+                tenant_id=tenant,
+                source_version_id=str(args["source_version_id"]),
+                instruction=str(args.get("instruction") or ""),
+                mask_version_id=args.get("mask_version_id"),
+            )
+        except MediaError as exc:
+            return {"status": "error", "reason": exc.code}
+        url = media_view_url(version.version_id)
+        return {
+            "version_id": version.version_id,
+            "version_ids": [version.version_id],
+            "assets": [
+                {
+                    "version_id": version.version_id,
+                    "artifact_type": "image",
+                    "mime_type": version.mime_type,
+                    "view_url": url,
+                }
+            ],
+            "mime_type": version.mime_type,
+            "view_url": url,
+            "status": "completed",
+        }
 
     async def execute_write(self, request, context) -> dict:
         if self.service is None:

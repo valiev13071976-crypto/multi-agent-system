@@ -167,6 +167,18 @@ class ProductMediaService:
         except MediaError:
             return None
 
+    def get_blob(self, *, tenant_id: str, version_id: str) -> bytes | None:
+        """Tenant-scoped blob retrieval for safe authorized artifact URLs.
+
+        Does not expose the underlying store directly; re-validates tenant access
+        the same way ``get`` does before returning bytes.
+        """
+        tenant = require_tenant_id(tenant_id)
+        version = self.get(tenant_id=tenant, version_id=version_id)
+        if version is None:
+            return None
+        return self.store.get_blob(version_id, tenant_id=tenant)
+
     def analyze(self, *, tenant_id: str, version_id: str, profile: str = "website") -> dict[str, Any]:
         tenant = require_tenant_id(tenant_id)
         version = self.store.get_version(version_id, tenant_id=tenant)

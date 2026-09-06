@@ -1270,28 +1270,37 @@ def excel_write_descriptor(*, enabled: bool = False) -> ToolDescriptor:
 
 
 def image_generate_descriptor(*, enabled: bool = False) -> ToolDescriptor:
-    return _write_desc(
+    # Conversational, on-demand artifact generation (Panda chat). Not a business-external
+    # write (no CRM/CMS/marketplace mutation) — internal-safe so it is never routed through
+    # AutonomyGate/HITL business-write governance, matching action_continuation's RISK_GENERATE
+    # (distinct from RISK_WRITE used by governed publishing tools like media.generate).
+    return _read_desc(
         tool_id=TOOL_IMAGE_GENERATE,
         name="Image Generate",
-        description="Image generation foundation (scaffold)",
+        description="Conversational image generation (internal artifact, no business-write governance)",
         category="image",
         adapter_id="image",
         capabilities=(CAP_IMAGE_GENERATE,),
         operations=("generate",),
         enabled=enabled,
+        timeout=60.0,
+        network=False,
     )
 
 
 def image_edit_descriptor(*, enabled: bool = False) -> ToolDescriptor:
-    return _write_desc(
+    # Same internal-safe classification as image_generate_descriptor — see comment there.
+    return _read_desc(
         tool_id=TOOL_IMAGE_EDIT,
         name="Image Edit",
-        description="Image edit foundation (scaffold)",
+        description="Conversational image edit (internal artifact, no business-write governance)",
         category="image",
         adapter_id="image",
         capabilities=(CAP_IMAGE_EDIT,),
         operations=("edit",),
         enabled=enabled,
+        timeout=60.0,
+        network=False,
     )
 
 
