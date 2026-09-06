@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 
 from product_media.errors import MediaBatchRequired, MediaError
@@ -68,9 +69,26 @@ class ProductMediaToolAdapter:
         tenant = self._tenant(request)
         op = request.operation
         if request.tool_id == _CHAT_IMAGE_GENERATE_TOOL_ID:
-            return self._chat_generate(tenant, args, request_id=str(getattr(request, "request_id", "") or ""))
+            # _chat_generate() is fully synchronous (it makes a blocking HTTP call to
+            # the real image provider via BoundedHttpClient's sync httpx.Client). Calling
+            # it directly from this async method would run that ENTIRE blocking call
+            # in-line on the single asyncio event loop thread -- on this app's
+            # single-worker Uvicorn deployment (see Procfile/railway.toml: no --workers
+            # flag) that freezes every other concurrent request (including unrelated
+            # conversations and the /health check) for the whole duration of a real
+            # provider call, and it also makes ToolGateway's asyncio.wait_for(timeout=60)
+            # around execute_read() unable to ever actually cut off a hung/slow call --
+            # wait_for can only observe elapsed time at an await point, and a plain
+            # blocking call yields none until it already returns. asyncio.to_thread()
+            # runs the blocking work off the event loop so the timeout can genuinely
+            # fire and unrelated requests keep making progress.
+            return await asyncio.to_thread(
+                self._chat_generate, tenant, args, request_id=str(getattr(request, "request_id", "") or "")
+            )
         if request.tool_id == _CHAT_IMAGE_EDIT_TOOL_ID:
-            return self._chat_edit(tenant, args, request_id=str(getattr(request, "request_id", "") or ""))
+            return await asyncio.to_thread(
+                self._chat_edit, tenant, args, request_id=str(getattr(request, "request_id", "") or "")
+            )
         payload = {"tenant_id": tenant, **args}
         if op in {"get", "analyze", "find_similar", "find_duplicates"}:
             mapping = {
