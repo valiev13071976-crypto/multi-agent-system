@@ -378,14 +378,26 @@ html.panda-chat body {
   outline-offset: 1px;
 }
 
-/* Edit: visible-label pill, bottom-left, inset from the image edges. */
+/* Edit: visible-label pill, bottom-left, inset from the image edges.
+   Root-cause fix (production visual acceptance defect): this rule used to
+   include the `font: inherit` shorthand, which -- because it also resets
+   `line-height` -- won (equal specificity, declared after
+   .msg-image-overlay in source order) over .msg-image-overlay's own
+   `line-height: 1`, inheriting `line-height: 0` from the ancestor
+   .msg-image-wrap.has-actions and, combined with `overflow: hidden`,
+   collapsed the button to ~10px tall with "Редактировать" almost entirely
+   clipped. Inheriting only font-family (not the whole `font` shorthand)
+   and asserting a real line-height here fixes it without touching the
+   shared .msg-image-overlay rule or any other control. */
 .msg-image-edit-btn {
   left: 0.55rem;
   max-width: calc(100% - 3.4rem);
-  padding: 0.32rem 0.7rem;
+  padding: 0.4rem 0.85rem;
   border-radius: 999px;
-  font: inherit;
-  font-size: 0.78rem;
+  font-family: inherit;
+  font-weight: 500;
+  font-size: 0.85rem;
+  line-height: 1.2;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -395,12 +407,25 @@ html.panda-chat body {
    image edges. */
 .msg-image-download-btn {
   right: 0.55rem;
-  width: 1.9rem;
-  height: 1.9rem;
+  width: 2.1rem;
+  height: 2.1rem;
   border-radius: 50%;
-  font-size: 0.95rem;
+  font-size: 1.05rem;
+  line-height: 1;
   text-decoration: none;
   flex: 0 0 auto;
+}
+
+/* Root-cause fix (production visual acceptance defect): the pre-existing
+   global `.msg .body a { color: var(--accent) }` rule (two classes + the
+   <a> type = higher specificity than the single-class .msg-image-overlay)
+   was winning and painting the download glyph accent-blue instead of
+   white, crushing its contrast against the dark translucent circle. This
+   selector's three chained classes outrank it without needing !important
+   or touching the global link-color rule. */
+.msg-image-wrap.has-actions .msg-image-download-btn,
+.msg-image-wrap.has-actions .msg-image-edit-btn {
+  color: #fff;
 }
 
 /* Block 3.5 final closure: minimal in-conversation live generation
