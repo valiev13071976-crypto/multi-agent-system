@@ -22,6 +22,11 @@
     lastResultMode: null,
     openMenuId: null,
     pendingDeleteId: null,
+    // Production acceptance defect closure: canonical artifact_id of the
+    // generated image currently targeted by the direct "Редактировать"
+    // dialog -- set only from a specific image's own data-artifact-id
+    // (see sanitize.js), never inferred/guessed.
+    pendingEditArtifactId: null,
   };
 
   // Block 3.5.6/3.5.16: per-session cache so a reloaded conversation only
@@ -82,6 +87,11 @@
     lightboxImg: document.getElementById("image-lightbox-img"),
     lightboxDownload: document.getElementById("image-lightbox-download"),
     lightboxClose: document.getElementById("image-lightbox-close"),
+    imageEditDialog: document.getElementById("image-edit-dialog"),
+    imageEditInput: document.getElementById("image-edit-input"),
+    imageEditError: document.getElementById("image-edit-error"),
+    imageEditOk: document.getElementById("image-edit-ok"),
+    imageEditCancel: document.getElementById("image-edit-cancel"),
   };
 
   function show(el) { if (el) el.classList.remove("hidden"); }
@@ -454,6 +464,65 @@
     hide(els.lightbox);
     els.lightbox.setAttribute("hidden", "");
     if (els.lightboxImg) els.lightboxImg.src = "";
+  }
+
+  /** Production acceptance defect closure: direct "Редактировать" action.
+   * Opens a small instruction dialog for the EXACT artifact_id the user
+   * clicked (never the latest/any other image) -- see sanitize.js, which
+   * only stamps data-artifact-id on images served from the canonical
+   * /artifacts/{id}/view route. */
+  function openImageEditDialog(artifactId) {
+    if (!artifactId || !els.imageEditDialog) return;
+    state.pendingEditArtifactId = artifactId;
+    if (els.imageEditInput) els.imageEditInput.value = "";
+    if (els.imageEditError) els.imageEditError.textContent = "";
+    show(els.imageEditDialog);
+    els.imageEditDialog.removeAttribute("hidden");
+    if (els.imageEditInput) els.imageEditInput.focus();
+  }
+
+  function closeImageEditDialog() {
+    state.pendingEditArtifactId = null;
+    if (!els.imageEditDialog) return;
+    hide(els.imageEditDialog);
+    els.imageEditDialog.setAttribute("hidden", "");
+  }
+
+  async function submitImageEdit() {
+    const artifactId = state.pendingEditArtifactId;
+    const instruction = (els.imageEditInput ? els.imageEditInput.value : "").trim();
+    if (!artifactId || !state.conversationId) return;
+    if (!instruction) {
+      if (els.imageEditError) els.imageEditError.textContent = "Опишите, что нужно изменить.";
+      return;
+    }
+    const conversationId = state.conversationId;
+    if (els.imageEditOk) els.imageEditOk.disabled = true;
+    try {
+      const res = await api.editImage(artifactId, conversationId, instruction);
+      closeImageEditDialog();
+      // The edit call is synchronous (no /requests polling round trip) --
+      // append both turns directly, matching sendMessage's optimistic
+      // rendering pattern.
+      state.messages.push({
+        role: "user",
+        content: instruction,
+        created_at: new Date().toISOString(),
+        request_id: res.request_id,
+      });
+      state.messages.push({
+        role: "assistant",
+        content: res.text || "",
+        created_at: new Date().toISOString(),
+        request_id: res.request_id,
+      });
+      renderTimeline({ forceScroll: true });
+      await refreshConversations();
+    } catch (e) {
+      if (els.imageEditError) els.imageEditError.textContent = api.mapError(e);
+    } finally {
+      if (els.imageEditOk) els.imageEditOk.disabled = false;
+    }
   }
 
   function autoGrowComposer() {
@@ -874,6 +943,10 @@
     if (els.sidebarBackdrop) els.sidebarBackdrop.onclick = closeSidebar;
     document.addEventListener("keydown", (e) => {
       if (e.key === "Escape") {
+        if (els.imageEditDialog && !els.imageEditDialog.hasAttribute("hidden")) {
+          closeImageEditDialog();
+          return;
+        }
         if (els.lightbox && !els.lightbox.hasAttribute("hidden")) {
           closeLightbox();
           return;
@@ -921,6 +994,14 @@
     // attachment card) -- delegated so it works for messages rendered
     // both now and after future re-renders.
     els.timeline.addEventListener("click", (e) => {
+      // Production acceptance defect closure: direct Edit action lives
+      // outside the <img> itself (sibling in .msg-image-actions), so it
+      // never triggers the lightbox open below.
+      const editBtn = e.target.closest(".msg-image-edit-btn");
+      if (editBtn) {
+        openImageEditDialog(editBtn.dataset.artifactId);
+        return;
+      }
       const img = e.target.closest(".msg-image");
       if (!img) return;
       openLightbox(img.dataset.fullUrl || img.src, img.dataset.downloadUrl);
@@ -929,6 +1010,21 @@
     if (els.lightbox) {
       els.lightbox.addEventListener("click", (e) => {
         if (e.target === els.lightbox) closeLightbox();
+      });
+    }
+    if (els.imageEditOk) els.imageEditOk.onclick = submitImageEdit;
+    if (els.imageEditCancel) els.imageEditCancel.onclick = closeImageEditDialog;
+    if (els.imageEditDialog) {
+      els.imageEditDialog.addEventListener("click", (e) => {
+        if (e.target === els.imageEditDialog) closeImageEditDialog();
+      });
+    }
+    if (els.imageEditInput) {
+      els.imageEditInput.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+          e.preventDefault();
+          submitImageEdit();
+        }
       });
     }
     if (els.suggestedPrompts) {

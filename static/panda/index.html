@@ -133,6 +133,18 @@
     </div>
   </div>
 
+  <div id="image-edit-dialog" class="chat-confirm hidden" role="dialog" aria-modal="true" aria-labelledby="image-edit-title" hidden>
+    <div class="chat-confirm-card">
+      <p id="image-edit-title">Редактировать изображение</p>
+      <textarea id="image-edit-input" class="image-edit-input" rows="2" maxlength="2000" placeholder="Например: сделай фон белым" aria-label="Инструкция для редактирования изображения"></textarea>
+      <p id="image-edit-error" class="error-text" role="alert"></p>
+      <div class="chat-confirm-actions">
+        <button type="button" id="image-edit-ok" class="primary">Отправить</button>
+        <button type="button" id="image-edit-cancel">Отмена</button>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/shared/brand.js"></script>
   <script src="/static/shared/copy.js"></script>
   <script src="/static/shared/presentation.js"></script>

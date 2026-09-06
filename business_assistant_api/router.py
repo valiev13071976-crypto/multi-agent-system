@@ -83,6 +83,17 @@ class SubmitRequestBody(BaseModel):
     metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class ImageEditRequestBody(BaseModel):
+    conversation_id: str = Field(..., min_length=1, max_length=128)
+    instruction: str = Field(..., min_length=1, max_length=4000)
+
+
+class ImageEditResponse(BaseModel):
+    request_id: str
+    text: str
+    artifacts: list[dict[str, Any]] = Field(default_factory=list)
+
+
 class ApproveRequestBody(BaseModel):
     approval_id: str | None = None
     plan_fingerprint: str | None = None
@@ -405,6 +416,39 @@ async def view_artifact(
     _no_cache(response)
     get_resource_authorizer().require_permission(ctx, PERM_WORKFLOW_READ)
     return _serve_artifact(artifact_id, ctx, disposition="inline")
+
+
+@_router.post("/artifacts/{artifact_id:path}/edit", response_model=ImageEditResponse)
+async def edit_image_artifact(
+    artifact_id: str,
+    body: ImageEditRequestBody,
+    response: Response,
+    ctx: Annotated[RequestSecurityContext, Depends(get_security_context)],
+):
+    """Direct "Редактировать" action (production acceptance defect closure):
+    deterministic image.edit targeting exactly this canonical artifact --
+    never the ambiguous "last generated image". Same PERM_ANALYZE_EXECUTE
+    boundary as POST /requests (this also invokes a tool)."""
+
+    _no_cache(response)
+    get_resource_authorizer().require_permission(ctx, PERM_ANALYZE_EXECUTE)
+    get_audit_log().record(
+        "baa.image_edit_requested",
+        actor_ref=ctx.actor_ref(),
+        tenant_ref=ctx.tenant_id,
+        outcome="ok",
+    )
+    try:
+        result = await _svc().edit_generated_image(
+            tenant_id=ctx.tenant_id,
+            owner_id=ctx.user_id,
+            conversation_id=body.conversation_id,
+            source_artifact_id=artifact_id,
+            instruction=body.instruction,
+        )
+    except BusinessAssistantApiError as exc:
+        raise _err(exc) from exc
+    return ImageEditResponse(**result)
 
 
 @_router.get("/artifacts/{artifact_id:path}", response_model=ArtifactMetadataResponse)

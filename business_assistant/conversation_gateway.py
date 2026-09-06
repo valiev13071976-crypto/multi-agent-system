@@ -26,6 +26,14 @@ class ConversationRequest:
     # conversation context. These are resolved server-side (tenant/ownership
     # verified) before ever reaching a tool call -- never trusted as-is.
     attachment_refs: tuple[str, ...] = ()
+    # Production acceptance defect closure ("ChatGPT-like generated image
+    # actions"): the canonical artifact_id of the exact generated image the
+    # user selected via the direct "Редактировать" UI action. When set,
+    # ``respond()`` dispatches straight to the existing image.edit tool
+    # path -- never inferred from text/NLU/"last generated image" guessing.
+    # Resolved through the same trusted, tenant/conversation-verified
+    # ArtifactService boundary as every other artifact access.
+    image_edit_source_ref: str = ""
 
 
 @dataclass(frozen=True)
@@ -289,6 +297,7 @@ class WorkflowPandaConversationGateway:
     async def _invoke_tool(self, request: ConversationRequest, action) -> ConversationResult:
         from business_assistant.action_continuation import (
             CALL_TOOL,
+            TOOL_IMAGE_EDIT,
             artifacts_from_tool_data,
             format_tool_user_text,
             mark_executed,
@@ -335,6 +344,34 @@ class WorkflowPandaConversationGateway:
             except Exception:
                 resolved = []
             arguments["attachment_refs"] = resolved
+
+        if action.tool_id == TOOL_IMAGE_EDIT:
+            # Production acceptance defect closure: the direct "Редактировать"
+            # UI action supplies an explicit source artifact ref (never
+            # inferred by NLU/"last generated image" guessing -- see
+            # respond()'s deterministic dispatch). Resolve it through the
+            # same trusted, tenant/conversation-verified boundary as every
+            # other artifact access; a spoofed/foreign/non-image ref must
+            # never reach the image.edit tool.
+            source_ref = str(getattr(request, "image_edit_source_ref", "") or "").strip()
+            version_id = (
+                self._artifact_service.resolve_trusted_image_source(
+                    tenant_id=str(request.tenant_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    ref=source_ref,
+                )
+                if source_ref and self._artifact_service is not None
+                else None
+            )
+            if not version_id:
+                if task is not None:
+                    mark_executed(self._action_store, task, failed=True)
+                return ConversationResult(
+                    text="Не удалось найти исходное изображение для редактирования.",
+                    task_id=getattr(task, "task_id", None),
+                    metadata={"action_decision": CALL_TOOL, "artifacts": []},
+                )
+            arguments["source_version_id"] = version_id
 
         tool_request = ToolRequest(
             request_id=str(request.request_id or uuid.uuid4()),
@@ -423,6 +460,14 @@ class WorkflowPandaConversationGateway:
                     )
                     art["artifact_id"] = rec.artifact_id
                     art["download_url"] = f"/api/v1/business-assistant/artifacts/{rec.artifact_id}/download"
+                    # Production acceptance defect closure: point the markdown
+                    # image (built from this same ``artifacts`` list below) at
+                    # the canonical, authorized view route instead of the raw
+                    # product_media media URL -- this is what lets the UI
+                    # recover the exact artifact_id for direct Edit/Download
+                    # actions straight from the rendered chat message, with no
+                    # new message field and no duplicate image.
+                    art["view_url"] = f"/api/v1/business-assistant/artifacts/{rec.artifact_id}/view"
                 except Exception:
                     pass
         if idem and success:
@@ -438,6 +483,7 @@ class WorkflowPandaConversationGateway:
             family=getattr(task, "family", ""),
             data=data,
             success=success,
+            artifacts=artifacts,
         )
         return ConversationResult(
             text=reply,
@@ -449,12 +495,82 @@ class WorkflowPandaConversationGateway:
             },
         )
 
+    async def _respond_direct_image_edit(
+        self, request: ConversationRequest, *, instruction: str
+    ) -> ConversationResult:
+        """Deterministic image.edit dispatch for the direct "Редактировать"
+        action (production acceptance defect closure). Builds the exact same
+        shape of CALL_TOOL decision ``resolve_action_turn`` would produce for
+        FAMILY_IMAGE_EDIT, but without any text classification -- the target
+        artifact is already unambiguous (validated in ``_invoke_tool`` via
+        ``ArtifactService.resolve_trusted_image_source``), so there is no
+        "last generated image"/NLU guessing involved.
+        """
+
+        from business_assistant.action_continuation import (
+            ActionDecision,
+            ActiveTask,
+            CALL_TOOL,
+            FAMILY_IMAGE_EDIT,
+            IMAGE_EDIT_CONTRACT,
+            NEW_TASK,
+            READY_TO_EXECUTE,
+            STATUS_READY,
+            user_unavailable_message,
+        )
+
+        task_id = str(uuid.uuid4())
+        if self._tool_gateway is None:
+            return ConversationResult(
+                text=user_unavailable_message(FAMILY_IMAGE_EDIT),
+                task_id=task_id,
+                metadata={"action_decision": "FAIL_UNAVAILABLE", "artifacts": []},
+            )
+        task = ActiveTask(
+            task_id=task_id,
+            tenant_id=str(request.tenant_id or ""),
+            owner_id=str(request.user_id or ""),
+            conversation_id=str(request.conversation_id or ""),
+            family=FAMILY_IMAGE_EDIT,
+            tool_id=IMAGE_EDIT_CONTRACT.tool_id,
+            operation=IMAGE_EDIT_CONTRACT.operation,
+            goal=instruction,
+            parameters={"instruction": instruction},
+            artifact_type=IMAGE_EDIT_CONTRACT.artifact_type,
+            status=STATUS_READY,
+            risk=IMAGE_EDIT_CONTRACT.risk,
+        )
+        action = ActionDecision(
+            decision=CALL_TOOL,
+            readiness=READY_TO_EXECUTE,
+            continuation=NEW_TASK,
+            task=task,
+            arguments={"instruction": instruction},
+            tool_id=IMAGE_EDIT_CONTRACT.tool_id,
+            operation=IMAGE_EDIT_CONTRACT.operation,
+            idempotency_key=str(request.request_id or ""),
+        )
+        self.last_action_decision = action
+        return await self._invoke_tool(request, action)
+
     async def respond(self, request: ConversationRequest) -> ConversationResult:
         if self._workflow_engine is None or self._run_router is None or self._context_manager is None:
             raise ConversationUnavailableError("panda_intelligence_not_configured")
         text = str(request.text or "").strip()
         if not text:
             raise ConversationUnavailableError("empty_message")
+
+        # Production acceptance defect closure ("ChatGPT-like generated image
+        # actions"): the direct "Редактировать" UI action already knows the
+        # exact target artifact -- dispatch straight to the existing
+        # image.edit tool path instead of the ambiguous conversational
+        # family-detection heuristic below (resolve_action_turn), which today
+        # never classifies free text into FAMILY_IMAGE_EDIT at all. This is
+        # not a second pipeline: it reuses the same _invoke_tool()/ToolGateway/
+        # ArtifactService/image.edit machinery every other tool call uses.
+        if str(request.image_edit_source_ref or "").strip():
+            return await self._respond_direct_image_edit(request, instruction=text)
+
         from business_assistant.action_continuation import (
             ANSWER_TEXT,
             ASK_CLARIFICATION,
