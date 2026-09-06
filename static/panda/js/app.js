@@ -27,6 +27,10 @@
     // dialog -- set only from a specific image's own data-artifact-id
     // (see sanitize.js), never inferred/guessed.
     pendingEditArtifactId: null,
+    // Block 3.5 final closure: DOM node of the transient in-conversation
+    // live-generation indicator (see components.renderPendingAssistant),
+    // or null when none is showing. Never persisted to state.messages.
+    pendingIndicatorEl: null,
   };
 
   // Block 3.5.6/3.5.16: per-session cache so a reloaded conversation only
@@ -400,9 +404,34 @@
     }
   }
 
+  /** Block 3.5 final closure: show/hide the transient in-conversation live-
+   * generation indicator. Tied directly to the real request lifecycle --
+   * callers show it right before starting the actual blocking
+   * submit/edit call and hide it as soon as that same call settles
+   * (success OR failure), never on a fixed timer/fake duration. Purely
+   * additive DOM: never touches state.messages, so it can never be
+   * persisted, resurrected on reload, or left orphaned once the request
+   * that created it has settled -- renderTimeline()'s innerHTML reset also
+   * clears it as a safety net. */
+  function showPendingIndicator() {
+    hidePendingIndicator();
+    const node = ui.renderPendingAssistant();
+    els.timeline.appendChild(node);
+    state.pendingIndicatorEl = node;
+    scrollTimelineToBottom(true);
+  }
+
+  function hidePendingIndicator() {
+    if (state.pendingIndicatorEl && state.pendingIndicatorEl.parentNode) {
+      state.pendingIndicatorEl.parentNode.removeChild(state.pendingIndicatorEl);
+    }
+    state.pendingIndicatorEl = null;
+  }
+
   function renderTimeline(opts) {
     const force = Boolean(opts && opts.forceScroll);
     const stick = force || isNearBottom(scrollContainer());
+    state.pendingIndicatorEl = null;
     els.timeline.innerHTML = "";
     state.messages.forEach((m) => {
       let role = m.role;
@@ -859,6 +888,16 @@
     autoGrowComposer();
     updateSendEnabled();
     setStatus(window.PandaCopy.USER_THINKING, "running");
+    // Block 3.5 final closure: the real "generation" latency for this
+    // architecture is the blocking POST /requests call below (the backend
+    // resolves the whole turn, including any image generation, synchronously
+    // within that single HTTP round trip; the /requests polling further
+    // down is a no-op for this fast path and only matters for
+    // approval-gated turns). The top-right "Думаю..." pill alone is not
+    // sufficient in-conversation feedback, so show the live indicator right
+    // where the assistant's reply will land, and remove it the instant this
+    // exact call settles either way -- never on a fixed timer.
+    showPendingIndicator();
 
     try {
       const payload = {
@@ -868,6 +907,7 @@
         artifact_refs: state.attachments.map((a) => a.artifact_ref),
       };
       const req = await api.submitRequest(payload);
+      hidePendingIndicator();
       state.attachments = [];
       renderAttachmentChips();
       if (canShowDiagnostics()) {
@@ -879,6 +919,7 @@
       await trackRequest(req.request_id);
       await refreshConversations();
     } catch (e) {
+      hidePendingIndicator();
       els.composerError.textContent = api.mapError(e);
       setStatus("", "");
     } finally {
@@ -994,9 +1035,11 @@
     // attachment card) -- delegated so it works for messages rendered
     // both now and after future re-renders.
     els.timeline.addEventListener("click", (e) => {
-      // Production acceptance defect closure: direct Edit action lives
-      // outside the <img> itself (sibling in .msg-image-actions), so it
-      // never triggers the lightbox open below.
+      // Final ChatGPT 1:1 closure: Edit/Download overlay controls are
+      // siblings of the <img> (absolutely positioned inside the same
+      // .msg-image-wrap, on top of the image), never descendants of it, so
+      // this check always intercepts their clicks before the lightbox-open
+      // fallback below ever sees them.
       const editBtn = e.target.closest(".msg-image-edit-btn");
       if (editBtn) {
         openImageEditDialog(editBtn.dataset.artifactId);

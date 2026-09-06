@@ -25,14 +25,23 @@ class NodeStub {
     this.children = [];
     this.attrs = {};
     this.dataset = {};
+    this._className = "";
+    const self = this;
     this.classList = {
-      add() {},
-      remove() {},
-      contains() {
-        return false;
+      add(...names) {
+        const set = new Set(String(self._className || "").split(/\s+/).filter(Boolean));
+        names.forEach((n) => set.add(n));
+        self._className = Array.from(set).join(" ");
+      },
+      remove(...names) {
+        const set = new Set(String(self._className || "").split(/\s+/).filter(Boolean));
+        names.forEach((n) => set.delete(n));
+        self._className = Array.from(set).join(" ");
+      },
+      contains(name) {
+        return String(self._className || "").split(/\s+/).filter(Boolean).includes(name);
       },
     };
-    this._className = "";
   }
 
   get nodeType() {
@@ -118,7 +127,7 @@ loadScript("static/panda/js/sanitize.js");
 loadScript("static/panda/js/components.js");
 
 function serialize(node) {
-  const out = { imgs: [], anchors: [], texts: [], pres: [] };
+  const out = { imgs: [], anchors: [], texts: [], pres: [], buttons: [], spans: [] };
   function walk(n) {
     if (!n) return;
     if (n.nodeType === 3) {
@@ -126,10 +135,44 @@ function serialize(node) {
       return;
     }
     if (n.tagName === "img") {
-      out.imgs.push({ src: n.src, alt: n.alt });
+      out.imgs.push({
+        src: n.src,
+        alt: n.alt,
+        className: n.className,
+        dataset: { ...n.dataset },
+      });
     }
     if (n.tagName === "a") {
-      out.anchors.push({ href: n.href, text: n.textContent });
+      out.anchors.push({
+        href: n.href,
+        text: n.textContent,
+        className: n.className,
+        dataset: { ...n.dataset },
+        download: n.getAttribute("download") ?? null,
+        // .title may be set as a bare property (n.title = "...") rather
+        // than via setAttribute -- check both, matching real DOM semantics.
+        title: n.title ?? n.getAttribute("title") ?? null,
+        ariaLabel: n.getAttribute("aria-label") ?? null,
+      });
+    }
+    if (n.tagName === "button") {
+      out.buttons.push({
+        text: n.textContent,
+        className: n.className,
+        dataset: { ...n.dataset },
+        type: n.type ?? n.getAttribute("type") ?? null,
+        title: n.title ?? n.getAttribute("title") ?? null,
+        ariaLabel: n.getAttribute("aria-label") ?? null,
+      });
+    }
+    if (n.tagName === "span") {
+      out.spans.push({
+        className: n.className,
+        role: n.getAttribute("role") ?? null,
+        ariaLive: n.getAttribute("aria-live") ?? null,
+        ariaLabel: n.getAttribute("aria-label") ?? null,
+        ariaHidden: n.getAttribute("aria-hidden") ?? null,
+      });
     }
     if (n.tagName === "pre") {
       out.pres.push(n.textContent);
@@ -155,6 +198,8 @@ for (const c of input.cases || []) {
       node = global.PandaComponents.renderMessage(c.args.role, c.args.content, c.args.meta || null);
     } else if (c.fn === "renderArtifacts") {
       node = global.PandaComponents.renderArtifacts(c.args.artifacts);
+    } else if (c.fn === "renderPendingAssistant") {
+      node = global.PandaComponents.renderPendingAssistant();
     } else {
       throw new Error("unknown fn " + c.fn);
     }
