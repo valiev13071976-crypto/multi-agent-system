@@ -34,6 +34,14 @@ class ConversationRequest:
     # Resolved through the same trusted, tenant/conversation-verified
     # ArtifactService boundary as every other artifact access.
     image_edit_source_ref: str = ""
+    # Block 4.28: canonical resolved presentation directive (style/tone/
+    # length/language), built once by personalization.resolve_style_profile
+    # BEFORE this request is constructed. Applied ONLY to the free-text
+    # conversational model prompt below (never to CALL_TOOL/canned tool-result
+    # text, never to tool-routing classification) -- see respond(): a style
+    # preference can change wording, never authorization/HITL/tool permissions
+    # (Block 4.28.7).
+    style_directive: str = ""
 
 
 @dataclass(frozen=True)
@@ -585,6 +593,14 @@ class WorkflowPandaConversationGateway:
         t0 = time.monotonic()
         resolution = resolve_follow_up(text, history=request.history or ())
         prompt = build_follow_up_prompt(text, resolution)
+        # Block 4.28.2: the resolved style/tone/length/language directive is
+        # appended to the model prompt only -- classification below
+        # (resolve_action_turn) always runs on the original, unmodified
+        # `text`, so a style preference can never change which tool/agent is
+        # selected, and CALL_TOOL replies (format_tool_user_text) below never
+        # see this directive at all.
+        if request.style_directive:
+            prompt = f"{prompt}\n\n[{request.style_directive}]"
         follow_up_ms = int((time.monotonic() - t0) * 1000)
         task_id = str(uuid.uuid4())
 

@@ -222,6 +222,7 @@ class BusinessAssistantService:
         tenant_id: str,
         conversation_id: str | None,
         history=(),
+        style_directive: str = "",
     ) -> ConversationRequest:
         return ConversationRequest(
             text=req.text,
@@ -232,6 +233,7 @@ class BusinessAssistantService:
             correlation_id=req.correlation_id,
             history=tuple(history or ()),
             attachment_refs=tuple(req.artifact_refs or ()),
+            style_directive=str(style_directive or ""),
         )
 
     def _execution_from_conversation(
@@ -269,6 +271,7 @@ class BusinessAssistantService:
         tenant_id: str,
         conversation_id: str | None = None,
         history=(),
+        style_directive: str = "",
     ) -> BusinessExecution:
         """Handle ordinary chat via Panda AI core — async path for API/event-loop callers."""
         req = self._get_request(tenant_id=tenant_id, request_id=request_id)
@@ -283,6 +286,7 @@ class BusinessAssistantService:
                     tenant_id=tenant_id,
                     conversation_id=conversation_id,
                     history=history,
+                    style_directive=style_directive,
                 )
             )
         except ConversationUnavailableError as exc:
@@ -296,6 +300,7 @@ class BusinessAssistantService:
         tenant_id: str,
         conversation_id: str | None = None,
         history=(),
+        style_directive: str = "",
     ) -> BusinessExecution:
         """Sync entry for non-event-loop callers (tests, CLI). API path uses respond_conversationally_async."""
         coro = self.respond_conversationally_async(
@@ -303,6 +308,7 @@ class BusinessAssistantService:
             tenant_id=tenant_id,
             conversation_id=conversation_id,
             history=history,
+            style_directive=style_directive,
         )
         try:
             asyncio.get_running_loop()
