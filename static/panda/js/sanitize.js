@@ -55,6 +55,36 @@
             ? url.replace(/\/view$/, "/download")
             : url + (url.includes("?") ? "&" : "?") + "download=1";
           wrap.appendChild(img);
+          // Production acceptance defect closure: every generated image is
+          // now delivered through the canonical /artifacts/{id}/view route
+          // (see conversation_gateway._invoke_tool), so its artifact_id is
+          // recoverable straight from the URL -- no extra message field, no
+          // extra request. Direct Edit/Download actions render right below
+          // the image itself, without requiring the lightbox to be opened
+          // first (ChatGPT-like model). Images without a recoverable
+          // artifact_id (e.g. any legacy /media/{version_id} link) render
+          // exactly as before, unchanged.
+          const artifactMatch = url.match(/\/artifacts\/([^/]+)\/view(?:[/?]|$)/);
+          if (artifactMatch) {
+            const artifactId = decodeURIComponent(artifactMatch[1]);
+            img.dataset.artifactId = artifactId;
+            wrap.classList.add("has-actions");
+            const actions = document.createElement("div");
+            actions.className = "msg-image-actions";
+            const editBtn = document.createElement("button");
+            editBtn.type = "button";
+            editBtn.className = "msg-image-action msg-image-edit-btn";
+            editBtn.dataset.artifactId = artifactId;
+            editBtn.textContent = "✏️ Редактировать";
+            actions.appendChild(editBtn);
+            const downloadBtn = document.createElement("a");
+            downloadBtn.className = "msg-image-action msg-image-download-btn";
+            downloadBtn.href = img.dataset.downloadUrl;
+            downloadBtn.setAttribute("download", "");
+            downloadBtn.textContent = "⬇️ Скачать";
+            actions.appendChild(downloadBtn);
+            wrap.appendChild(actions);
+          }
           el.appendChild(wrap);
         } else if (/^https?:\/\//i.test(trimmed)) {
           const a = document.createElement("a");

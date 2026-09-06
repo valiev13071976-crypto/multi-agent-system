@@ -30,7 +30,12 @@ from business_assistant.models import (
     STATUS_RUNNING,
     STATUS_WAITING_FOR_APPROVAL,
 )
-from business_assistant.conversation_gateway import select_canonical_final_answer, is_internal_assistant_text
+from business_assistant.conversation_gateway import (
+    ConversationRequest,
+    ConversationUnavailableError,
+    is_internal_assistant_text,
+    select_canonical_final_answer,
+)
 from business_assistant.follow_up import HistoryTurn
 from business_assistant.service import BusinessAssistantService
 from business_assistant_api.errors import (
@@ -826,6 +831,81 @@ class BusinessAssistantApiService:
         else:
             out["artifact_id"] = ""
         return out
+
+    async def edit_generated_image(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str,
+        conversation_id: str,
+        source_artifact_id: str,
+        instruction: str,
+    ) -> dict:
+        """Direct "Редактировать" action (production acceptance defect
+        closure): deterministic image.edit dispatch that targets the EXACT
+        artifact the user selected in the normal conversation view.
+
+        Reuses every existing trusted component unchanged -- ArtifactService
+        tenant/conversation-verified resolution (fails closed on any
+        cross-tenant/foreign/non-image ref, see
+        ``WorkflowPandaConversationGateway._invoke_tool``), the existing
+        image.edit tool via ToolGateway, existing generated-image artifact
+        registration, and existing conversation message persistence. This is
+        not a second editing pipeline: it calls the exact same
+        ``conversation_gateway.respond()`` entry point every ordinary chat
+        turn uses, just without the ambiguous NLU family-detection step
+        (unnecessary here -- the artifact and instruction already arrived
+        unambiguous from the UI's direct action).
+        """
+
+        tenant = require_tenant_id(tenant_id)
+        conv = str(conversation_id or "").strip()
+        text = str(instruction or "").strip()
+        source_ref = str(source_artifact_id or "").strip()
+        if not conv:
+            raise BusinessAssistantApiError(BAA_INVALID_REQUEST, "conversation_id_required", http_status=400)
+        if not text or len(text) > 4000:
+            raise BusinessAssistantApiError(BAA_INVALID_REQUEST, "instruction_invalid", http_status=400)
+        if not source_ref:
+            raise BusinessAssistantApiError(BAA_INVALID_REQUEST, "source_artifact_required", http_status=400)
+        gateway = getattr(self.ba, "conversation_gateway", None)
+        if gateway is None:
+            raise BusinessAssistantApiError(
+                BAA_CONVERSATION_UNAVAILABLE, "conversation_gateway_unconfigured", http_status=503
+            )
+
+        self._ensure_conversation(tenant, owner_id, conv)
+        request_id = str(uuid.uuid4())
+        # 3.5.3-style persistence: the instruction and the exact source
+        # artifact it targeted survive reload/resume just like any other
+        # attached-file turn.
+        self._append_message(tenant, conv, role="user", content=text, request_id=request_id, artifact_refs=(source_ref,))
+        try:
+            result = await gateway.respond(
+                ConversationRequest(
+                    text=text,
+                    tenant_id=tenant,
+                    user_id=owner_id,
+                    request_id=request_id,
+                    conversation_id=conv,
+                    image_edit_source_ref=source_ref,
+                )
+            )
+        except ConversationUnavailableError as exc:
+            raise BusinessAssistantApiError(BAA_CONVERSATION_UNAVAILABLE, str(exc), http_status=503) from exc
+        artifacts = []
+        if isinstance(result.metadata, dict):
+            artifacts = list(result.metadata.get("artifacts") or [])
+        self._append_message(
+            tenant,
+            conv,
+            role="assistant",
+            content=result.text,
+            request_id=request_id,
+            artifact_refs=self._non_image_artifact_refs(artifacts),
+        )
+        self.store.touch_conversation(conversation_id=conv, tenant_id=tenant, owner_id=owner_id)
+        return {"request_id": request_id, "text": result.text, "artifacts": artifacts}
 
     # --- internals ---
 

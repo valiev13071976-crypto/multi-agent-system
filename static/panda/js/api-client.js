@@ -118,6 +118,15 @@
     artifactDownloadUrl(artifactRef) {
       return `${BASE}/artifacts/${encodeURIComponent(artifactRef)}/download`;
     },
+    // Production acceptance defect closure: direct "Редактировать" action --
+    // deterministic image.edit targeting the exact artifact clicked in the
+    // normal conversation view (never the ambiguous "last generated image").
+    editImage(artifactId, conversationId, instruction) {
+      return request(`/artifacts/${encodeURIComponent(artifactId)}/edit`, {
+        method: "POST",
+        body: JSON.stringify({ conversation_id: conversationId, instruction }),
+      });
+    },
     approve(requestId, body) {
       return request(`/requests/${encodeURIComponent(requestId)}/approve`, {
         method: "POST",

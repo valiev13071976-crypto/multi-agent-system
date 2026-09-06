@@ -906,11 +906,17 @@ def mark_executed(store: ActiveTaskStore, task: ActiveTask, *, artifact_ids: tup
     store.put(current)
 
 
-def format_tool_user_text(*, family: str, data: Mapping[str, Any] | None, success: bool) -> str:
+def format_tool_user_text(
+    *,
+    family: str,
+    data: Mapping[str, Any] | None,
+    success: bool,
+    artifacts: list[dict[str, Any]] | None = None,
+) -> str:
     if not success:
         return _user_tool_error()
     payload = dict(data or {})
-    if family == FAMILY_IMAGE_GENERATE:
+    if family in (FAMILY_IMAGE_GENERATE, FAMILY_IMAGE_EDIT):
         urls: list[str] = []
         seen: set[str] = set()
 
@@ -919,23 +925,36 @@ def format_tool_user_text(*, family: str, data: Mapping[str, Any] | None, succes
                 seen.add(url)
                 urls.append(url)
 
-        # Prefer the per-item "assets" list (one dict per generated variant,
-        # each with its OWN view_url); it is a superset of the top-level
-        # "view_url"/"url" convenience mirror (== the first asset's URL).
-        # Consulting BOTH sources unconditionally previously double-added the
-        # first image's URL -- rendering the same generated image twice in a
-        # single-variant response. Bare "version_ids" (plain id strings, no
-        # per-item URL) fall back to the single top-level view_url/url.
-        assets = payload.get("assets")
-        if isinstance(assets, list) and assets:
-            for item in assets:
-                if isinstance(item, dict):
-                    _add(str(item.get("view_url") or item.get("url") or ""))
+        # Production acceptance defect closure: prefer the caller-supplied,
+        # already-registered ``artifacts`` list (each item's view_url has
+        # been rewritten to the canonical /artifacts/{id}/view route once
+        # register_external_image() runs) so the embedded markdown link and
+        # the canonical artifact_id the UI needs for direct Edit/Download
+        # actions always point at the exact same resource. Falls back to the
+        # raw tool payload for callers that never registered artifacts
+        # (existing tests/behavior unchanged).
+        if artifacts:
+            for item in artifacts:
+                if isinstance(item, dict) and str(item.get("artifact_type") or item.get("type") or "") == "image":
+                    _add(str(item.get("view_url") or ""))
         else:
-            for key in ("view_url", "url"):
-                value = payload.get(key)
-                if isinstance(value, str):
-                    _add(value)
+            # Prefer the per-item "assets" list (one dict per generated variant,
+            # each with its OWN view_url); it is a superset of the top-level
+            # "view_url"/"url" convenience mirror (== the first asset's URL).
+            # Consulting BOTH sources unconditionally previously double-added the
+            # first image's URL -- rendering the same generated image twice in a
+            # single-variant response. Bare "version_ids" (plain id strings, no
+            # per-item URL) fall back to the single top-level view_url/url.
+            assets = payload.get("assets")
+            if isinstance(assets, list) and assets:
+                for item in assets:
+                    if isinstance(item, dict):
+                        _add(str(item.get("view_url") or item.get("url") or ""))
+            else:
+                for key in ("view_url", "url"):
+                    value = payload.get(key)
+                    if isinstance(value, str):
+                        _add(value)
         lines = [_user_success_image()]
         for url in urls[:8]:
             lines.append(f"![изображение]({url})")

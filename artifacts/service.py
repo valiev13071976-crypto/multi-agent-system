@@ -304,6 +304,30 @@ class ArtifactService:
             return None
         return rec
 
+    def resolve_trusted_image_source(
+        self, *, tenant_id: str, conversation_id: str, ref: str
+    ) -> str | None:
+        """Trusted image-edit source resolution (production acceptance defect
+        closure: direct "Редактировать" action). Returns the underlying
+        product_media ``version_id`` for a tenant/conversation-verified,
+        product_media-backed image artifact so the EXISTING image.edit tool
+        (which only understands ``source_version_id``) can consume it --
+        or ``None`` if the ref does not resolve, belongs to another tenant,
+        left this conversation, or is not an image.edit-eligible image.
+
+        Never trusts ``ref`` beyond running it through ``resolve_trusted_ref``
+        (the same fail-closed tenant/conversation boundary every other
+        trusted attachment lookup uses); this is not a second trust
+        mechanism, just a narrower view onto the existing one.
+        """
+
+        rec = self.resolve_trusted_ref(tenant_id=tenant_id, conversation_id=conversation_id, ref=ref)
+        if rec is None or rec.kind != KIND_IMAGE:
+            return None
+        if not rec.storage_ref.startswith(_PRODUCT_MEDIA_PREFIX):
+            return None
+        return rec.storage_ref[len(_PRODUCT_MEDIA_PREFIX) :]
+
     def resolve_trusted_refs(
         self, *, tenant_id: str, conversation_id: str, refs: tuple[str, ...]
     ) -> list[dict]:
