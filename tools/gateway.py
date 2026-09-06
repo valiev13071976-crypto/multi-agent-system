@@ -417,6 +417,28 @@ class ToolGateway:
                 workload_class=workload_class,
                 workload_mismatch=bool(route.routing_metadata.get("workload_mismatch")),
             )
+            # Scale 3.36: shadow-traffic side-effect firewall, enforced at the
+            # tool capability layer itself (not developer discipline). Trusted
+            # only via server-set ToolRequest.metadata["traffic_mode"], never
+            # user tool arguments. Any tool/action not proven shadow-safe
+            # (read_only, or side_effect_level none/read) fails closed here,
+            # before any adapter/side-effect executor is ever reached.
+            if str((request.metadata or {}).get("traffic_mode") or "").strip().lower() == "shadow":
+                from tools.errors import ToolShadowNotEligibleError
+                from tools.models import SIDE_EFFECT_NONE, SIDE_EFFECT_READ
+
+                if not (
+                    descriptor.read_only
+                    or descriptor.side_effect_level in {SIDE_EFFECT_NONE, SIDE_EFFECT_READ}
+                ):
+                    self.audit.record(
+                        EVENT_TOOL_DENIED,
+                        request_id=request.request_id,
+                        tool_id=descriptor.tool_id,
+                        reason_code="SHADOW_NOT_ELIGIBLE",
+                        traffic_mode="shadow",
+                    )
+                    raise ToolShadowNotEligibleError()
             if request.operation not in descriptor.operations:
                 raise ToolOperationNotAllowedError()
             # Light permissions wiring when capabilities provided
