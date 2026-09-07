@@ -71,7 +71,7 @@ class RealtimeVoiceModeExecutableJsTests(unittest.TestCase):
             0,
             f"node test suite failed:\nSTDOUT:\n{result.stdout}\nSTDERR:\n{result.stderr}",
         )
-        self.assertIn("# pass 14", result.stdout)
+        self.assertIn("# pass 17", result.stdout)
         self.assertIn("# fail 0", result.stdout)
 
 

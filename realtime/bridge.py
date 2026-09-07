@@ -43,11 +43,66 @@ latency timeline (speech_start .. listening_resumed, recorded via
 _mark_latency/_latency_timeline_ms and logged as
 "voice_turn_latency_timeline") makes any FUTURE real bottleneck provable
 from production logs alone instead of guessed at.
+
+PR #24 lifecycle defect closure (production acceptance failed after PR
+#23): three further CONFIRMED issues, found by inspecting current main
+rather than assumed:
+
+1. Unsafe implicit barge-in: on_audio_chunk() used to treat the mere
+   ARRIVAL of an ordinary binary microphone chunk as proof of intentional
+   user interruption, cancelling the active assistant turn. A binary chunk
+   is transport, not authority -- background noise, echo, Panda's own
+   playback bleeding into the mic, and MediaRecorder/transport artifacts
+   are all indistinguishable from real speech at the byte level. Fixed:
+   ordinary audio arriving while the assistant still owns presentation
+   (THINKING/ASSISTANT_STREAMING_TEXT/ASSISTANT_SPEAKING) is now dropped,
+   not buffered/authorized -- the EXPLICIT `barge_in` control frame (see
+   barge_in() below) is the ONLY cancellation authority, matching what the
+   client already sends only after ITS OWN confirmed/sustained
+   interruption detection (static/panda/js/realtime.js
+   interruptAndListen()).
+
+2. Blocking STT/TTS network I/O on the event loop: self.stt.transcribe()/
+   self.tts.synthesize() are plain synchronous methods (see ui_chat/voice/
+   stt.py, ui_chat/voice/tts.py) and the REAL production providers
+   (integrations/production/adapters/speech.py) perform actual blocking
+   HTTP calls via a synchronous httpx.Client. Calling them in-line from
+   this async code (as before) freezes the ENTIRE asyncio event loop --
+   every other concurrent session's WebSocket frames, not just this one's
+   -- for the whole network round trip (this app deploys as a single
+   Uvicorn worker; see product_media/tools.py's identical, already-fixed
+   pattern for the same root cause on the image-generation path). This is
+   the most likely explanation for the intermittently reported "reply
+   delayed/hangs" symptom in production. Fixed: both calls now run via
+   asyncio.to_thread(), the project's existing convention for exactly this
+   situation -- no change to the provider interfaces.
+
+3. Observability: PR #23's structured `_log_voice_event` payload was
+   invisible in actual production log output -- main.py's root
+   logging.basicConfig() format string never references the `extra=`
+   dict's keys, so only the literal string "realtime_voice_event" ever
+   reached stdout, regardless of what fields this module computed. Fixed
+   by folding the SAME payload into the log message text itself (as safe,
+   bounded JSON) so it survives through the EXISTING format string
+   unchanged -- still no transcript/audio content, no secrets.
+
+Turn-ownership invariant (MUST-VERIFY, not a proven race): every reachable
+caller of commit_turn() already guarantees the previous presentation task
+is no longer active before creating a new one (on_audio_commit()/
+_handle_spoken_confirmation() only ever run after audio was accepted,
+which -- per fix #1 above -- only happens once the session has actually
+LEFT every presentation-owning state; on_text_message() explicitly awaits
+barge_in() first). commit_turn() nonetheless asserts this defense-in-depth
+via _ensure_single_presentation_owner() below so the "at most one
+presentation-owning turn per session" contract is explicit and
+regression-proof rather than an implicit, easily-broken-by-a-future-change
+assumption.
 """
 
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 import time
@@ -146,7 +201,26 @@ def _log_voice_event(event: str, *, session: RealtimeSession, turn_id: str = "",
             "turn_id": turn_id or session.current_turn_id,
         }
         payload.update(fields)
-        _voice_log.info("realtime_voice_event", extra={"voice_event": payload})
+        # PR #24 CONFIRMED OBSERVABILITY DEFECT fix: main.py's root logging
+        # config (logging.basicConfig(format="%(asctime)s %(levelname)s
+        # %(name)s %(message)s")) never references %(voice_event)s, so the
+        # structured payload passed via extra={} below was silently dropped
+        # from every actually-rendered production log line -- only the
+        # literal string "realtime_voice_event" ever reached stdout/log
+        # aggregation, regardless of what this module computed. Folding the
+        # SAME payload into the message text itself (as compact, safe,
+        # bounded JSON -- never transcript/audio content or secrets) means
+        # it survives through the EXISTING format string unchanged: no new
+        # logging subsystem/handler/formatter, no change to main.py's
+        # global config, every field grep/log-search/correlation-tool-usable
+        # directly from stdout. `extra=` is kept too so existing/future
+        # tests can keep asserting on the structured dict directly via
+        # assertLogs(...)'s LogRecord.voice_event attribute.
+        _voice_log.info(
+            "realtime_voice_event %s",
+            json.dumps(payload, default=str, sort_keys=True),
+            extra={"voice_event": payload},
+        )
     except Exception:
         pass
 
@@ -486,8 +560,33 @@ class RealtimeConversationBridge:
 
         if not chunk:
             return
+
+        # PR #24 CONFIRMED DEFECT FIX (unsafe implicit barge-in): an
+        # ordinary binary microphone chunk is NOT proof of intentional user
+        # interruption -- background noise, echo, Panda's own TTS playback
+        # bleeding into the mic, and MediaRecorder/transport artifacts are
+        # all indistinguishable from real speech at the byte level.
+        # Cancellation authority belongs EXCLUSIVELY to the explicit
+        # `barge_in` control frame (see barge_in() below, dispatched by
+        # realtime/router.py's _handle_control_frame for the JSON
+        # {"type":"barge_in"} frame the client sends only after ITS OWN
+        # confirmed/sustained interruption detection -- see
+        # static/panda/js/realtime.js interruptAndListen()). While the
+        # assistant still owns presentation (THINKING/
+        # ASSISTANT_STREAMING_TEXT/ASSISTANT_SPEAKING) and no explicit
+        # barge-in has happened yet, ordinary audio bytes are simply NOT an
+        # authorized capture -- drop them rather than silently cancel the
+        # active turn's presentation ownership. Once an explicit barge-in
+        # transitions the session to INTERRUPTED, this guard no longer
+        # applies and new audio is accepted normally (see state_machine.py
+        # TRANSITIONS: (INTERRUPTED, AUDIO_STARTED) -> USER_SPEAKING).
         if session.state_machine.state in _INTERRUPTIBLE_STATES:
-            await self.barge_in(session)
+            _log_voice_event(
+                "voice_audio_ignored_no_presentation_ownership",
+                session=session,
+                state=session.state_machine.state,
+            )
+            return
 
         first = not session.audio_buffer
         session.audio_buffer.extend(chunk)
@@ -532,11 +631,22 @@ class RealtimeConversationBridge:
             mime_type=session.mime_type,
         )
         try:
-            text = normalize_transcript(
-                self.stt.transcribe(
-                    audio=audio_bytes, mime_type=session.mime_type, language=session.language_hint
-                )
+            # PR #24 MUST-VERIFY #7 CONFIRMED (blocking STT network I/O):
+            # SpeechToTextProvider.transcribe() is a plain synchronous
+            # method, and the real production provider
+            # (integrations.production.adapters.speech.
+            # OpenAISpeechToTextProvider) performs an actual blocking HTTP
+            # call via a synchronous httpx.Client. Calling it in-line here
+            # would freeze the ENTIRE asyncio event loop -- every other
+            # concurrent session's WebSocket frames, not just this one's --
+            # for the whole network round trip. asyncio.to_thread() is this
+            # project's existing convention for exactly this situation (see
+            # product_media/tools.py's identical fix for the image-
+            # generation path); the provider interface itself is unchanged.
+            raw_transcript = await asyncio.to_thread(
+                self.stt.transcribe, audio=audio_bytes, mime_type=session.mime_type, language=session.language_hint
             )
+            text = normalize_transcript(raw_transcript)
             REALTIME_METRICS.inc("stt_call")
             self._record_speech_usage(session, capability="stt")
             _mark_latency(session, "stt_final")
@@ -627,6 +737,40 @@ class RealtimeConversationBridge:
             return f"rtc_{session.conversation_id[:12]}_{cid}"[:120]
         return session.next_turn_id()
 
+    async def _ensure_single_presentation_owner(self, session: RealtimeSession, *, new_turn_id: str) -> None:
+        """PR #24 MUST-VERIFY #4 invariant: at most one presentation-owning
+        assistant turn task may be active per session at any time. Every
+        reachable production caller of commit_turn() already guarantees
+        this on its own -- on_audio_commit()/_handle_spoken_confirmation()
+        only ever reach a new commit after audio was accepted, which (see
+        on_audio_chunk's PR #24 barge-in fix above) only happens once the
+        session has actually LEFT every presentation-owning state;
+        on_text_message() explicitly awaits barge_in() first. This method
+        is therefore defense-in-depth, not a fix for a proven race: it
+        makes the "never silently overwrite a live current_task" contract
+        explicit and regression-proof rather than an implicit assumption
+        that a future code path could quietly break. If a stale task IS
+        ever found still active here, it is cancelled and awaited (never
+        silently overwritten) so two tasks can never write interleaved
+        turn_id-tagged events to the same sink."""
+
+        stale = session.current_task
+        if stale is None or stale.done():
+            return
+        _log_voice_event(
+            "voice_turn_ownership_guard_triggered",
+            session=session,
+            turn_id=new_turn_id,
+            stale_turn_id=session.current_turn_id,
+        )
+        stale.cancel()
+        try:
+            await stale
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            pass
+
     async def commit_turn(
         self, session: RealtimeSession, *, text: str, client_turn_id: str = "", is_voice: bool
     ) -> str:
@@ -638,6 +782,7 @@ class RealtimeConversationBridge:
             # _submit_prepare) is the authoritative guarantee even if this
             # in-memory set were ever lost (e.g. process restart).
             return turn_id
+        await self._ensure_single_presentation_owner(session, new_turn_id=turn_id)
         session.committed_turn_ids.add(turn_id)
         # One canonical ownership rule for committing a voice/text turn
         # (production voice defect closure section 7): this is the ONLY
@@ -775,7 +920,16 @@ class RealtimeConversationBridge:
                 chunk_count=len(tts_chunks),
             )
             try:
-                audio_bytes = self.tts.synthesize(text=tts_text, voice=session.voice_id, mime_type="audio/mpeg")
+                # PR #24 MUST-VERIFY #7 CONFIRMED (blocking TTS network
+                # I/O): same reasoning as the STT call in on_audio_commit()
+                # above -- TextToSpeechProvider.synthesize() is synchronous
+                # and the real production provider performs a blocking
+                # httpx.Client call. asyncio.to_thread() keeps this event
+                # loop free for every other concurrent session while this
+                # one's TTS request is in flight.
+                audio_bytes = await asyncio.to_thread(
+                    self.tts.synthesize, text=tts_text, voice=session.voice_id, mime_type="audio/mpeg"
+                )
                 REALTIME_METRICS.inc("tts_call")
                 self._record_speech_usage(session, capability="tts", turn_id=turn_id)
                 _log_voice_event(
@@ -957,6 +1111,7 @@ class RealtimeConversationBridge:
                 session.state_machine.transition(SessionEvent.ERROR)
             return turn_id
         reply = {"approve": "Подтверждено.", "reject": "Отклонено.", "cancel": "Отменено."}[action]
+        await self._ensure_single_presentation_owner(session, new_turn_id=turn_id)
         task = asyncio.create_task(
             self._stream_text_and_audio(session, turn_id=turn_id, text=reply, turn_start=time.monotonic())
         )
