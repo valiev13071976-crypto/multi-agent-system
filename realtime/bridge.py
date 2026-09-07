@@ -113,6 +113,18 @@ _AUDIO_CHUNK_BYTES = 4096
 # (point 3/4). Not a fixed artificial response-delay timer -- it only caps
 # how often we re-call STT on the still-growing in-progress buffer.
 _PARTIAL_STT_MIN_INTERVAL_SECONDS = 0.7
+# PRODUCTION ACCEPTANCE FAILED follow-up (turn-lifecycle root cause, not
+# another rate throttle): the primary fix for "uncontrolled /audio/
+# transcriptions loop" is the client-side fix (realtime.js's adaptive VAD
+# noise floor + VAD_MAX_TURN_MS forward-progress safety net), which
+# guarantees audio.commit is sent within a bounded time. This is a
+# server-side DEFENSE-IN-DEPTH tied directly to the canonical turn
+# lifecycle invariant ("one physical utterance -> one audio.commit"): if a
+# single capture somehow never gets committed (a client bug, a dropped
+# commit frame, ...) partial re-transcription must still have a hard
+# lifetime ceiling instead of continuing to bill/call the real STT provider
+# for as long as the WebSocket happens to stay open.
+_PARTIAL_STT_MAX_UNCOMMITTED_SECONDS = 20.0
 # DEFECT B point 5 (minimal time-to-first-audio): the TTS provider interface
 # is buffer-based (one synthesize() call -> one complete audio buffer), so a
 # single call for a long, multi-sentence reply blocks first_audio_chunk on
@@ -475,6 +487,7 @@ class RealtimeConversationBridge:
             session.turn_started_monotonic = time.monotonic()
             session.first_transcript_recorded = False
             session.last_partial_stt_monotonic = None
+            session.partial_stt_capped_logged = False
             # DEFECT B latency acceptance: a fresh capture is a fresh turn --
             # reset the per-turn stage timeline so a previous turn's marks
             # (or a barge-in's aborted turn, guaranteed finished by the
@@ -500,6 +513,25 @@ class RealtimeConversationBridge:
         # backlog on this connection's single WS receive loop ahead of the
         # eventual audio.commit control frame.
         now = time.monotonic()
+        if (
+            session.turn_started_monotonic is not None
+            and (now - session.turn_started_monotonic) > _PARTIAL_STT_MAX_UNCOMMITTED_SECONDS
+        ):
+            # Defense-in-depth ceiling (see module constant docstring): this
+            # capture has been open, uncommitted, for longer than any real
+            # utterance should ever take -- stop calling the (paid) STT
+            # provider entirely until a commit/new turn resets the ceiling,
+            # rather than continuing an unbounded loop of transcription
+            # calls for the lifetime of the WebSocket connection.
+            if not session.partial_stt_capped_logged:
+                session.partial_stt_capped_logged = True
+                REALTIME_METRICS.inc_error("partial_stt_capped")
+                _log_voice_event(
+                    "voice_capture_partial_stt_capped",
+                    session=session,
+                    elapsed_s=round(now - session.turn_started_monotonic, 1),
+                )
+            return
         due = (
             session.last_partial_stt_monotonic is None
             or (now - session.last_partial_stt_monotonic) >= _PARTIAL_STT_MIN_INTERVAL_SECONDS
