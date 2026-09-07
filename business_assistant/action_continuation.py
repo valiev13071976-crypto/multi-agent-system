@@ -47,6 +47,13 @@ TOOL_SCRAPE_EXTRACT = "scrape.extract"
 # composes Search/Acquisition evidence -> Research -> Content generation ->
 # Review -> Artifact -- Panda decides internally whether/what to fetch.
 TOOL_CONTENT_CREATE = "content.create"
+# Block 5.5: single chat-facing entry point for the activated Product
+# Intelligence platform (see ``product_intel/tools.py``'s ``"assist"`` op /
+# ``ProductIntelligenceService.execute_nl_request``). Mirrors
+# ``TOOL_DATA_EXCEL_ASSISTANT``: Panda -- not the user -- decides internally
+# which governed ``product.*`` operation (import/match/dedupe/validate/
+# reconcile/enrich/export) the instruction maps to.
+TOOL_PRODUCT_CATALOG_ASSIST = "product.catalog_assist"
 
 
 # --- Public decision / lifecycle labels (internal only) -------------------
@@ -93,6 +100,13 @@ FAMILY_ACQUISITION = "acquisition"
 # records, never drafts prose) and FAMILY_WRITE (which mutates live business
 # state and always requires separate approval).
 FAMILY_CONTENT = "content"
+# Block 5.5: canonical internal product/catalog intelligence (import,
+# field mapping, normalization, matching/dedupe, validation, reconciliation,
+# content/media enrichment, vendor-neutral export). Distinct from
+# FAMILY_EXCEL (generic spreadsheet analysis/transform with no product
+# domain model) -- a plain "attach a spreadsheet" turn still routes to
+# FAMILY_EXCEL; only an explicit product-catalog verb routes here.
+FAMILY_PRODUCT = "product"
 
 RISK_GENERATE = "generate"
 RISK_READ = "read"
@@ -211,12 +225,29 @@ CONTENT_CONTRACT = CapabilityContract(
     artifact_type="content",
 )
 
+PRODUCT_CONTRACT = CapabilityContract(
+    family=FAMILY_PRODUCT,
+    tool_id=TOOL_PRODUCT_CATALOG_ASSIST,
+    operation="assist",
+    # No statically-required parameter: an attachment/inherited dataset_id
+    # OR an already-existing catalog (from a prior product-family turn)
+    # each independently satisfy "do we have data to operate on" -- checked
+    # explicitly in the FAMILY_PRODUCT branch below, mirroring FAMILY_EXCEL.
+    required=(),
+    optional=("text", "dataset_id", "catalog_id"),
+    defaults={},
+    risk=RISK_READ,
+    required_capabilities=(CAP_FILESYSTEM_WRITE,),
+    artifact_type="catalog",
+)
+
 CONTRACTS: dict[str, CapabilityContract] = {
     FAMILY_IMAGE_GENERATE: IMAGE_GENERATE_CONTRACT,
     FAMILY_IMAGE_EDIT: IMAGE_EDIT_CONTRACT,
     FAMILY_EXCEL: EXCEL_CONTRACT,
     FAMILY_ACQUISITION: ACQUISITION_CONTRACT,
     FAMILY_CONTENT: CONTENT_CONTRACT,
+    FAMILY_PRODUCT: PRODUCT_CONTRACT,
 }
 
 
@@ -433,6 +464,38 @@ _CONTENT_INTENT_STEMS = (
     "generate a post",
 )
 
+
+# Block 5.5: explicit product-catalog intents (spec section 20 examples).
+# Checked BEFORE the generic spreadsheet-attachment -> FAMILY_EXCEL signal so
+# "Загрузи этот прайс и собери каталог товаров" (an attached spreadsheet
+# PLUS an explicit "build a product catalog" verb) routes to Product
+# Intelligence instead of generic Excel analysis.
+_PRODUCT_CATALOG_STEMS = (
+    "каталог товар",
+    "собери каталог",
+    "собрать каталог",
+    "product catalog",
+    "build a catalog",
+)
+_PRODUCT_INTENT_STEMS = (
+    "сопоставь товар",
+    "сопоставить товар",
+    "найди дубли",
+    "дубли по артикул",
+    "дубли по штрихкод",
+    "нормализуй характеристик",
+    "обнови остатк",
+    "подготовь карточки",
+    "карточки товар",
+    "сделай описани",
+    "не удалось однозначно сопоставить",
+    "match products",
+    "find duplicate",
+    "normalize attributes",
+    "update stock",
+    "product cards",
+) + _PRODUCT_CATALOG_STEMS
+
 _CONTENT_TRIGGER_RE = re.compile(
     r"^\s*(?:please|пожалуйста)?\s*"
     r"(?:напиши(?:те)?|сгенерируй|создай|write|generate)\s+"
@@ -615,6 +678,12 @@ def detect_family(
     raw = text or ""
     if _has_stem(raw, _WRITE_STEMS):
         return FAMILY_WRITE
+    # Block 5.5: an explicit "build a product catalog" verb wins over the
+    # bare spreadsheet-attachment signal below -- the user wants canonical
+    # product/catalog intelligence (import + field mapping + normalization),
+    # not a generic Excel analysis/transform turn.
+    if _has_stem(raw, _PRODUCT_CATALOG_STEMS):
+        return FAMILY_PRODUCT
     # Block 5.1 chat integration (spec section 12): the user never selects an
     # "Excel mode" -- attaching a spreadsheet is itself the strongest, fully
     # deterministic signal, regardless of the accompanying wording.
@@ -637,6 +706,14 @@ def detect_family(
         _has_stem(raw, ("анализ", "analyze", "inspect", "проанализ")) or _has_stem(raw, _MAKE_STEMS)
     ):
         return FAMILY_EXCEL
+    if _has_stem(raw, _PRODUCT_INTENT_STEMS):
+        return FAMILY_PRODUCT
+    if active is not None and active.family == FAMILY_PRODUCT:
+        # Block 5.5 multi-turn continuation: short deterministic follow-ups
+        # ("Только по артикулам", "Сохрани каталог") keep the active product
+        # task alive, mirroring FAMILY_EXCEL's continuation heuristic.
+        if not (_has_stem(raw, _WEATHER_STEMS) or _has_stem(raw, _QUESTION_NEW_STEMS)):
+            return FAMILY_PRODUCT
     if active is not None and active.family == FAMILY_EXCEL:
         # Block 5.1 multi-turn continuation (spec section 13): legitimate
         # follow-ups ("Оставь Samsung", "Только дешевле 50000", "Минус 12%",
@@ -694,7 +771,7 @@ def continuation_decision(
     # detect_family has already deterministically resolved this turn to the
     # active Excel task, that heuristic must not override it.
     if (
-        family not in {FAMILY_EXCEL, FAMILY_ACQUISITION, FAMILY_CONTENT}
+        family not in {FAMILY_EXCEL, FAMILY_ACQUISITION, FAMILY_CONTENT, FAMILY_PRODUCT}
         and _is_unrelated_new_task(text)
         and not _is_quantity_only(text)
     ):
@@ -837,6 +914,8 @@ def user_unavailable_message(family: str) -> str:
         return "Сейчас не могу собрать данные со страницы — возможность недоступна."
     if family == FAMILY_CONTENT:
         return "Сейчас не могу сгенерировать текст — возможность недоступна."
+    if family == FAMILY_PRODUCT:
+        return "Сейчас не могу обработать каталог товаров — возможность недоступна."
     return "Эта возможность сейчас недоступна."
 
 
@@ -960,7 +1039,7 @@ def resolve_action_turn(
     if family == FAMILY_SEARCH or (
         mode == NEW_TASK
         and _is_unrelated_new_task(current)
-        and family not in {FAMILY_IMAGE_GENERATE, FAMILY_EXCEL, FAMILY_ACQUISITION, FAMILY_CONTENT}
+        and family not in {FAMILY_IMAGE_GENERATE, FAMILY_EXCEL, FAMILY_ACQUISITION, FAMILY_CONTENT, FAMILY_PRODUCT}
     ):
         if active is not None:
             active.status = STATUS_SUPERSEDED
@@ -1373,6 +1452,93 @@ def resolve_action_turn(
             idempotency_key=idem,
         )
 
+    if family == FAMILY_PRODUCT:
+        is_new = mode == NEW_TASK or active is None or active.family != FAMILY_PRODUCT
+        if is_new:
+            if active is not None:
+                active.status = STATUS_SUPERSEDED
+                store.put(active)
+            # Block 5.5 (spec section 20): a prior FAMILY_EXCEL task's
+            # dataset_id is a legitimate existing-context source too -- e.g.
+            # "Загрузи прайс" (Excel) followed by "Собери из него каталог"
+            # (Product) must not force a re-upload.
+            inherited = str((active.parameters.get("dataset_id") if active else "") or "")
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant,
+                owner_id=owner,
+                conversation_id=conv,
+                family=FAMILY_PRODUCT,
+                tool_id=PRODUCT_CONTRACT.tool_id,
+                operation=PRODUCT_CONTRACT.operation,
+                goal=current,
+                parameters={"dataset_id": inherited, "catalog_id": ""},
+                artifact_type=PRODUCT_CONTRACT.artifact_type,
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+        else:
+            task = active
+            if task.status in {STATUS_COMPLETED, STATUS_FAILED_RETRYABLE}:
+                task.status = STATUS_DRAFT
+        task.goal = current
+
+        inherited_dataset_id = str(task.parameters.get("dataset_id") or "")
+        inherited_catalog_id = str(task.parameters.get("catalog_id") or "")
+        has_dataset = bool(inherited_dataset_id) and spreadsheet_attachment_count <= 0
+        if spreadsheet_attachment_count <= 0 and not inherited_dataset_id and not inherited_catalog_id:
+            task.missing_required = (PARAM_FILE,)
+            task.status = STATUS_WAITING_FOR_INPUT
+            store.put(task)
+            return ActionDecision(
+                decision=ASK_CLARIFICATION,
+                readiness=NEEDS_REQUIRED_INPUT,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                user_message="Приложите файл с товарами (Excel/CSV), чтобы я мог собрать каталог.",
+                extra_llm=False,
+            )
+        task.missing_required = ()
+
+        args = {"text": current}
+        if has_dataset:
+            args["dataset_id"] = inherited_dataset_id
+        elif inherited_catalog_id:
+            args["catalog_id"] = inherited_catalog_id
+
+        cap_status = inspect_capability(gateway, PRODUCT_CONTRACT.tool_id)
+        if cap_status != CAPABILITY_AVAILABLE_AND_AUTHORIZED:
+            task.status = STATUS_FAILED_RETRYABLE
+            store.put(task)
+            return ActionDecision(
+                decision=FAIL_UNAVAILABLE,
+                readiness=NOT_EXECUTABLE,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                arguments=args,
+                user_message=user_unavailable_message(FAMILY_PRODUCT),
+                tool_id=PRODUCT_CONTRACT.tool_id,
+                operation=PRODUCT_CONTRACT.operation,
+                extra_llm=False,
+                capability_status=cap_status,
+            )
+
+        idem = _idempotency_key(request_id, PRODUCT_CONTRACT.tool_id, args)
+        task.status = STATUS_READY
+        store.put(task)
+        return ActionDecision(
+            decision=CALL_TOOL,
+            readiness=READY_TO_EXECUTE,
+            continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+            task=task,
+            arguments=args,
+            tool_id=PRODUCT_CONTRACT.tool_id,
+            operation=PRODUCT_CONTRACT.operation,
+            extra_llm=False,
+            capability_status=cap_status,
+            idempotency_key=idem,
+        )
+
     return ActionDecision(
         decision=ANSWER_TEXT,
         readiness=CONVERSATIONAL_ONLY,
@@ -1469,6 +1635,38 @@ def format_tool_user_text(
         if not lines:
             lines.append("Готово.")
         return "\n".join(lines)
+    if family == FAMILY_PRODUCT:
+        operation = str(payload.get("operation") or "")
+        if operation == "import":
+            return (
+                f"Каталог обновлён: добавлено {int(payload.get('created') or 0)}, "
+                f"обновлено {int(payload.get('updated') or 0)}, "
+                f"не удалось однозначно сопоставить {int(payload.get('ambiguous') or 0)}."
+            )
+        if operation == "duplicates":
+            groups = list(payload.get("groups") or [])
+            return f"Найдено групп дублей: {len(groups)}." if groups else "Дублей не найдено."
+        if operation == "match_summary":
+            unresolved = list(payload.get("unresolved_product_ids") or [])
+            return (
+                f"Не удалось однозначно сопоставить {len(unresolved)} товаров."
+                if unresolved
+                else "Все товары сопоставлены однозначно."
+            )
+        if operation == "validate":
+            summary = dict(payload.get("summary") or {})
+            return (
+                f"Проверка каталога: valid={summary.get('valid', 0)}, "
+                f"warning={summary.get('warning', 0)}, invalid={summary.get('invalid', 0)}."
+            )
+        if operation == "reconcile":
+            return f"Остатки обновлены у {int(payload.get('updated_count') or 0)} товаров."
+        if operation == "enrich":
+            enriched = list(payload.get("enriched_product_ids") or [])
+            return f"Подготовлены карточки для {len(enriched)} товаров."
+        if operation == "export" and payload.get("view_url"):
+            return f"Каталог выгружен: [скачать]({payload.get('view_url')})."
+        return "Готово."
     if family in (FAMILY_IMAGE_GENERATE, FAMILY_IMAGE_EDIT):
         urls: list[str] = []
         seen: set[str] = set()

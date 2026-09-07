@@ -356,6 +356,15 @@ if getattr(side_effect_runtime, "content_intelligence_runtime", None) is not Non
     side_effect_runtime.content_intelligence_runtime.service.artifact_service = (
         ba_api_runtime.artifact_service
     )
+# Block 5.5: ProductIntelligenceService is likewise constructed inside
+# side_effect_runtime before the canonical ArtifactService exists -- wire it
+# post-construction the same way, so ``product.export``'s artifact-based
+# handoff and ``product.associate_media`` register/verify through the
+# Unified Files/Artifacts layer instead of only the internal catalog store.
+if getattr(side_effect_runtime, "product_intelligence_runtime", None) is not None:
+    side_effect_runtime.product_intelligence_runtime.service.artifact_service = (
+        ba_api_runtime.artifact_service
+    )
 realtime_runtime = None
 if realtime_enabled():
     # Block 4: realtime session bridge reuses ba_api_runtime.service directly

@@ -307,6 +307,7 @@ class WorkflowPandaConversationGateway:
             CALL_TOOL,
             FAMILY_ACQUISITION,
             FAMILY_EXCEL,
+            FAMILY_PRODUCT,
             TOOL_DATA_EXCEL_ASSISTANT,
             TOOL_IMAGE_EDIT,
             artifacts_from_tool_data,
@@ -512,6 +513,18 @@ class WorkflowPandaConversationGateway:
                 task.tool_id = TOOL_DATA_EXCEL_ASSISTANT
                 task.operation = "assist"
                 task.artifact_type = "workbook"
+                self._action_store.put(task)
+        if family == FAMILY_PRODUCT and success and task is not None:
+            # Block 5.5 multi-turn continuation (spec section 20): persist the
+            # resolved catalog_id BEFORE mark_executed() re-reads the task, so
+            # a follow-up turn ("Найди дубли", "Проверь каталог") resolves the
+            # SAME catalog without re-attaching the price list -- mirrors the
+            # FAMILY_EXCEL dataset_id persistence above. Without this, the
+            # next turn's "no attachment and no inherited source" gate in
+            # resolve_action_turn would wrongly ask the user to re-upload.
+            new_catalog_id = str(data.get("catalog_id") or "")
+            if new_catalog_id:
+                task.parameters["catalog_id"] = new_catalog_id
                 self._action_store.put(task)
         if task is not None:
             mark_executed(

@@ -125,6 +125,16 @@ from tools.platform.descriptors import (
     payments_read_descriptor,
     payments_reconcile_descriptor,
     payments_status_descriptor,
+    product_associate_media_descriptor,
+    product_catalog_assist_descriptor,
+    product_duplicates_descriptor,
+    product_enrich_descriptor,
+    product_export_descriptor,
+    product_get_descriptor,
+    product_import_descriptor,
+    product_match_descriptor,
+    product_reconcile_descriptor,
+    product_validate_descriptor,
     scrape_extract_descriptor,
     scrape_fetch_descriptor,
     seo_analytics_read_descriptor,
@@ -180,6 +190,7 @@ from tools.platform.scaffold import (
 from tools.registry import ToolRegistry
 from data_intel.tools import DataIntelToolAdapter
 from content_intel.tools import ContentIntelToolAdapter
+from product_intel.tools import ProductIntelToolAdapter
 from knowledge.tools import KnowledgeToolAdapter
 from product_media.tools import ProductMediaToolAdapter
 from commerce.tools import CommerceToolAdapter
@@ -250,6 +261,7 @@ def register_platform_tools(
     seo_marketing_service=None,
     b2b_commerce_service=None,
     acquisition_service=None,
+    product_intelligence_service=None,
     mcp_transports: dict[str, object] | None = None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
@@ -267,6 +279,8 @@ def register_platform_tools(
     knowledge_enabled = knowledge_service is not None
     content = ContentIntelToolAdapter(content_intelligence)
     content_enabled = content_intelligence is not None
+    product_intel = ProductIntelToolAdapter(product_intelligence_service)
+    product_intel_enabled = product_intelligence_service is not None
     media = ProductMediaToolAdapter(product_media_service) if product_media_service else None
     media_enabled = product_media_service is not None
     commerce = CommerceToolAdapter(commerce_service, enabled=commerce_service is not None)
@@ -386,6 +400,16 @@ def register_platform_tools(
         (content_optimize_descriptor(enabled=content_enabled), content),
         (content_get_descriptor(enabled=content_enabled), content),
         (content_status_descriptor(enabled=content_enabled), content),
+        (product_import_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_match_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_duplicates_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_validate_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_enrich_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_reconcile_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_associate_media_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_export_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_get_descriptor(enabled=product_intel_enabled), product_intel),
+        (product_catalog_assist_descriptor(enabled=product_intel_enabled), product_intel),
         (media_ingest_descriptor(enabled=media_enabled), media),
         (media_get_descriptor(enabled=media_enabled), media),
         (media_analyze_descriptor(enabled=media_enabled), media),

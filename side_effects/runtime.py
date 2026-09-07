@@ -164,6 +164,7 @@ class SideEffectRuntime:
     acquisition_runtime: object | None = None
     data_intelligence_runtime: object | None = None
     content_intelligence_runtime: object | None = None
+    product_intelligence_runtime: object | None = None
     integration_runtime: object | None = None
     commerce_runtime: object | None = None
     seo_marketing_runtime: object | None = None
@@ -487,6 +488,7 @@ def build_tool_gateway(
     document_intelligence=None,
     data_intelligence=None,
     content_intelligence=None,
+    product_intelligence_service=None,
     commerce_service=None,
     payments_service=None,
     credential_store=None,
@@ -562,6 +564,7 @@ def build_tool_gateway(
         seo_marketing_service=seo_marketing_service,
         b2b_commerce_service=b2b_commerce_service,
         acquisition_service=acquisition_service,
+        product_intelligence_service=product_intelligence_service,
     )
     if product_platform_service is not None:
         from commerce.product_platform.side_effect import register_commerce_platform_side_effects
@@ -875,6 +878,29 @@ def _finalize_runtime(
     except Exception:
         content_intelligence_runtime = None
 
+    # Block 5.5: canonical Product/Catalog Intelligence -- reuses the
+    # DataIntelligenceService (Excel/acquisition ingestion + reconciliation)
+    # and ContentIntelligenceService (grounded product content) built above
+    # instead of a second ingestion/content engine. ``artifact_service`` is
+    # wired post-construction in main.py, same pattern as data_intel/content_intel
+    # above (the canonical ArtifactService does not exist yet at this point).
+    product_intelligence_runtime = None
+    try:
+        from product_intel.runtime import build_product_intelligence_runtime
+
+        product_intelligence_runtime = build_product_intelligence_runtime(
+            env=env,
+            data_intelligence_service=(
+                data_intelligence_runtime.service if data_intelligence_runtime else None
+            ),
+            content_intelligence_service=(
+                content_intelligence_runtime.service if content_intelligence_runtime else None
+            ),
+            observability=obs,
+        )
+    except Exception:
+        product_intelligence_runtime = None
+
     seo_marketing_runtime = None
     try:
         from seo_marketing.runtime import build_seo_marketing_runtime
@@ -973,6 +999,9 @@ def _finalize_runtime(
         ),
         content_intelligence=(
             content_intelligence_runtime.service if content_intelligence_runtime else None
+        ),
+        product_intelligence_service=(
+            product_intelligence_runtime.service if product_intelligence_runtime else None
         ),
         product_media_service=product_media_runtime,
         commerce_service=(
@@ -1165,6 +1194,7 @@ def _finalize_runtime(
         knowledge_runtime=knowledge_runtime,
         procurement_runtime=procurement_runtime,
         content_intelligence_runtime=content_intelligence_runtime,
+        product_intelligence_runtime=product_intelligence_runtime,
         workflow_runtime=workflow_runtime,
         acquisition_runtime=acquisition_runtime,
         data_intelligence_runtime=data_intelligence_runtime,
