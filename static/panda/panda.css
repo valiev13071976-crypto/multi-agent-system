@@ -921,6 +921,114 @@ button.danger {
 }
 .voice-live-caption.hidden { display: none; }
 
+/* ChatGPT-voice-mode-parity defect closure: one continuous voice-mode bar
+   replacing the ordinary composer row while a voice conversation is active
+   -- an active-voice visual (orb) centered between an explicit exit
+   control (left) and a mute control (right), matching the general
+   composition/hierarchy of the reference product pattern (large centered
+   state indicator, small circular side controls). No screenshot reference
+   was supplied for this screen in this environment, so exact pixel
+   geometry below is a best-effort, functionally faithful reconstruction,
+   not a verified 1:1 match -- see the delivery report. */
+.voice-mode-bar {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: clamp(1rem, 6vw, 2.75rem);
+  padding: 0.85rem 0.5rem 1.1rem;
+}
+.voice-mode-bar.hidden { display: none; }
+
+.voice-ctrl-btn {
+  flex: 0 0 44px;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  border: 0;
+  border-radius: 999px;
+  background: var(--surface-secondary);
+  color: var(--text-primary);
+  display: grid;
+  place-items: center;
+  font-size: 1.05rem;
+  cursor: pointer;
+  box-shadow: var(--shadow-sm);
+}
+.voice-ctrl-btn:hover { background: var(--border); }
+.voice-exit-btn { background: var(--surface-secondary); }
+.voice-mute-btn.is-muted { background: var(--danger); color: #fff; }
+
+.voice-orb-wrap {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.voice-orb {
+  width: 84px;
+  height: 84px;
+  border-radius: 50%;
+  border: 0;
+  padding: 0;
+  cursor: pointer;
+  background: radial-gradient(circle at 35% 30%, var(--accent-hover), var(--accent) 70%);
+  box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.35);
+  transition: transform 0.15s ease, box-shadow 0.2s ease, background 0.2s ease;
+}
+.voice-orb[data-state="connecting"] {
+  background: radial-gradient(circle at 35% 30%, var(--surface-secondary), var(--border) 70%);
+  animation: panda-orb-connecting 1s ease-in-out infinite;
+}
+.voice-orb[data-state="listening"] {
+  box-shadow: 0 0 0 8px rgba(37, 99, 235, 0.14);
+}
+.voice-orb[data-state="listening"].is-active {
+  box-shadow: 0 0 0 14px rgba(37, 99, 235, 0.22);
+  transform: scale(1.04);
+}
+.voice-orb[data-state="thinking"] {
+  animation: panda-orb-thinking 1.1s ease-in-out infinite;
+}
+.voice-orb[data-state="speaking"] {
+  animation: panda-orb-speaking 0.85s ease-in-out infinite;
+  box-shadow: 0 0 0 10px rgba(37, 99, 235, 0.18);
+}
+.voice-orb[data-state="error"] {
+  background: radial-gradient(circle at 35% 30%, var(--danger), #7f1d1d 70%);
+}
+
+@keyframes panda-orb-connecting {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+@keyframes panda-orb-thinking {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(0.94); }
+}
+@keyframes panda-orb-speaking {
+  0%, 100% { transform: scale(1); }
+  50% { transform: scale(1.06); }
+}
+
+.voice-state-label {
+  margin: 0;
+  font-size: 0.8rem;
+  color: var(--text-secondary);
+  min-height: 1.1em;
+}
+
+@media (max-width: 375px) {
+  .voice-mode-bar { gap: clamp(0.75rem, 8vw, 1.5rem); padding: 0.65rem 0.35rem 0.9rem; }
+  .voice-orb { width: 68px; height: 68px; }
+  .voice-ctrl-btn { flex-basis: 40px; width: 40px; height: 40px; min-width: 40px; min-height: 40px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .voice-orb { animation: none !important; transition: none; }
+}
+
 .msg.assistant.streaming .body::after {
   content: "▍";
   margin-left: 0.1rem;

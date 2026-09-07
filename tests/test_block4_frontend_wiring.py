@@ -54,6 +54,41 @@ class RealtimeVoiceUiWiringTests(unittest.TestCase):
     def test_voice_session_closed_on_logout(self):
         self.assertIn('state.realtime.controller.close()', self.app_js)
 
+    def test_voice_mode_bar_with_distinct_exit_and_mute_controls_present(self):
+        # ChatGPT-voice-mode-parity defect closure: voice mode is a distinct
+        # conversation surface (orb + mute + exit), not a plain
+        # record/upload composer control, and mute/exit are two DIFFERENT
+        # controls with different semantics (Block 4 section 6).
+        self.assertIn('id="voice-mode-bar"', self.html)
+        self.assertIn('id="voice-orb"', self.html)
+        self.assertIn('id="voice-exit-btn"', self.html)
+        self.assertIn('id="voice-mute-btn"', self.html)
+
+    def test_app_js_wires_orb_mute_and_exit_as_distinct_controls(self):
+        self.assertIn('els.voiceOrb.onclick = onVoiceOrbClick', self.app_js)
+        self.assertIn('els.voiceMuteBtn.onclick = onVoiceMuteClick', self.app_js)
+        self.assertIn('els.voiceExitBtn.onclick = onVoiceExitClick', self.app_js)
+        self.assertIn('controller.isMuted', self.app_js)
+        self.assertIn('controller.mute()', self.app_js)
+        self.assertIn('controller.unmute()', self.app_js)
+        self.assertIn('controller.close()', self.app_js)
+
+    def test_continuous_voice_loop_and_vad_wired_in_realtime_js(self):
+        # Section 1/4: continuous listen -> commit -> respond -> listen
+        # loop, without requiring a button press for every turn.
+        self.assertIn('_resumeListening', self.realtime_js)
+        self.assertIn('_startVad', self.realtime_js)
+        self.assertIn('_sampleVad', self.realtime_js)
+        self.assertIn('VAD_SILENCE_COMMIT_MS', self.realtime_js)
+        self.assertIn('VAD_BARGE_IN_MS', self.realtime_js)
+
+    def test_mute_is_distinct_from_exit_in_realtime_js(self):
+        # Section 6: mute pauses capture and keeps the session alive; only
+        # close() tears down the session/mic/transport.
+        self.assertIn('mute()', self.realtime_js)
+        self.assertIn('unmute()', self.realtime_js)
+        self.assertIn('getAudioTracks().forEach((t) => (t.enabled = false))', self.realtime_js)
+
 
 class PersonalizationSettingsUiWiringTests(unittest.TestCase):
     def setUp(self):

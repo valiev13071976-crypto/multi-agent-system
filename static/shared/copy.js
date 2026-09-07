@@ -60,6 +60,41 @@
     return msg || ERROR_MAP.request_failed;
   }
 
+  // Block 4 voice-mode defect closure: realtime session error codes
+  // (realtime/errors.py) are internal wire identifiers, never user-facing
+  // copy -- mapping them here (the ONE canonical Russian-copy module,
+  // reused by realtime.js/app.js) instead of leaking raw codes like
+  // "rt_audio_empty" into the composer error text. Codes in
+  // REALTIME_SILENT_CODES are expected/recoverable in the continuous voice
+  // loop (e.g. an auto-detected end-of-turn with no real speech in the
+  // buffer) -- they resume listening silently, never alarming the user.
+  const REALTIME_SILENT_CODES = new Set(["rt_audio_empty", "rt_stt_empty_transcript"]);
+  const REALTIME_ERROR_MAP = {
+    mic_permission_denied: "Доступ к микрофону запрещён. Разрешите доступ в настройках браузера.",
+    device_unavailable: "Микрофон недоступен. Проверьте устройство и повторите попытку.",
+    recorder_unavailable: "Запись голоса недоступна в этом браузере.",
+    transport_error: "Голосовое соединение прервано. Пробуем восстановить.",
+    rt_stt_failed: "Не удалось распознать речь. Попробуйте сказать ещё раз.",
+    rt_tts_failed: "Не удалось озвучить ответ, но текст ответа доступен выше.",
+    rt_conversation_unavailable: "Panda временно не может обработать запрос. Попробуйте позже.",
+  };
+
+  function isSilentRealtimeCode(code) {
+    return REALTIME_SILENT_CODES.has(code);
+  }
+
+  function realtimeErrorText(code, fallbackMessage) {
+    if (isSilentRealtimeCode(code)) return "";
+    if (REALTIME_ERROR_MAP[code]) return REALTIME_ERROR_MAP[code];
+    const msg = String(fallbackMessage || "");
+    // Never surface a bare internal wire code (e.g. an unmapped "rt_*"
+    // identifier) as if it were human copy.
+    if (!msg || msg === code || /^rt_[a-z_]+$/.test(msg)) {
+      return "Ошибка голосового режима. Попробуйте ещё раз.";
+    }
+    return msg;
+  }
+
   global.PandaCopy = {
     STATUS_LABELS,
     USER_PROGRESS,
@@ -68,5 +103,7 @@
     statusLabel,
     userFacingStatus,
     mapError,
+    isSilentRealtimeCode,
+    realtimeErrorText,
   };
 })(window);

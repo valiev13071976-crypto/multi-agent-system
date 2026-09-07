@@ -111,6 +111,12 @@
     imageEditCancel: document.getElementById("image-edit-cancel"),
     micBtn: document.getElementById("mic-btn"),
     voiceLiveCaption: document.getElementById("voice-live-caption"),
+    voiceModeBar: document.getElementById("voice-mode-bar"),
+    voiceOrb: document.getElementById("voice-orb"),
+    voiceStateLabel: document.getElementById("voice-state-label"),
+    voiceExitBtn: document.getElementById("voice-exit-btn"),
+    voiceMuteBtn: document.getElementById("voice-mute-btn"),
+    composerRow: document.querySelector(".composer-row"),
     personalizationBtn: document.getElementById("personalization-btn"),
     realtimeAudio: document.getElementById("realtime-audio-player"),
   };
@@ -1039,6 +1045,62 @@
     }
   }
 
+  // ChatGPT-voice-mode-parity defect closure: one continuous voice-mode
+  // surface (orb + mute + exit) replaces the ordinary composer row while a
+  // voice conversation is active -- never a separate technical/debug view,
+  // never raw internal state/event names (only human status labels below).
+  function voiceOrbStateAttr(rtState) {
+    const RT = window.PandaRealtime;
+    if (!RT) return "idle";
+    if (rtState === RT.STATE_CONNECTING) return "connecting";
+    if (rtState === RT.STATE_LISTENING) return "listening";
+    if (rtState === RT.STATE_THINKING) return "thinking";
+    if (rtState === RT.STATE_SPEAKING) return "speaking";
+    if (rtState === RT.STATE_ERROR) return "error";
+    return "idle";
+  }
+
+  function voiceStateLabel(rtState) {
+    const RT = window.PandaRealtime;
+    if (!RT) return "";
+    if (rtState === RT.STATE_CONNECTING) return "Подключение…";
+    if (rtState === RT.STATE_LISTENING) return "Слушаю…";
+    if (rtState === RT.STATE_THINKING) return "Думаю…";
+    if (rtState === RT.STATE_SPEAKING) return "Говорю…";
+    if (rtState === RT.STATE_ERROR) return "Не получилось. Попробуйте ещё раз.";
+    return "";
+  }
+
+  function updateVoiceOrb(rtState) {
+    if (!els.voiceOrb) return;
+    els.voiceOrb.setAttribute("data-state", voiceOrbStateAttr(rtState));
+    if (els.voiceStateLabel) els.voiceStateLabel.textContent = voiceStateLabel(rtState);
+  }
+
+  /** Voice mode is a DISTINCT conversation surface (not an ordinary
+   * record-and-upload composer control): while active, the normal text
+   * composer row is replaced by the continuous voice-mode bar; exiting
+   * voice mode restores the ordinary composer, unchanged, same
+   * conversation (Block 4.14 voice<->text switching). */
+  function showVoiceModeUi(active) {
+    if (!els.voiceModeBar) return;
+    if (active) {
+      show(els.voiceModeBar);
+      hide(els.composerRow);
+    } else {
+      hide(els.voiceModeBar);
+      show(els.composerRow);
+      if (els.voiceOrb) els.voiceOrb.classList.remove("is-active");
+      if (els.voiceMuteBtn) {
+        els.voiceMuteBtn.classList.remove("is-muted");
+        els.voiceMuteBtn.setAttribute("aria-pressed", "false");
+        els.voiceMuteBtn.setAttribute("aria-label", "Выключить микрофон");
+        const icon = els.voiceMuteBtn.querySelector(".voice-mute-icon");
+        if (icon) icon.textContent = "🎤";
+      }
+    }
+  }
+
   function showVoiceCaption(text) {
     if (!els.voiceLiveCaption) return;
     if (!text) {
@@ -1072,7 +1134,22 @@
     if (state.realtime.controller) return state.realtime.controller;
     const RT = window.PandaRealtime;
     const controller = new RT.RealtimeVoiceController({
-      onStateChange: (rtState) => updateMicUi(rtState),
+      onStateChange: (rtState) => {
+        updateMicUi(rtState);
+        updateVoiceOrb(rtState);
+        showVoiceModeUi(rtState !== RT.STATE_IDLE);
+      },
+      onVoiceActivity: (active) => {
+        if (els.voiceOrb) els.voiceOrb.classList.toggle("is-active", Boolean(active));
+      },
+      onMuteChange: (muted) => {
+        if (!els.voiceMuteBtn) return;
+        els.voiceMuteBtn.classList.toggle("is-muted", muted);
+        els.voiceMuteBtn.setAttribute("aria-pressed", muted ? "true" : "false");
+        els.voiceMuteBtn.setAttribute("aria-label", muted ? "Включить микрофон" : "Выключить микрофон");
+        const icon = els.voiceMuteBtn.querySelector(".voice-mute-icon");
+        if (icon) icon.textContent = muted ? "🔇" : "🎤";
+      },
       onSessionStarted: ({ conversationId }) => {
         if (conversationId && conversationId !== state.conversationId) {
           state.conversationId = conversationId;
@@ -1128,11 +1205,20 @@
         setStatus("", "");
       },
       onError: ({ code, message }) => {
-        els.composerError.textContent =
-          code === "mic_permission_denied"
-            ? "Доступ к микрофону запрещён. Разрешите доступ в настройках браузера."
-            : message || "Ошибка голосового режима";
-        setStatus("", "error");
+        // Block 4 voice-mode defect closure: canonical copy mapping (see
+        // static/shared/copy.js) -- never surfaces a raw internal wire
+        // code (e.g. "rt_audio_empty") to the user, and silently resumes
+        // listening for codes that are expected/recoverable in the
+        // continuous voice loop (no real speech captured this turn).
+        const text = window.PandaCopy && window.PandaCopy.realtimeErrorText
+          ? window.PandaCopy.realtimeErrorText(code, message)
+          : message || "Ошибка голосового режима";
+        if (text) {
+          els.composerError.textContent = text;
+          setStatus("", "error");
+        } else {
+          setStatus("", "");
+        }
       },
       onSessionClosed: () => {
         showVoiceCaption("");
@@ -1142,6 +1228,12 @@
     return controller;
   }
 
+  /** Entry point ONLY: starts the continuous voice conversation. Once
+   * active, the composer row (containing this button) is hidden in favor
+   * of the voice-mode bar -- per-turn commit/barge-in happen automatically
+   * (VAD) with a manual tap on the orb as an explicit fallback (see
+   * onVoiceOrbClick), matching the ChatGPT-parity "distinct voice
+   * conversation state" contract (never a plain record/upload control). */
   async function onMicClick() {
     const RT = window.PandaRealtime;
     if (!RT || !RT.isSupported()) {
@@ -1150,14 +1242,43 @@
     }
     els.composerError.textContent = "";
     const controller = ensureRealtimeController();
-    if (controller.state === RT.STATE_IDLE || controller.state === RT.STATE_ERROR) {
-      if (!state.conversationId) await newChat();
-      await controller.start({ conversationId: state.conversationId, voiceId: state.realtime.preferredVoiceId });
-    } else if (controller.state === RT.STATE_LISTENING) {
-      controller.commit();
-    } else if (controller.state === RT.STATE_THINKING || controller.state === RT.STATE_SPEAKING) {
-      controller.interruptAndListen();
+    if (controller.state !== RT.STATE_IDLE && controller.state !== RT.STATE_ERROR) return;
+    if (!state.conversationId) await newChat();
+    await controller.start({ conversationId: state.conversationId, voiceId: state.realtime.preferredVoiceId });
+  }
+
+  /** Manual fallback for the automatic VAD-driven loop -- tap while
+   * listening to end your turn now, or tap while Panda is thinking/speaking
+   * to interrupt her now. Never required for the continuous loop to work,
+   * but always available (Block 4.13 barge-in, Block 4 continuity fix). */
+  function onVoiceOrbClick() {
+    const RT = window.PandaRealtime;
+    const controller = state.realtime.controller;
+    if (!RT || !controller) return;
+    if (controller.state === RT.STATE_LISTENING) controller.commit();
+    else if (controller.state === RT.STATE_THINKING || controller.state === RT.STATE_SPEAKING) controller.interruptAndListen();
+  }
+
+  /** Mute != exit (ChatGPT parity): pauses the microphone, keeps the voice
+   * session/conversation alive so the user can unmute and continue. */
+  function onVoiceMuteClick() {
+    const controller = state.realtime.controller;
+    if (!controller) return;
+    if (controller.isMuted) controller.unmute();
+    else controller.mute();
+  }
+
+  /** Explicit exit: fully ends the voice session (mic released, Panda
+   * audio stopped, transport closed) and returns to the text composer --
+   * never conflated with mute. */
+  function onVoiceExitClick() {
+    const controller = state.realtime.controller;
+    if (els.realtimeAudio) {
+      els.realtimeAudio.pause();
+      els.realtimeAudio.removeAttribute("src");
     }
+    if (controller) controller.close();
+    showVoiceCaption("");
   }
 
   function openPersonalizationSettings() {
@@ -1176,6 +1297,9 @@
     els.newChat.onclick = () => newChat().catch((e) => { els.composerError.textContent = api.mapError(e); });
     els.sendBtn.onclick = sendMessage;
     if (els.micBtn) els.micBtn.onclick = () => { onMicClick().catch((e) => { els.composerError.textContent = api.mapError(e); }); };
+    if (els.voiceOrb) els.voiceOrb.onclick = onVoiceOrbClick;
+    if (els.voiceMuteBtn) els.voiceMuteBtn.onclick = onVoiceMuteClick;
+    if (els.voiceExitBtn) els.voiceExitBtn.onclick = onVoiceExitClick;
     if (els.personalizationBtn) els.personalizationBtn.onclick = openPersonalizationSettings;
     els.approveBtn.onclick = onApprove;
     els.rejectBtn.onclick = onReject;

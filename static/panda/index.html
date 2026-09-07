@@ -101,6 +101,18 @@
         <div class="composer chat-column" id="composer-shell">
           <div id="attachment-chips" class="attachment-chips" aria-label="Вложения"></div>
           <div id="voice-live-caption" class="voice-live-caption hidden" role="status" aria-live="polite"></div>
+          <div id="voice-mode-bar" class="voice-mode-bar hidden" role="group" aria-label="Голосовой режим">
+            <button id="voice-exit-btn" type="button" class="voice-ctrl-btn voice-exit-btn" aria-label="Завершить голосовой режим" title="Завершить голосовой режим">
+              <span aria-hidden="true">✕</span>
+            </button>
+            <div class="voice-orb-wrap">
+              <button id="voice-orb" type="button" class="voice-orb" data-state="idle" aria-label="Голосовой режим Panda — нажмите, чтобы завершить свою фразу или прервать Panda"></button>
+              <p id="voice-state-label" class="voice-state-label" aria-live="polite">Слушаю…</p>
+            </div>
+            <button id="voice-mute-btn" type="button" class="voice-ctrl-btn voice-mute-btn" aria-pressed="false" aria-label="Выключить микрофон" title="Выключить микрофон">
+              <span aria-hidden="true" class="voice-mute-icon">🎤</span>
+            </button>
+          </div>
           <div class="composer-row">
             <label class="composer-tool" for="file-input" aria-label="Прикрепить файл">
               <span aria-hidden="true">📎</span>
