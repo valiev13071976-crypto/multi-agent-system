@@ -208,7 +208,7 @@
           // Continuous voice mode (ChatGPT-parity defect closure): Panda
           // automatically returns to listening -- the user never presses a
           // button to start the next turn.
-          this._resumeListening();
+          this._resumeListening(turnId);
           break;
         case "tool.started":
           if (h.onToolStarted) h.onToolStarted({ turnId });
@@ -258,12 +258,17 @@
 
     /** Re-arms listening + microphone capture for the next turn without any
      * user action -- the heart of the continuous voice-conversation loop. */
-    _resumeListening() {
+    _resumeListening(turnId) {
       this._sawSpeechThisTurn = false;
       this._vadSilenceSince = null;
       this._vadSpeechSince = null;
       this._setState(STATE_LISTENING);
       if (!this._muted) this._startRecording();
+      // DEFECT B latency acceptance: closes the server-side per-turn
+      // latency timeline (speech_start .. listening_resumed) with the one
+      // stage only the browser can know -- when it actually re-armed the
+      // mic for the next turn.
+      if (turnId) this.notifyListeningResumed(turnId);
     }
 
     _startRecording() {
@@ -465,6 +470,10 @@
 
     notifyPlaybackCompleted(turnId) {
       this._send({ type: "playback_event", stage: "completed", turn_id: turnId || "" });
+    }
+
+    notifyListeningResumed(turnId) {
+      this._send({ type: "playback_event", stage: "listening_resumed", turn_id: turnId || "" });
     }
 
     _send(payload) {

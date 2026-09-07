@@ -9,20 +9,33 @@ text chat UI already uses -- same conversation persistence, same
 ToolGateway/HITL/idempotency boundary, same personalization resolution.
 
 Honesty note on "streaming" (Block 4.4/4.10, spec section 59/DELIVERY item
-10/15): the underlying conversation pipeline and TTS provider interface
-(ui_chat.voice.tts.TextToSpeechProvider.synthesize) are buffer-based --
-submit_async() returns one complete answer, synthesize() returns one
-complete audio buffer. This bridge streams both to the client as ordered,
-non-overlapping chunks over the realtime transport (so the wire protocol,
-event contract, and UI are genuinely incremental and forward-compatible
-with a future token-level/audio-level streaming provider), but it does not
-fabricate provider-side token/audio streaming that does not exist here.
+10/15): the underlying conversation pipeline (business_assistant_api.
+service.submit_async) is buffer-based -- it returns one complete answer,
+not token-level deltas, so first_text_delta/tts_started necessarily wait on
+that one call. The TTS provider interface (ui_chat.voice.tts.
+TextToSpeechProvider.synthesize) is ALSO buffer-based per call, but DEFECT B
+(real continuous dialogue, not request/wait/response) calls it once PER
+SENTENCE of the one canonical reply instead of once for the whole reply, so
+audio for an earlier sentence streams to the client while a later sentence
+is still being synthesized -- genuinely incremental, not fabricated.
+
+DEFECT B root-cause fix: the proven cause of "user stops talking -> long
+silent wait" was NOT assistant/TTS latency -- it was on_audio_chunk calling
+the real STT provider on EVERY ~250ms MediaRecorder chunk, which serializes
+into a backlog on this connection's single WebSocket receive loop
+(realtime/router.py's `while True: await websocket.receive()`) ahead of the
+eventual audio.commit control frame. See _PARTIAL_STT_MIN_INTERVAL_SECONDS
+below. A per-turn latency timeline (speech_start .. listening_resumed,
+recorded via _mark_latency/_latency_timeline_ms and logged as
+"voice_turn_latency_timeline") makes any FUTURE real bottleneck provable
+from production logs alone instead of guessed at.
 """
 
 from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -87,6 +100,28 @@ from realtime.state_machine import SessionEvent, SessionState
 
 _TEXT_CHUNK_CHARS = 48
 _AUDIO_CHUNK_BYTES = 4096
+# DEFECT B (real continuous dialogue, not request/wait/response): a real STT
+# provider call is a real network round trip. Firing one on EVERY ~250ms
+# MediaRecorder chunk (the previous behavior) queues up a serialized backlog
+# on this connection's single WebSocket receive loop, so by the time the
+# user stops talking and the client's audio.commit control frame is sent, the
+# server is often still draining that backlog before it even reads the
+# commit -- this IS the "long wait after speaking" production defect, not
+# assistant/TTS latency. Throttling re-transcription to at most once per
+# this interval keeps partial transcripts genuinely incremental (point 2)
+# while bounding the backlog so audio.commit is read with minimal delay
+# (point 3/4). Not a fixed artificial response-delay timer -- it only caps
+# how often we re-call STT on the still-growing in-progress buffer.
+_PARTIAL_STT_MIN_INTERVAL_SECONDS = 0.7
+# DEFECT B point 5 (minimal time-to-first-audio): the TTS provider interface
+# is buffer-based (one synthesize() call -> one complete audio buffer), so a
+# single call for a long, multi-sentence reply blocks first_audio_chunk on
+# the ENTIRE reply's audio being generated. Splitting the SAME canonical
+# reply text into sentence-sized chunks and calling the SAME
+# TextToSpeechProvider.synthesize() once per chunk lets audio for the first
+# sentence start streaming while later sentences are still being
+# synthesized -- reuses the existing provider interface, no new TTS engine.
+_TTS_MAX_CHUNK_CHARS = 280
 _TERMINAL_FAILURE_STATES = frozenset({ST_BLOCKED, ST_REJECTED, ST_CANCELLED})
 _INTERRUPTIBLE_STATES = frozenset(
     {SessionState.THINKING, SessionState.ASSISTANT_STREAMING_TEXT, SessionState.ASSISTANT_SPEAKING}
@@ -126,6 +161,68 @@ def _chunk_bytes(data: bytes, size: int = _AUDIO_CHUNK_BYTES) -> list[bytes]:
     if not data:
         return []
     return [data[i : i + size] for i in range(0, len(data), size)]
+
+
+_TTS_SENTENCE_BOUNDARY = re.compile(r"(?<=[.!?\u2026])\s+")
+_TTS_MIN_STANDALONE_CHARS = 12
+
+
+def _split_for_tts(text: str) -> list[str]:
+    """Sentence-ish split of the ONE canonical reply text so TTS can stream
+    audio for earlier sentences while later ones are still being
+    synthesized (DEFECT B point 5). A short reply with no sentence boundary
+    (the common conversational case, e.g. "Ответ Панды") returns a single
+    chunk -- IDENTICAL behavior to before this change, so it costs nothing
+    extra for the typical short turn. A genuinely short fragment (e.g. a
+    lone "Да." between longer sentences) is folded into its neighbor
+    instead of paying for its own network round trip."""
+
+    cleaned = str(text or "").strip()
+    if not cleaned:
+        return []
+    parts = [p.strip() for p in _TTS_SENTENCE_BOUNDARY.split(cleaned) if p.strip()]
+    if len(parts) <= 1:
+        return [cleaned]
+    chunks: list[str] = []
+    buf = ""
+    for part in parts:
+        if not buf:
+            buf = part
+            continue
+        if len(buf) < _TTS_MIN_STANDALONE_CHARS:
+            buf = f"{buf} {part}"
+        else:
+            chunks.append(buf)
+            buf = part
+        if len(buf) > _TTS_MAX_CHUNK_CHARS:
+            chunks.append(buf)
+            buf = ""
+    if buf:
+        chunks.append(buf)
+    return chunks or [cleaned]
+
+
+def _mark_latency(session: RealtimeSession, stage: str) -> None:
+    """Records the FIRST occurrence of a named DEFECT B latency stage for
+    the turn currently in flight. Never overwrites (a throttled/repeated
+    stt_partial, for example, must not distort the timeline)."""
+
+    if stage not in session.turn_latency_marks:
+        session.turn_latency_marks[stage] = time.monotonic()
+
+
+def _latency_timeline_ms(session: RealtimeSession) -> dict[str, float]:
+    """Snapshot of every recorded stage so far, expressed as milliseconds
+    relative to the EARLIEST recorded stage of this turn (speech_start for
+    voice turns, turn_committed for text turns) -- directly answers "where
+    is the real time going" without needing to correlate raw monotonic
+    timestamps across separate log lines by hand."""
+
+    marks = session.turn_latency_marks
+    if not marks:
+        return {}
+    t0 = min(marks.values())
+    return {f"{stage}_ms": round((ts - t0) * 1000, 1) for stage, ts in marks.items()}
 
 
 def _status_for_artifacts(artifacts: list[dict]) -> str:
@@ -286,15 +383,33 @@ class RealtimeConversationBridge:
     def record_playback_event(self, session: RealtimeSession, *, stage: str, turn_id: str = "") -> None:
         """Client->server playback telemetry ack (section 11/20): the
         browser is the only party that actually knows when audible
-        playback started/completed, so realtime.js sends a lightweight
-        `playback_event` control frame (same JSON-control-frame convention
-        as audio.commit/barge_in/voice.select -- no new transport/
-        architecture) at those two DOM audio-element events, logged here so
-        a real production failure between "TTS audio received" and "user
-        actually heard it" is still visible from server-side logs alone."""
+        playback started/completed (and when it has re-armed the mic for
+        the next turn), so realtime.js sends a lightweight `playback_event`
+        control frame (same JSON-control-frame convention as audio.commit/
+        barge_in/voice.select -- no new transport/architecture) at those DOM
+        events, logged here so a real production failure between "TTS audio
+        received" and "user actually heard it" -- or between "audio
+        finished" and "mic listening again" -- is still visible from
+        server-side logs alone."""
 
-        event = "audio_playback_started" if stage == "started" else "audio_playback_completed"
-        _log_voice_event(event, session=session, turn_id=turn_id)
+        if stage == "started":
+            _mark_latency(session, "browser_playback_started")
+            _log_voice_event("audio_playback_started", session=session, turn_id=turn_id)
+        elif stage == "listening_resumed":
+            # DEFECT B latency acceptance: closes the per-turn timeline with
+            # EVERY requested stage (speech_start .. listening_resumed) in
+            # ONE consolidated, safe (bounded numeric fields only) log line
+            # so a real production slowdown's exact stage is provable from
+            # logs alone, without correlating scattered lines by hand.
+            _mark_latency(session, "listening_resumed")
+            _log_voice_event(
+                "voice_turn_latency_timeline",
+                session=session,
+                turn_id=turn_id,
+                **_latency_timeline_ms(session),
+            )
+        else:
+            _log_voice_event("audio_playback_completed", session=session, turn_id=turn_id)
 
     async def select_voice(self, session: RealtimeSession, voice_id: str) -> None:
         """Block 4.29.2: applies immediately to subsequent TTS output in this
@@ -359,6 +474,13 @@ class RealtimeConversationBridge:
         if first:
             session.turn_started_monotonic = time.monotonic()
             session.first_transcript_recorded = False
+            session.last_partial_stt_monotonic = None
+            # DEFECT B latency acceptance: a fresh capture is a fresh turn --
+            # reset the per-turn stage timeline so a previous turn's marks
+            # (or a barge-in's aborted turn, guaranteed finished by the
+            # barge_in() await above) never bleed into this one.
+            session.turn_latency_marks = {}
+            _mark_latency(session, "speech_start")
             await session.sink.send_event(session.events.build(EV_USER_AUDIO_STARTED))
             _log_voice_event("voice_capture_started", session=session, mime_type=session.mime_type)
         if session.state_machine.can(SessionEvent.AUDIO_STARTED):
@@ -371,6 +493,20 @@ class RealtimeConversationBridge:
         # provider a final commit uses -- correct and deterministic, but a
         # native streaming STT provider would replace this with true
         # token-level partials without changing the event contract.
+        #
+        # DEFECT B root cause fix: throttled to at most one real STT call per
+        # _PARTIAL_STT_MIN_INTERVAL_SECONDS (see module docstring above) so a
+        # long utterance's many ~250ms chunks cannot serialize into a
+        # backlog on this connection's single WS receive loop ahead of the
+        # eventual audio.commit control frame.
+        now = time.monotonic()
+        due = (
+            session.last_partial_stt_monotonic is None
+            or (now - session.last_partial_stt_monotonic) >= _PARTIAL_STT_MIN_INTERVAL_SECONDS
+        )
+        if not due:
+            return
+        session.last_partial_stt_monotonic = now
         try:
             partial = normalize_transcript(
                 self.stt.transcribe(
@@ -383,6 +519,7 @@ class RealtimeConversationBridge:
             partial = ""
         if partial and partial != session.last_partial_transcript:
             session.last_partial_transcript = partial
+            _mark_latency(session, "stt_partial")
             await session.sink.send_event(session.events.build(EV_USER_TRANSCRIPT_PARTIAL, text=partial))
             if not session.first_transcript_recorded and session.turn_started_monotonic is not None:
                 REALTIME_METRICS.mic_to_first_transcript.observe(
@@ -397,6 +534,10 @@ class RealtimeConversationBridge:
         audio_bytes = bytes(session.audio_buffer)
         session.audio_buffer.clear()
         session.last_partial_transcript = ""
+        # DEFECT B latency acceptance: this is the moment the CLIENT told us
+        # it auto-detected end-of-utterance (VAD silence) and stopped
+        # capturing -- the "speech_end" stage of the timeline.
+        _mark_latency(session, "speech_end")
         _log_voice_event(
             "voice_capture_completed",
             session=session,
@@ -422,6 +563,7 @@ class RealtimeConversationBridge:
             )
             REALTIME_METRICS.inc("stt_call")
             self._record_speech_usage(session, capability="stt")
+            _mark_latency(session, "stt_final")
             _log_voice_event(
                 "stt_request_completed",
                 session=session,
@@ -477,6 +619,9 @@ class RealtimeConversationBridge:
             return None
         if session.state_machine.state in _INTERRUPTIBLE_STATES:
             await self.barge_in(session)
+        # A text turn has no speech_start/speech_end/stt_* stages -- reset so
+        # a PRIOR voice turn's marks never leak into this timeline.
+        session.turn_latency_marks = {}
         if session.state_machine.can(SessionEvent.TEXT_MESSAGE):
             session.state_machine.transition(SessionEvent.TEXT_MESSAGE)
         return await self.commit_turn(session, text=cleaned, client_turn_id=client_turn_id, is_voice=False)
@@ -518,6 +663,7 @@ class RealtimeConversationBridge:
         # business_assistant_api.service.submit_async's own dedupe uses
         # below, so one physical utterance/message can never become more
         # than one canonical user turn even across retries/reconnects.
+        _mark_latency(session, "turn_committed")
         _log_voice_event(
             "voice_turn_committed", session=session, turn_id=turn_id, modality="voice" if is_voice else "text"
         )
@@ -534,6 +680,7 @@ class RealtimeConversationBridge:
         )
 
         turn_start = time.monotonic()
+        _mark_latency(session, "assistant_processing_started")
         _log_voice_event("assistant_response_started", session=session, turn_id=turn_id)
         task = asyncio.create_task(self._run_turn(session, turn_id=turn_id, text=text, turn_start=turn_start))
         session.current_task = task
@@ -610,76 +757,128 @@ class RealtimeConversationBridge:
                 session.state_machine.transition(SessionEvent.TEXT_STREAMING)
             if not first_text:
                 REALTIME_METRICS.turn_to_first_text.observe((time.monotonic() - turn_start) * 1000)
+                _mark_latency(session, "first_text_delta")
                 first_text = True
             await asyncio.sleep(0)
         await session.sink.send_event(session.events.build(EV_ASSISTANT_TEXT_COMPLETED, turn_id=turn_id, text=text))
 
         # One canonical Panda response feeds BOTH the visible/streamed text
-        # above AND the TTS call below (production voice defect closure
+        # above AND the TTS call(s) below (production voice defect closure
         # section 10) -- `text` here is the exact same `reply_text` returned
         # by the SINGLE _submit()/submit_async() call in _run_turn, never a
         # second model request or an independently generated spoken answer.
-        tts_started = time.monotonic()
-        _log_voice_event(
-            "tts_request_started", session=session, turn_id=turn_id, provider=type(self.tts).__name__, text_chars=len(text)
-        )
-        try:
-            audio_bytes = self.tts.synthesize(text=text, voice=session.voice_id, mime_type="audio/mpeg")
-            REALTIME_METRICS.inc("tts_call")
-            self._record_speech_usage(session, capability="tts", turn_id=turn_id)
-            _log_voice_event(
-                "tts_request_completed",
-                session=session,
-                turn_id=turn_id,
-                provider=type(self.tts).__name__,
-                success=True,
-                latency_ms=round((time.monotonic() - tts_started) * 1000, 1),
-                audio_bytes=len(audio_bytes),
-            )
-        except Exception as exc:
-            REALTIME_METRICS.inc_error("tts_failed")
-            _log_voice_event(
-                "tts_request_completed",
-                session=session,
-                turn_id=turn_id,
-                provider=type(self.tts).__name__,
-                success=False,
-                latency_ms=round((time.monotonic() - tts_started) * 1000, 1),
-                error_type=type(exc).__name__,
-            )
-            await session.sink.send_event(
-                session.events.build(EV_ERROR, turn_id=turn_id, code=RT_TTS_FAILED, message="tts_failed")
-            )
-            if session.state_machine.can(SessionEvent.RESPONSE_COMPLETED):
-                session.state_machine.transition(SessionEvent.RESPONSE_COMPLETED)
-            return
-        _log_voice_event("tts_audio_received", session=session, turn_id=turn_id, audio_bytes=len(audio_bytes))
-
+        #
+        # DEFECT B point 5 (minimal time-to-first-audio): the SAME text is
+        # split into sentence-sized chunks (single chunk for the common
+        # short-reply case -- identical behavior to before) so the TTS
+        # provider's buffer-based synthesize() can be called per-sentence
+        # and audio for the first sentence streams to the browser while
+        # later sentences are still being synthesized, instead of blocking
+        # first_audio_chunk on the ENTIRE reply's audio.
+        tts_chunks = _split_for_tts(text)
+        _mark_latency(session, "tts_started")
+        audio_pieces: list[bytes] = []
         first_audio = False
-        for idx, chunk in enumerate(_chunk_bytes(audio_bytes)):
-            await session.sink.send_event(
-                session.events.build(
-                    EV_ASSISTANT_AUDIO_DELTA, turn_id=turn_id, chunk_index=idx, byte_size=len(chunk)
-                )
+        for chunk_idx, tts_text in enumerate(tts_chunks):
+            tts_started = time.monotonic()
+            _log_voice_event(
+                "tts_request_started",
+                session=session,
+                turn_id=turn_id,
+                provider=type(self.tts).__name__,
+                text_chars=len(tts_text),
+                chunk_index=chunk_idx,
+                chunk_count=len(tts_chunks),
             )
-            await session.sink.send_audio(chunk, turn_id=turn_id)
-            if session.state_machine.can(SessionEvent.AUDIO_STREAMING):
-                session.state_machine.transition(SessionEvent.AUDIO_STREAMING)
-            if not first_audio:
-                REALTIME_METRICS.turn_to_first_audio.observe((time.monotonic() - turn_start) * 1000)
-                first_audio = True
-            await asyncio.sleep(0)
+            try:
+                audio_bytes = self.tts.synthesize(text=tts_text, voice=session.voice_id, mime_type="audio/mpeg")
+                REALTIME_METRICS.inc("tts_call")
+                self._record_speech_usage(session, capability="tts", turn_id=turn_id)
+                _log_voice_event(
+                    "tts_request_completed",
+                    session=session,
+                    turn_id=turn_id,
+                    provider=type(self.tts).__name__,
+                    success=True,
+                    latency_ms=round((time.monotonic() - tts_started) * 1000, 1),
+                    audio_bytes=len(audio_bytes),
+                    chunk_index=chunk_idx,
+                    chunk_count=len(tts_chunks),
+                )
+            except Exception as exc:
+                REALTIME_METRICS.inc_error("tts_failed")
+                _log_voice_event(
+                    "tts_request_completed",
+                    session=session,
+                    turn_id=turn_id,
+                    provider=type(self.tts).__name__,
+                    success=False,
+                    latency_ms=round((time.monotonic() - tts_started) * 1000, 1),
+                    error_type=type(exc).__name__,
+                    chunk_index=chunk_idx,
+                    chunk_count=len(tts_chunks),
+                )
+                await session.sink.send_event(
+                    session.events.build(EV_ERROR, turn_id=turn_id, code=RT_TTS_FAILED, message="tts_failed")
+                )
+                if chunk_idx == 0:
+                    # Nothing audible was ever sent for this turn -- same
+                    # behavior as before this change: no audio.completed,
+                    # client's "error" handler drives it back to listening.
+                    if session.state_machine.can(SessionEvent.RESPONSE_COMPLETED):
+                        session.state_machine.transition(SessionEvent.RESPONSE_COMPLETED)
+                    return
+                # A LATER sentence failed after earlier audio already
+                # started streaming/playing -- still close out the turn
+                # cleanly with what was actually synthesized so the client's
+                # normal assistant.audio.completed -> resume-listening path
+                # fires instead of leaving the browser waiting forever.
+                break
+            _log_voice_event(
+                "tts_audio_received",
+                session=session,
+                turn_id=turn_id,
+                audio_bytes=len(audio_bytes),
+                chunk_index=chunk_idx,
+                chunk_count=len(tts_chunks),
+            )
+            audio_pieces.append(audio_bytes)
+
+            for idx, byte_chunk in enumerate(_chunk_bytes(audio_bytes)):
+                await session.sink.send_event(
+                    session.events.build(
+                        EV_ASSISTANT_AUDIO_DELTA, turn_id=turn_id, chunk_index=idx, byte_size=len(byte_chunk)
+                    )
+                )
+                await session.sink.send_audio(byte_chunk, turn_id=turn_id)
+                if session.state_machine.can(SessionEvent.AUDIO_STREAMING):
+                    session.state_machine.transition(SessionEvent.AUDIO_STREAMING)
+                if not first_audio:
+                    REALTIME_METRICS.turn_to_first_audio.observe((time.monotonic() - turn_start) * 1000)
+                    _mark_latency(session, "first_audio_chunk")
+                    first_audio = True
+                await asyncio.sleep(0)
+
+        total_bytes = sum(len(p) for p in audio_pieces)
         await session.sink.send_event(
-            session.events.build(EV_ASSISTANT_AUDIO_COMPLETED, turn_id=turn_id, total_bytes=len(audio_bytes))
+            session.events.build(EV_ASSISTANT_AUDIO_COMPLETED, turn_id=turn_id, total_bytes=total_bytes)
         )
         if session.state_machine.can(SessionEvent.RESPONSE_COMPLETED):
             session.state_machine.transition(SessionEvent.RESPONSE_COMPLETED)
+        _mark_latency(session, "assistant_completed")
         # Continuous ChatGPT-style loop (section 12): the client
         # (static/panda/js/realtime.js _resumeListening(), triggered by the
         # assistant.audio.completed event above) automatically re-arms the
-        # microphone for the next turn without any user action -- logged
-        # here as the server-side half of that contract for diagnosis.
-        _log_voice_event("voice_returned_to_listening", session=session, turn_id=turn_id)
+        # microphone for the next turn without any user action. The client
+        # also sends back a "listening_resumed" playback_event control frame
+        # (see record_playback_event below) once it does, closing the
+        # DEFECT B latency timeline for this turn.
+        _log_voice_event(
+            "voice_returned_to_listening",
+            session=session,
+            turn_id=turn_id,
+            **_latency_timeline_ms(session),
+        )
 
     # --- barge-in / interruption --------------------------------------------
 

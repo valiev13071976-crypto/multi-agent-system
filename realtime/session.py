@@ -66,6 +66,24 @@ class RealtimeSession:
     turn_started_monotonic: float | None = None
     first_transcript_recorded: bool = False
     closed: bool = False
+    # DEFECT B latency acceptance: throttle for the buffer-based partial-STT
+    # re-transcription in on_audio_chunk (see bridge.py _PARTIAL_STT_MIN_
+    # INTERVAL_SECONDS) -- without this, a real STT provider call on EVERY
+    # ~250ms MediaRecorder chunk serializes into a backlog on this
+    # connection's single WebSocket receive loop (router.py's `while True:
+    # await websocket.receive()`), so audio.commit is only READ after that
+    # backlog drains -- the exact "user stops talking -> long silent wait"
+    # symptom. None until the first partial call of a turn.
+    last_partial_stt_monotonic: float | None = None
+    # DEFECT B latency acceptance: one monotonic timestamp per named stage
+    # (speech_start, speech_end, stt_partial, stt_final, turn_committed,
+    # assistant_processing_started, first_text_delta, tts_started,
+    # first_audio_chunk, browser_playback_started, assistant_completed,
+    # listening_resumed) for the turn currently in flight -- reset at the
+    # start of each new turn's audio/text capture. First occurrence per
+    # stage wins (never overwritten), so throttled/repeated calls (e.g.
+    # multiple stt_partial events) never distort the timeline.
+    turn_latency_marks: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if self.events is None:

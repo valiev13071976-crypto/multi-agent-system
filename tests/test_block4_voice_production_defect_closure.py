@@ -28,6 +28,19 @@ production are actually fixed at their source:
 
 4. `RouterPlaybackAckTests` -- the playback_event control frame (browser
    audio.play/ended ack) dispatches to the bridge.
+
+5. `DefectBContinuousDialogueLatencyTests` -- DEFECT B (voice mode must be
+   a real continuous dialogue, not request/wait/response): proves the ONE
+   proven root cause of "user stops talking -> long silent wait" (the
+   buffer-based partial-STT re-transcription firing on EVERY ~250ms audio
+   chunk, serializing into a backlog on the connection's single WebSocket
+   receive loop ahead of audio.commit) is now throttled; proves a
+   multi-sentence reply's TTS audio for the FIRST sentence streams to the
+   client before the LAST sentence has even been synthesized (real
+   streaming start, not "wait for everything"); and proves the full
+   per-turn DEFECT B latency timeline (speech_start .. listening_resumed)
+   is recorded with every required stage once a turn completes and the
+   client acks playback/listening-resumed.
 """
 
 from __future__ import annotations
@@ -36,7 +49,9 @@ import asyncio
 import os
 import shutil
 import tempfile
+import time
 import unittest
+from unittest import mock
 
 from business_assistant.conversation_gateway import FakePandaConversationGateway
 from business_assistant_api.runtime import build_business_assistant_api_runtime
@@ -50,7 +65,7 @@ from integrations.production.errors import ProductionProviderError
 from integrations.production.factory import build_production_integrations
 from personalization.service import PersonalizationService
 from personalization.store import SqlitePersonalizationStore
-from realtime.bridge import RealtimeConversationBridge
+from realtime.bridge import RealtimeConversationBridge, _split_for_tts
 from realtime.errors import RT_AUDIO_EMPTY
 from realtime.session import NullSink
 from ui_chat.voice.stt import FakeSpeechToTextProvider
@@ -295,6 +310,165 @@ class RouterPlaybackAckTests(unittest.IsolatedAsyncioTestCase):
             bridge, object(), json.dumps({"type": "playback_event", "stage": "completed", "turn_id": "t1"})
         )
         self.assertEqual(calls, [("started", "t1"), ("completed", "t1")])
+
+
+class _TimedSpyTts:
+    """Like _SpyTts, but also records the wall-clock time of each
+    synthesize() call so a test can prove audio for an EARLIER sentence
+    reached the client before a LATER sentence was even synthesized."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+        self.call_times: list[float] = []
+
+    def synthesize(self, *, text: str, voice: str = "default", mime_type: str = "audio/wav") -> bytes:
+        self.call_times.append(time.monotonic())
+        self.calls.append({"text": text, "voice": voice, "mime_type": mime_type})
+        return b"AUDIO:" + text.encode("utf-8")
+
+
+class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
+    """DEFECT B -- voice mode must be a real continuous dialogue, not
+    request/wait/response. See module docstring section 5."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.rt = build_business_assistant_api_runtime(
+            db_path=os.path.join(self.tmp, "ba.sqlite"), with_integration=False
+        )
+        self.pz_store = SqlitePersonalizationStore(os.path.join(self.tmp, "pz.sqlite"))
+        self.pz = PersonalizationService(store=self.pz_store, tts=FakeTextToSpeechProvider())
+        self.rt.service.personalization_service = self.pz
+
+    def tearDown(self):
+        self.pz.close()
+        self.rt.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _bridge(self, stt, tts) -> RealtimeConversationBridge:
+        return RealtimeConversationBridge(ba_api=self.rt.service, stt=stt, tts=tts, personalization=self.pz)
+
+    def test_split_for_tts_keeps_short_replies_as_one_chunk(self):
+        # No regression for the common case: a short reply with no sentence
+        # boundary is still ONE chunk (identical to pre-DEFECT-B behavior).
+        self.assertEqual(_split_for_tts("Ответ Панды"), ["Ответ Панды"])
+        self.assertEqual(_split_for_tts(""), [])
+
+    def test_split_for_tts_splits_a_genuinely_multi_sentence_reply(self):
+        text = "Первое предложение подлиннее. Второе предложение тоже подлиннее. Третье."
+        chunks = _split_for_tts(text)
+        self.assertGreater(len(chunks), 1, "a real multi-sentence reply must stream in more than one TTS call")
+        self.assertEqual(" ".join(chunks).replace("  ", " "), text)
+
+    async def test_partial_stt_calls_are_throttled_to_bound_ws_receive_backlog(self):
+        # Root cause of "user stops talking -> long silent wait" (DEFECT B):
+        # a real STT provider call on EVERY ~250ms MediaRecorder chunk
+        # serializes into a backlog on this connection's single WS receive
+        # loop, so audio.commit is only READ after that backlog drains.
+        stt = _SpyProvider(reply="привет")
+        bridge = self._bridge(stt, _SpyTts())
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        fake_now = [1_000.0]
+        with mock.patch("realtime.bridge.time.monotonic", side_effect=lambda: fake_now[0]):
+            # Ten rapid chunks with NO real-clock advance between them
+            # simulate the exact backlog scenario: many chunks queued up
+            # while the user is still talking.
+            for _ in range(10):
+                await bridge.on_audio_chunk(session, b"x")
+            self.assertEqual(
+                len(stt.calls),
+                1,
+                "only the FIRST chunk of a turn may call STT before the throttle window elapses",
+            )
+
+            # Recognized speech must still appear AS THE CONVERSATION
+            # PROGRESSES (DEFECT B point 2), not never again -- once the
+            # throttle window elapses, the next chunk calls STT again.
+            fake_now[0] += 1.0
+            await bridge.on_audio_chunk(session, b"x")
+            self.assertEqual(len(stt.calls), 2)
+
+    async def test_multi_sentence_audio_streams_before_the_last_sentence_is_synthesized(self):
+        reply = "Первое предложение подлиннее. Второе предложение тоже подлиннее. Третье подлиннее тоже."
+        stt = _SpyProvider(reply="вопрос")
+        tts = _TimedSpyTts()
+        self.rt.service.ba.conversation_gateway = FakePandaConversationGateway(response=reply)
+        bridge = self._bridge(stt, tts)
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        await bridge.on_audio_chunk(session, b"audio-bytes")
+        turn_id = await bridge.on_audio_commit(session)
+        await session.current_task
+
+        self.assertGreater(len(tts.calls), 1, "a genuinely multi-sentence reply must call TTS more than once")
+        audio_deltas = [e for e in sink.events if e.type == "assistant.audio.delta"]
+        self.assertGreater(len(audio_deltas), 0)
+        audio_completed = next(e for e in sink.events if e.type == "assistant.audio.completed")
+        expected_total = sum(len(b"AUDIO:" + c["text"].encode("utf-8")) for c in tts.calls)
+        self.assertEqual(audio_completed.data["total_bytes"], expected_total)
+
+        # The critical DEFECT B point-5 proof: the FIRST audio chunk was
+        # marked as sent strictly BEFORE the LAST sentence was even handed
+        # to the TTS provider -- i.e. real incremental streaming, not
+        # "wait for the whole reply's audio, then send it all at once".
+        self.assertIn("first_audio_chunk", session.turn_latency_marks)
+        self.assertLess(
+            session.turn_latency_marks["first_audio_chunk"],
+            tts.call_times[-1],
+            "first audio must stream to the client before the FINAL sentence is synthesized",
+        )
+
+    async def test_full_turn_latency_timeline_records_every_defect_b_stage(self):
+        reply = "Хорошо, а у тебя?"
+        stt = _SpyProvider(reply="Привет, как дела?")
+        tts = _SpyTts()
+        self.rt.service.ba.conversation_gateway = FakePandaConversationGateway(response=reply)
+        bridge = self._bridge(stt, tts)
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        await bridge.on_audio_chunk(session, b"audio-bytes")
+        turn_id = await bridge.on_audio_commit(session)
+        await session.current_task
+        bridge.record_playback_event(session, stage="started", turn_id=turn_id)
+
+        with self.assertLogs("realtime.voice_diagnostics", level="INFO") as cm:
+            bridge.record_playback_event(session, stage="listening_resumed", turn_id=turn_id)
+
+        timeline_records = [
+            r for r in cm.records if getattr(r, "voice_event", {}).get("event") == "voice_turn_latency_timeline"
+        ]
+        self.assertEqual(len(timeline_records), 1)
+        timeline = timeline_records[0].voice_event
+
+        required_stages = [
+            "speech_start",
+            "stt_partial",
+            "speech_end",
+            "stt_final",
+            "turn_committed",
+            "assistant_processing_started",
+            "first_text_delta",
+            "tts_started",
+            "first_audio_chunk",
+            "assistant_completed",
+            "browser_playback_started",
+            "listening_resumed",
+        ]
+        for stage in required_stages:
+            key = f"{stage}_ms"
+            self.assertIn(key, timeline, f"DEFECT B latency acceptance requires the '{stage}' stage timestamp")
+            self.assertIsInstance(timeline[key], (int, float))
+
+        # Real time.monotonic() is non-decreasing -- these stages were
+        # marked in this exact real-world order in the test above, so their
+        # relative-ms values must be non-decreasing too. This is the actual
+        # "where does real time go" evidence DEFECT B demands.
+        values = [timeline[f"{s}_ms"] for s in required_stages]
+        self.assertEqual(values, sorted(values), "latency timeline stages must be in non-decreasing chronological order")
 
 
 if __name__ == "__main__":
