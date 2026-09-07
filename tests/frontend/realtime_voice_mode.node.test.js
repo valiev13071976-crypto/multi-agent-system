@@ -138,6 +138,7 @@ test("continuous loop: assistant.audio.completed auto-resumes listening and rest
   const controller = new PandaRealtime.RealtimeVoiceController({});
   controller.mediaStream = { getTracks: () => [], getAudioTracks: () => [{ enabled: true }] };
   controller.ws = { readyState: 1, send: () => {} };
+  controller._onTextFrame(JSON.stringify({ kind: "event", type: "user.turn.committed", turn_id: "t1", data: {} }));
   controller._setState(PandaRealtime.STATE_SPEAKING);
   const startCountBefore = FakeMediaRecorder.startCount;
 
@@ -205,13 +206,18 @@ test("VAD does not auto-commit on silence alone (no speech ever detected this tu
   }
 });
 
-test("VAD auto-barge-in fires after sustained speech while Panda is speaking", async () => {
-  const { PandaRealtime } = loadRealtimeModule();
+test("VAD auto-barge-in sends explicit barge_in after sustained speech while Panda is speaking, but does NOT itself transfer ownership", async () => {
+  // PR #24 section 3 (safe barge-in ownership): the client must send the
+  // explicit control frame once it has ITS OWN confirmation of sustained
+  // user speech, but must NOT assume that sending it immediately hands the
+  // turn back -- state must stay SPEAKING (and the mic must stay off)
+  // until the server's own "interruption" acknowledgement arrives.
+  const { PandaRealtime, FakeMediaRecorder } = loadRealtimeModule();
   const sent = [];
   const controller = new PandaRealtime.RealtimeVoiceController({});
   controller._send = (payload) => sent.push(payload);
-  controller._startRecording = () => {};
-  controller.mediaStream = { getTracks: () => [] };
+  controller.mediaStream = { getTracks: () => [], getAudioTracks: () => [] };
+  controller.ws = { readyState: 1, send: () => {} };
   controller._setState(PandaRealtime.STATE_SPEAKING);
   controller._analyser = loudAnalyser();
   controller._vadBuf = new Uint8Array(4);
@@ -223,12 +229,137 @@ test("VAD auto-barge-in fires after sustained speech while Panda is speaking", a
     controller._sampleVad(); // speech onset
     assert.equal(sent.length, 0, "requires SUSTAINED speech, not a single sample");
     now += 250; // exceeds VAD_BARGE_IN_MS (180ms)
+    const startCountBeforeBargeIn = FakeMediaRecorder.startCount;
     controller._sampleVad();
     assert.equal(sent.length, 1);
     assert.equal(sent[0].type, "barge_in");
-    assert.equal(controller.state, PandaRealtime.STATE_LISTENING, "barge-in returns to LISTENING immediately");
+    assert.equal(
+      controller.state,
+      PandaRealtime.STATE_SPEAKING,
+      "sending barge_in must NOT itself transfer ownership -- state stays SPEAKING until the server acknowledges"
+    );
+    assert.equal(
+      FakeMediaRecorder.startCount,
+      startCountBeforeBargeIn,
+      "must not re-arm the mic before ownership is actually confirmed by the server"
+    );
+
+    // Server confirms the interruption -- ONLY NOW does ownership transfer.
+    controller._onTextFrame(
+      JSON.stringify({ kind: "event", type: "interruption", turn_id: "interrupted-turn", data: {} })
+    );
+    assert.equal(controller.state, PandaRealtime.STATE_LISTENING, "ownership transfers once the server acknowledges");
+    assert.ok(
+      FakeMediaRecorder.startCount > startCountBeforeBargeIn,
+      "recording restarts once ownership is confirmed, never before"
+    );
   } finally {
     Date.now = realNow;
+  }
+});
+
+test("PR #24 section 3/12.J: ordinary background noise while Panda speaks never sends barge_in (Panda must not interrupt herself)", async () => {
+  const { PandaRealtime } = loadRealtimeModule();
+  const sent = [];
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller._send = (payload) => sent.push(payload);
+  controller._setState(PandaRealtime.STATE_SPEAKING);
+  controller._vadBuf = new Uint8Array(4);
+  controller._noiseFloor = 0.03;
+
+  let now = 6000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    // Constant ambient noise/activity, not sustained speech energy relative
+    // to the calibrated floor -- e.g. residual room noise or a brief
+    // transport artifact while Panda is talking.
+    controller._analyser = noisyRoomAnalyser(0.03);
+    for (let i = 0; i < 10; i++) {
+      now += 100;
+      controller._sampleVad();
+    }
+    assert.equal(sent.length, 0, "ambient noise/activity while Panda speaks must never fire an unconfirmed barge-in");
+    assert.equal(controller.state, PandaRealtime.STATE_SPEAKING, "Panda must not interrupt herself due to background noise");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("PR #24 section 6: stale assistant.audio.completed for an old/interrupted turn is ignored once a newer turn owns the session", async () => {
+  const { PandaRealtime, FakeMediaRecorder } = loadRealtimeModule();
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller.mediaStream = { getTracks: () => [], getAudioTracks: () => [{ enabled: true }] };
+  controller.ws = { readyState: 1, send: () => {} };
+  const audioEvents = [];
+  controller.handlers = { onAssistantAudio: (e) => audioEvents.push(e) };
+  controller._setState(PandaRealtime.STATE_SPEAKING);
+
+  // Turn A is committed and starts streaming audio.
+  controller._onTextFrame(
+    JSON.stringify({ kind: "event", type: "user.turn.committed", turn_id: "turn-a", data: {} })
+  );
+  controller._onTextFrame(JSON.stringify({ kind: "event", type: "assistant.audio.delta", turn_id: "turn-a", data: {} }));
+  controller._onBinaryFrame(new ArrayBuffer(4));
+
+  // Turn A is interrupted -- ownership clears.
+  controller._onTextFrame(JSON.stringify({ kind: "event", type: "interruption", turn_id: "turn-a", data: {} }));
+
+  // Turn B is committed and starts streaming its own audio (new ownership).
+  controller._onTextFrame(
+    JSON.stringify({ kind: "event", type: "user.turn.committed", turn_id: "turn-b", data: {} })
+  );
+  controller._onTextFrame(JSON.stringify({ kind: "event", type: "assistant.audio.delta", turn_id: "turn-b", data: {} }));
+  controller._onBinaryFrame(new ArrayBuffer(8));
+
+  const startCountBeforeStale = FakeMediaRecorder.startCount;
+  // A stale/late "assistant.audio.completed" for the OLD turn A arrives --
+  // must be ignored: no onAssistantAudio callback for it, no
+  // resume-listening driven by it, and the CURRENT turn (B) keeps owning
+  // the session.
+  controller._onTextFrame(
+    JSON.stringify({ kind: "event", type: "assistant.audio.completed", turn_id: "turn-a", data: {} })
+  );
+  assert.equal(audioEvents.length, 0, "stale completion for turn A must not finalize/flush any audio");
+  assert.equal(
+    controller.state,
+    PandaRealtime.STATE_SPEAKING,
+    "stale completion for an old turn must not resume listening over the CURRENT turn"
+  );
+  assert.equal(FakeMediaRecorder.startCount, startCountBeforeStale, "must not re-arm the mic from a stale completion");
+
+  // The REAL completion for turn B arrives -- this one is authoritative.
+  controller._onTextFrame(
+    JSON.stringify({ kind: "event", type: "assistant.audio.completed", turn_id: "turn-b", data: {} })
+  );
+  assert.equal(audioEvents.length, 1);
+  assert.equal(audioEvents[0].turnId, "turn-b");
+  assert.equal(
+    controller.state,
+    PandaRealtime.STATE_LISTENING,
+    "the CURRENT turn's completion drives the normal PLAYBACK -> LISTENING transition"
+  );
+});
+
+test("PR #24 section 3: mic is requested with browser-native echo cancellation to reduce Panda's own audio bleeding into a false self-interruption", async () => {
+  const { PandaRealtime } = loadRealtimeModule();
+  let capturedConstraints = null;
+  global.navigator.mediaDevices.getUserMedia = async (constraints) => {
+    capturedConstraints = constraints;
+    return { getTracks: () => [], getAudioTracks: () => [{ enabled: true }] };
+  };
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  try {
+    await controller.start({});
+    assert.ok(capturedConstraints && capturedConstraints.audio, "must request the microphone");
+    assert.equal(
+      capturedConstraints.audio.echoCancellation,
+      true,
+      "browser AEC reduces Panda's own TTS audio bleeding into the mic and causing a false self-interruption"
+    );
+    assert.equal(capturedConstraints.audio.noiseSuppression, true);
+  } finally {
+    controller.close();
   }
 });
 
