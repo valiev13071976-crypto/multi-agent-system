@@ -347,6 +347,15 @@ if getattr(side_effect_runtime, "data_intelligence_runtime", None) is not None:
     side_effect_runtime.data_intelligence_runtime.service.artifact_service = (
         ba_api_runtime.artifact_service
     )
+# Block 5.3: ContentIntelligenceService is likewise constructed inside
+# side_effect_runtime before the canonical ArtifactService exists -- wire it
+# post-construction the same way, so ``content.create``'s Review -> Artifact
+# step (``export_asset_artifact``) registers through the Unified
+# Files/Artifacts layer instead of only ``{"exported": False}``.
+if getattr(side_effect_runtime, "content_intelligence_runtime", None) is not None:
+    side_effect_runtime.content_intelligence_runtime.service.artifact_service = (
+        ba_api_runtime.artifact_service
+    )
 realtime_runtime = None
 if realtime_enabled():
     # Block 4: realtime session bridge reuses ba_api_runtime.service directly

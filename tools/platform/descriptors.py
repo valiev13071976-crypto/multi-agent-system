@@ -86,6 +86,12 @@ TOOL_MEMORY_WRITE = "memory.write"
 TOOL_MEMORY_READ = "memory.read"
 TOOL_MEMORY_PROPOSE = "memory.propose"
 TOOL_CONTENT_RESEARCH = "content.research"
+# Block 5.3: single chat-facing entry point for the activated Content
+# Intelligence pipeline (Search/Acquisition -> Research -> Content generation
+# -> Review -> Artifact) -- see ``content_intel/tools.py``'s ``"create"`` op
+# and ``ContentIntelligenceService.create_content_from_request``.
+TOOL_CONTENT_CREATE = "content.create"
+TOOL_CONTENT_EXPORT_ARTIFACT = "content.export_artifact"
 TOOL_CONTENT_STRATEGY = "content.create_strategy"
 TOOL_CONTENT_GENERATE_COPY = "content.generate_copy"
 TOOL_CONTENT_GENERATE_MEDIA = "content.generate_media"
@@ -2030,10 +2036,56 @@ def content_research_descriptor(*, enabled: bool = True) -> ToolDescriptor:
         description="Governed content research with evidence provenance",
         category="content",
         adapter_id="content_intel",
-        capabilities=(CAP_EXTERNAL_READ,),
+        # Block 5.3: research() may internally fetch caller-supplied URLs
+        # through the governed scrape.extract tool (see research_from_web) --
+        # requires CAP_SCRAPE in addition to the pre-existing read capability.
+        capabilities=(CAP_EXTERNAL_READ, CAP_SCRAPE),
         operations=("research",),
         enabled=enabled,
         timeout=120.0,
+    )
+
+
+def content_create_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    """Block 5.3: single chat-facing capability -- research (optionally
+    fetching caller-supplied URLs through Acquisition), generate copy,
+    review, and export a validated artifact in one call. Deliberately a
+    ``_read_desc`` (like ``scrape.extract``/``data.excel_assistant``, see
+    their docstrings) rather than ``_write_desc``: FAMILY_CONTENT is
+    ``risk=RISK_READ`` and must never require the write-execution
+    (autonomy-gate/HITL/idempotency-executor) pipeline reserved for
+    live-business-mutating actions -- content generation only ever touches
+    content_intel's own tenant-scoped store plus the canonical
+    ArtifactService, never an external system of record."""
+
+    return _read_desc(
+        tool_id=TOOL_CONTENT_CREATE,
+        name="Content Create",
+        description=(
+            "End-to-end content creation: Search/Acquisition evidence -> "
+            "Research -> Content generation -> Review -> Artifact"
+        ),
+        category="content",
+        adapter_id="content_intel",
+        capabilities=(CAP_SCRAPE, CAP_FILESYSTEM_WRITE),
+        operations=("create",),
+        enabled=enabled,
+        timeout=150.0,
+        network=True,
+    )
+
+
+def content_export_artifact_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_CONTENT_EXPORT_ARTIFACT,
+        name="Content Export Artifact",
+        description="Export a validated content asset as a canonical artifact",
+        category="content",
+        adapter_id="content_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("export_artifact",),
+        enabled=enabled,
+        timeout=30.0,
     )
 
 

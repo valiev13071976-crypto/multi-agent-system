@@ -41,6 +41,12 @@ TOOL_IMAGE_GENERATE = "image.generate"
 # Parsing Platform (see ``acquisition/tools.py``'s ``AcquisitionToolAdapter``).
 # Panda -- not the user -- decides fetch vs. crawl inside this one tool.
 TOOL_SCRAPE_EXTRACT = "scrape.extract"
+# Block 5.3: single chat-facing entry point for the activated Content
+# Intelligence pipeline (see ``content_intel/tools.py``'s ``"create"`` op /
+# ``ContentIntelligenceService.create_content_from_request``). One call
+# composes Search/Acquisition evidence -> Research -> Content generation ->
+# Review -> Artifact -- Panda decides internally whether/what to fetch.
+TOOL_CONTENT_CREATE = "content.create"
 
 
 # --- Public decision / lifecycle labels (internal only) -------------------
@@ -81,6 +87,12 @@ FAMILY_WRITE = "write_governed"
 # FAMILY_SEARCH (find pages, never fetch/parse their content). See section 21
 # of the Block 5.2 spec: SEARCH != ACQUISITION != CRAWL != DATA INTELLIGENCE.
 FAMILY_ACQUISITION = "acquisition"
+# Block 5.3: content creation (research a topic -- optionally grounded in
+# Block 5.2 acquired pages -- generate copy, review, export as an artifact).
+# Distinct from FAMILY_ACQUISITION (which only collects/parses structured
+# records, never drafts prose) and FAMILY_WRITE (which mutates live business
+# state and always requires separate approval).
+FAMILY_CONTENT = "content"
 
 RISK_GENERATE = "generate"
 RISK_READ = "read"
@@ -182,11 +194,29 @@ ACQUISITION_CONTRACT = CapabilityContract(
     artifact_type="dataset",
 )
 
+CONTENT_CONTRACT = CapabilityContract(
+    family=FAMILY_CONTENT,
+    tool_id=TOOL_CONTENT_CREATE,
+    operation="create",
+    # The objective/topic is deterministically extracted from the user's
+    # message BEFORE task creation (see ``_extract_content_objective`` /
+    # the FAMILY_CONTENT branch of ``resolve_action_turn``), mirroring how
+    # FAMILY_ACQUISITION resolves ``url`` up front rather than through the
+    # generic missing-params gate.
+    required=("objective",),
+    optional=("urls", "channel", "content_type"),
+    defaults={},
+    risk=RISK_READ,
+    required_capabilities=(CAP_SCRAPE, CAP_FILESYSTEM_WRITE),
+    artifact_type="content",
+)
+
 CONTRACTS: dict[str, CapabilityContract] = {
     FAMILY_IMAGE_GENERATE: IMAGE_GENERATE_CONTRACT,
     FAMILY_IMAGE_EDIT: IMAGE_EDIT_CONTRACT,
     FAMILY_EXCEL: EXCEL_CONTRACT,
     FAMILY_ACQUISITION: ACQUISITION_CONTRACT,
+    FAMILY_CONTENT: CONTENT_CONTRACT,
 }
 
 
@@ -381,6 +411,48 @@ _ACQUISITION_INTENT_STEMS = (
     "crawl",
 )
 
+# Block 5.3: explicit content-creation verbs -- checked BEFORE the bare-URL
+# acquisition signal (spec chain: "write an article about <url>" must route
+# to content creation with the URL as research input, not to a bare scrape).
+_CONTENT_INTENT_STEMS = (
+    "напиши статью",
+    "напиши пост",
+    "напиши текст",
+    "напиши копирайт",
+    "сгенерируй статью",
+    "сгенерируй текст",
+    "сгенерируй пост",
+    "создай контент",
+    "создай статью",
+    "создай пост",
+    "write an article",
+    "write a post",
+    "write copy",
+    "generate content",
+    "generate an article",
+    "generate a post",
+)
+
+_CONTENT_TRIGGER_RE = re.compile(
+    r"^\s*(?:please|пожалуйста)?\s*"
+    r"(?:напиши(?:те)?|сгенерируй|создай|write|generate)\s+"
+    r"(?:статью|пост|текст|копирайт|copy|content|an?\s+article|a\s+post)\s*"
+    r"(?:про|о|на\s+тему|about|on|for)?\s*",
+    re.I,
+)
+
+
+def _extract_content_objective(text: str) -> str:
+    blob = (text or "").strip()
+    match = _CONTENT_TRIGGER_RE.match(blob)
+    if not match:
+        return blob
+    # A fully-consumed trigger phrase with nothing left ("напиши статью") is a
+    # deliberate signal that no topic was given yet -- returns "" so the
+    # missing-required-param gate asks a clarification instead of treating
+    # the bare verb phrase itself as the topic.
+    return blob[match.end():].strip(" .,:;-\u2014")
+
 
 def _extract_url(text: str) -> str:
     match = _URL_RE.search(text or "")
@@ -548,6 +620,12 @@ def detect_family(
     # deterministic signal, regardless of the accompanying wording.
     if has_spreadsheet_attachment:
         return FAMILY_EXCEL
+    # Block 5.3: an explicit content-creation verb ("write an article about
+    # <url>") wins over the bare-URL acquisition signal below -- the user is
+    # asking for drafted content, not a raw record extraction, even when a
+    # source URL is included as research input.
+    if _has_stem(raw, _CONTENT_INTENT_STEMS):
+        return FAMILY_CONTENT
     # Block 5.2: an explicit URL always wins over any active task -- pasting
     # a new link is a deliberate "acquire this" signal (spec section 20),
     # stronger than a generic active-family continuation heuristic.
@@ -575,6 +653,11 @@ def detect_family(
         # last turn) -- keep the frame alive for a plain follow-up reply.
         if not (_has_stem(raw, _WEATHER_STEMS) or _has_stem(raw, _QUESTION_NEW_STEMS)):
             return FAMILY_ACQUISITION
+    if active is not None and active.family == FAMILY_CONTENT:
+        # Continuation while still waiting for the objective/topic, or a
+        # short follow-up refining the same content request.
+        if not (_has_stem(raw, _WEATHER_STEMS) or _has_stem(raw, _QUESTION_NEW_STEMS)):
+            return FAMILY_CONTENT
     if _is_image_artifact_request(raw) or (
         _is_image_execute_verb(raw) and (active is None or active.family == FAMILY_IMAGE_GENERATE)
     ):
@@ -611,7 +694,7 @@ def continuation_decision(
     # detect_family has already deterministically resolved this turn to the
     # active Excel task, that heuristic must not override it.
     if (
-        family not in {FAMILY_EXCEL, FAMILY_ACQUISITION}
+        family not in {FAMILY_EXCEL, FAMILY_ACQUISITION, FAMILY_CONTENT}
         and _is_unrelated_new_task(text)
         and not _is_quantity_only(text)
     ):
@@ -752,6 +835,8 @@ def user_unavailable_message(family: str) -> str:
         return "Сейчас не могу создать документ — возможность недоступна."
     if family == FAMILY_ACQUISITION:
         return "Сейчас не могу собрать данные со страницы — возможность недоступна."
+    if family == FAMILY_CONTENT:
+        return "Сейчас не могу сгенерировать текст — возможность недоступна."
     return "Эта возможность сейчас недоступна."
 
 
@@ -875,7 +960,7 @@ def resolve_action_turn(
     if family == FAMILY_SEARCH or (
         mode == NEW_TASK
         and _is_unrelated_new_task(current)
-        and family not in {FAMILY_IMAGE_GENERATE, FAMILY_EXCEL, FAMILY_ACQUISITION}
+        and family not in {FAMILY_IMAGE_GENERATE, FAMILY_EXCEL, FAMILY_ACQUISITION, FAMILY_CONTENT}
     ):
         if active is not None:
             active.status = STATUS_SUPERSEDED
@@ -1103,6 +1188,98 @@ def resolve_action_turn(
             idempotency_key=idem,
         )
 
+    if family == FAMILY_CONTENT:
+        is_new = mode == NEW_TASK or active is None or active.family != FAMILY_CONTENT
+        if is_new:
+            if active is not None:
+                active.status = STATUS_SUPERSEDED
+                store.put(active)
+            first_url = _extract_url(current)
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant,
+                owner_id=owner,
+                conversation_id=conv,
+                family=FAMILY_CONTENT,
+                tool_id=CONTENT_CONTRACT.tool_id,
+                operation=CONTENT_CONTRACT.operation,
+                goal=current,
+                parameters={
+                    "objective": _extract_content_objective(current),
+                    "urls": [first_url] if first_url else [],
+                },
+                artifact_type=CONTENT_CONTRACT.artifact_type,
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+        else:
+            task = active
+            if task.status in {STATUS_COMPLETED, STATUS_FAILED_RETRYABLE}:
+                task.status = STATUS_DRAFT
+            new_url = _extract_url(current)
+            if new_url:
+                urls = list(task.parameters.get("urls") or [])
+                if new_url not in urls:
+                    urls.append(new_url)
+                task.parameters["urls"] = urls
+            if not str(task.parameters.get("objective") or "").strip():
+                task.parameters["objective"] = _extract_content_objective(current)
+        task.goal = current
+
+        objective = str(task.parameters.get("objective") or "").strip()
+        if not objective:
+            task.missing_required = ("objective",)
+            task.status = STATUS_WAITING_FOR_INPUT
+            store.put(task)
+            return ActionDecision(
+                decision=ASK_CLARIFICATION,
+                readiness=NEEDS_REQUIRED_INPUT,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                user_message="О чём написать?",
+                extra_llm=False,
+            )
+        task.missing_required = ()
+
+        args = {
+            "objective": objective,
+            "urls": list(task.parameters.get("urls") or []),
+            "conversation_id": conv,
+        }
+
+        cap_status = inspect_capability(gateway, CONTENT_CONTRACT.tool_id)
+        if cap_status != CAPABILITY_AVAILABLE_AND_AUTHORIZED:
+            task.status = STATUS_FAILED_RETRYABLE
+            store.put(task)
+            return ActionDecision(
+                decision=FAIL_UNAVAILABLE,
+                readiness=NOT_EXECUTABLE,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                arguments=args,
+                user_message=user_unavailable_message(FAMILY_CONTENT),
+                tool_id=CONTENT_CONTRACT.tool_id,
+                operation=CONTENT_CONTRACT.operation,
+                extra_llm=False,
+                capability_status=cap_status,
+            )
+
+        idem = _idempotency_key(request_id, CONTENT_CONTRACT.tool_id, args)
+        task.status = STATUS_READY
+        store.put(task)
+        return ActionDecision(
+            decision=CALL_TOOL,
+            readiness=READY_TO_EXECUTE,
+            continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+            task=task,
+            arguments=args,
+            tool_id=CONTENT_CONTRACT.tool_id,
+            operation=CONTENT_CONTRACT.operation,
+            extra_llm=False,
+            capability_status=cap_status,
+            idempotency_key=idem,
+        )
+
     if family == FAMILY_EXCEL:
         is_new = mode == NEW_TASK or active is None or active.family != FAMILY_EXCEL
         if is_new:
@@ -1274,6 +1451,24 @@ def format_tool_user_text(
         if record_count:
             return f"Собрал {record_count} записей со страницы."
         return "Не нашёл структурированных данных на странице."
+    if family == FAMILY_CONTENT:
+        status = str(payload.get("status") or "")
+        errors = list(payload.get("validation_errors") or [])
+        if status == "NEEDS_REVIEW" or errors:
+            msg = "Текст сгенерирован, но требует ручной проверки перед публикацией."
+            if errors:
+                msg += " Замечания: " + ", ".join(str(e) for e in errors) + "."
+            return msg
+        lines: list[str] = []
+        body_preview = str(payload.get("body_preview") or "").strip()
+        if body_preview:
+            lines.append(body_preview[:800])
+        view_url = str(payload.get("view_url") or "")
+        if view_url:
+            lines.append(f"[Скачать текст]({view_url})")
+        if not lines:
+            lines.append("Готово.")
+        return "\n".join(lines)
     if family in (FAMILY_IMAGE_GENERATE, FAMILY_IMAGE_EDIT):
         urls: list[str] = []
         seen: set[str] = set()
@@ -1338,6 +1533,21 @@ def artifacts_from_tool_data(data: Mapping[str, Any] | None, *, tool_id: str) ->
                 "artifact_id": str(workbook.get("artifact_id")),
                 "mime_type": str(workbook.get("mime_type") or ""),
                 "view_url": str(workbook.get("view_url") or ""),
+            }
+        ]
+    # Block 5.3: content.create's Review -> Artifact step (see
+    # ContentIntelligenceService.export_asset_artifact) -- already registered
+    # through the canonical ArtifactService, so artifact_id/view_url here are
+    # the real, authorized ones (never a raw internal blob ref).
+    if tool_id == TOOL_CONTENT_CREATE and payload.get("exported") and payload.get("artifact_id"):
+        return [
+            {
+                "type": "content",
+                "artifact_type": "content",
+                "ref": str(payload.get("artifact_id")),
+                "artifact_id": str(payload.get("artifact_id")),
+                "mime_type": str(payload.get("mime_type") or ""),
+                "view_url": str(payload.get("view_url") or ""),
             }
         ]
     # Prefer the per-item "assets" list (ProductMediaToolAdapter always provides one) so

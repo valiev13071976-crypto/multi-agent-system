@@ -31,6 +31,11 @@ CONTENT_OPTIMIZATION_FAILED = "CONTENT_OPTIMIZATION_FAILED"
 CONTENT_BATCH_REQUIRED = "CONTENT_BATCH_REQUIRED"
 CONTENT_CANCELLED = "CONTENT_CANCELLED"
 CONTENT_DEADLINE_EXCEEDED = "CONTENT_DEADLINE_EXCEEDED"
+# Block 5.3: raised when a caller asks research() to fetch evidence from
+# URLs (Search/Acquisition -> Research handoff) but no ToolGateway was wired
+# into the service -- a typed, honest failure instead of silently ignoring
+# the requested URLs and returning an under-evidenced report.
+CONTENT_ACQUISITION_UNAVAILABLE = "CONTENT_ACQUISITION_UNAVAILABLE"
 
 
 class ContentBatchRequired(ContentIntelError):

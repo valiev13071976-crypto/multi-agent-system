@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
 from datetime import datetime, timezone
 from decimal import Decimal
 
@@ -10,8 +11,10 @@ from content_intel.access import ContentAccessPolicy
 from content_intel.analytics import PerformanceAnalytics
 from content_intel.competitors import build_competitor_profile, build_trend_signal
 from content_intel.errors import (
+    CONTENT_ACQUISITION_UNAVAILABLE,
     CONTENT_MEDIA_UNAVAILABLE,
     CONTENT_PLAN_INVALID,
+    CONTENT_REQUEST_INVALID,
     ContentBatchRequired,
     ContentIntelError,
     ContentInsufficientEvidence,
@@ -41,12 +44,46 @@ from content_intel.platform_models import (
     PublicationItem,
     PublicationPlan,
     OptimizationDecision,
+    ResearchEvidence,
     ResearchReport,
 )
 from content_intel.research import build_research_report
 from content_intel.store import ContentStore
 from content_intel.validation import ContentValidator
+from content_intel.web_bridge import evidence_rows_from_scrape_result, fetch_scrape_extract
 from security.tenant import require_tenant_id
+
+# Block 5.3: bounded number of caller-supplied URLs research() will fetch
+# through Acquisition per call -- keeps a single interactive research turn
+# fast and prevents an unbounded fan-out of outbound HTTP calls.
+MAX_RESEARCH_URLS = 5
+
+# Block 5.3: how many (unflagged) evidence claims get quoted, verbatim and
+# inert, into a generated asset's body as a "Sources" section. Acquired text
+# is data here, never an instruction -- see ``_ground_asset_in_evidence``.
+MAX_GROUNDING_CLAIMS = 3
+MAX_GROUNDING_CLAIM_CHARS = 160
+
+
+def _ground_asset_in_evidence(
+    asset: ContentAssetVersion, evidence: tuple[ResearchEvidence, ...]
+) -> ContentAssetVersion:
+    """Append a bounded, literal "Sources" section built from research
+    evidence to a freshly generated asset's body -- before validation runs.
+
+    Evidence flagged by ``research.py``'s poison-marker screen (see
+    ``ResearchEvidence.warnings``) is deliberately excluded here: it stays
+    visible in the research report for audit, but is never propagated into a
+    published/exported artifact, even as inert quoted text.
+    """
+
+    clean = [e for e in evidence if not e.warnings][:MAX_GROUNDING_CLAIMS]
+    if not clean:
+        return asset
+    lines = [f"- {e.extracted_claim[:MAX_GROUNDING_CLAIM_CHARS]} (source: {e.source_ref})" for e in clean]
+    block = "Sources:\n" + "\n".join(lines)
+    body = f"{asset.body}\n\n{block}" if asset.body else block
+    return replace(asset, body=body)
 
 
 class ContentIntelligenceService:
@@ -63,6 +100,7 @@ class ContentIntelligenceService:
         tool_gateway=None,
         observability=None,
         product_media_service=None,
+        artifact_service=None,
     ):
         self.store = store
         self.access = access or ContentAccessPolicy()
@@ -73,6 +111,11 @@ class ContentIntelligenceService:
         self.knowledge_service = knowledge_service
         self.tool_gateway = tool_gateway
         self.product_media_service = product_media_service
+        # Block 5.3: canonical Unified Files/Artifacts layer (see
+        # ``artifacts/service.py``). None-safe -- ``export_asset_artifact()``
+        # returns a typed ``{"exported": False}`` result rather than pretending
+        # to publish when no artifact backend is wired.
+        self.artifact_service = artifact_service
         self.obs = ContentObservability(observability)
 
     def create_project(self, *, tenant_id: str, name: str, owner_ref: str = "") -> ContentProject:
@@ -120,6 +163,57 @@ class ContentIntelligenceService:
             metadata={"report_id": report.report_id, "count": len(report.evidence)},
         )
         return report
+
+    async def research_from_web(
+        self,
+        *,
+        tenant_id: str,
+        project_id: str,
+        objective_id: str,
+        urls: tuple[str, ...] = (),
+        evidence_rows: list[dict] | None = None,
+        max_evidence: int = 50,
+        bulk: bool = False,
+    ) -> ResearchReport:
+        """Block 5.3 activation: Search/Acquisition -> Research handoff.
+
+        Fetches each URL through the existing, hardened Block 5.2
+        ``scrape.extract`` tool (SSRF checks, robots policy, tenant
+        isolation, bounded record counts all already enforced there), maps
+        the result into evidence rows (see ``web_bridge``), and delegates to
+        the existing synchronous :meth:`research` for report construction --
+        no duplicated grounding/dedupe/poison-screening logic.
+        """
+
+        tenant = require_tenant_id(tenant_id)
+        bounded_urls = tuple(str(u).strip() for u in (urls or ()) if str(u or "").strip())[:MAX_RESEARCH_URLS]
+        fetched_rows: list[dict] = []
+        if bounded_urls:
+            if self.tool_gateway is None:
+                self.obs.emit(
+                    "content.failed",
+                    status="acquisition_unavailable",
+                    metadata={"stage": "research"},
+                )
+                raise ContentIntelError(CONTENT_ACQUISITION_UNAVAILABLE)
+            for url in bounded_urls:
+                try:
+                    result = await fetch_scrape_extract(self.tool_gateway, tenant_id=tenant, url=url)
+                except Exception:
+                    continue
+                if not bool(getattr(result, "success", False)):
+                    continue
+                data = dict(getattr(result, "data", None) or {})
+                fetched_rows.extend(evidence_rows_from_scrape_result(data, url=url))
+        combined_rows = list(evidence_rows or []) + fetched_rows
+        return self.research(
+            tenant_id=tenant,
+            project_id=project_id,
+            objective_id=objective_id,
+            evidence_rows=combined_rows,
+            max_evidence=max_evidence,
+            bulk=bulk,
+        )
 
     def get_research(self, report_id: str, *, tenant_id: str) -> ResearchReport | None:
         tenant = require_tenant_id(tenant_id)
@@ -279,11 +373,19 @@ class ContentIntelligenceService:
         brand: BrandProfile | None = None,
         strategy_version_id: str | None = None,
         idea_id: str | None = None,
+        research_report_id: str | None = None,
         bulk: bool = False,
     ) -> ContentAssetVersion:
         tenant = require_tenant_id(tenant_id)
         if not bulk:
             assert_sync_content_allowed(item_count=1, bulk=False)
+        evidence_refs: tuple[str, ...] = ()
+        grounding_evidence: tuple[ResearchEvidence, ...] = ()
+        if research_report_id:
+            report = self.store.get_research(research_report_id, tenant_id=tenant)
+            if report is not None:
+                evidence_refs = tuple(e.evidence_id for e in report.evidence)
+                grounding_evidence = report.evidence
         ctx = GenerationContext(
             tenant_id=tenant,
             project_id=project_id,
@@ -291,7 +393,7 @@ class ContentIntelligenceService:
             objective=objective,
             audience_segments=("general",),
             pillars=(),
-            evidence_refs=(),
+            evidence_refs=evidence_refs,
             brand_tone=brand.tone if brand else "professional",
             product_facts=product_facts,
             forbidden_terms=brand.forbidden_terms if brand else (),
@@ -302,6 +404,7 @@ class ContentIntelligenceService:
             strategy_version_id=strategy_version_id,
             idea_id=idea_id,
         )
+        asset = _ground_asset_in_evidence(asset, grounding_evidence)
         asset = self.validator.validate_asset(asset, brand=brand)
         self.store.save_asset(asset)
         self.obs.emit(
@@ -595,6 +698,140 @@ class ContentIntelligenceService:
             return None
         self.access.require(requesting_tenant=tenant, target_tenant=asset.tenant_id)
         return asset
+
+    @staticmethod
+    def _render_asset_text(asset: ContentAssetVersion) -> str:
+        lines = [
+            f"Content type: {asset.content_type}",
+            f"Channel: {asset.channel}",
+            f"Status: {asset.status}",
+            "",
+            asset.body,
+        ]
+        return "\n".join(lines)
+
+    def export_asset_artifact(
+        self,
+        *,
+        tenant_id: str,
+        version_id: str,
+        owner_id: str = "",
+        conversation_id: str = "",
+        request_id: str = "",
+    ) -> dict:
+        """Block 5.3: Review -> Artifact. Renders a *validated* asset into a
+        bounded text document and registers it through the canonical
+        ``ArtifactService`` (same "existing artifact infrastructure" every
+        other block uses -- no parallel content-artifact mechanism).
+
+        Fails closed on an un-reviewed asset (mirrors ``create_publication_plan``'s
+        ``STATUS_VALIDATED``/``STATUS_APPROVED`` gate): unreviewed content is
+        never silently published as an artifact.
+        """
+
+        tenant = require_tenant_id(tenant_id)
+        asset = self.get_asset(version_id, tenant_id=tenant)
+        if asset is None:
+            raise ContentIntelError(CONTENT_PLAN_INVALID, "asset_not_found")
+        if asset.status not in {STATUS_VALIDATED, STATUS_APPROVED}:
+            raise ContentIntelError(CONTENT_PLAN_INVALID, "asset_not_validated")
+        if self.artifact_service is None:
+            return {"exported": False}
+        body_text = self._render_asset_text(asset)
+        filename = f"content_{asset.content_type}_{asset.version_id[:8]}.txt"
+        try:
+            rec = self.artifact_service.register_generated(
+                tenant_id=tenant,
+                owner_id=owner_id,
+                filename=filename,
+                content=body_text.encode("utf-8"),
+                mime_type="text/plain",
+                conversation_id=conversation_id,
+                request_id=request_id,
+                tool_id="content.create",
+            )
+        except Exception:
+            return {"exported": False}
+        public = rec.as_public_dict()
+        self.obs.emit(
+            "content.artifact.exported",
+            status="ok",
+            metadata={"artifact_id": rec.artifact_id, "version_id": asset.version_id},
+        )
+        return {
+            "exported": True,
+            "artifact_id": rec.artifact_id,
+            "mime_type": rec.mime_type,
+            "view_url": public["view_url"],
+            "download_url": public["download_url"],
+        }
+
+    async def create_content_from_request(
+        self,
+        *,
+        tenant_id: str,
+        owner_id: str = "",
+        conversation_id: str = "",
+        request_id: str = "",
+        objective: str,
+        channel: str = "article",
+        content_type: str = "article",
+        urls: tuple[str, ...] = (),
+        evidence_rows: list[dict] | None = None,
+        project_id: str | None = None,
+    ) -> dict:
+        """Block 5.3 single chat-turn entry point: Search/Acquisition ->
+        Research -> Content generation -> Review -> Artifact, composed from
+        the already-independently-testable methods above (mirrors
+        ``acquisition/tools.py:AcquisitionToolAdapter``'s "one call does
+        fetch+parse+normalize+dedupe" pattern for Block 5.2)."""
+
+        tenant = require_tenant_id(tenant_id)
+        clean_objective = str(objective or "").strip()
+        if not clean_objective:
+            raise ContentIntelError(CONTENT_REQUEST_INVALID, "objective_required")
+        if not project_id:
+            project = self.create_project(tenant_id=tenant, name=clean_objective[:120], owner_ref=owner_id)
+            project_id = project.project_id
+        report = await self.research_from_web(
+            tenant_id=tenant,
+            project_id=project_id,
+            objective_id=clean_objective[:120] or "objective",
+            urls=tuple(urls or ()),
+            evidence_rows=evidence_rows,
+        )
+        asset = self.generate_copy(
+            tenant_id=tenant,
+            project_id=project_id,
+            content_type=content_type,
+            channel=channel,
+            objective=clean_objective,
+            research_report_id=report.report_id,
+        )
+        out: dict = {
+            "status": asset.status,
+            "project_id": project_id,
+            "report_id": report.report_id,
+            "grounding": report.grounding,
+            "evidence_count": len(report.evidence),
+            "asset_version_id": asset.version_id,
+            "content_type": asset.content_type,
+            "channel": asset.channel,
+            "body_preview": asset.body[:2000],
+            "validation_errors": list(asset.validation_errors),
+            "exported": False,
+        }
+        if asset.status == STATUS_VALIDATED:
+            out.update(
+                self.export_asset_artifact(
+                    tenant_id=tenant,
+                    version_id=asset.version_id,
+                    owner_id=owner_id,
+                    conversation_id=conversation_id,
+                    request_id=request_id,
+                )
+            )
+        return out
 
     def create_experiment(
         self,

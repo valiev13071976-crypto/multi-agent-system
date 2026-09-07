@@ -163,6 +163,7 @@ class SideEffectRuntime:
     workflow_runtime: object | None = None
     acquisition_runtime: object | None = None
     data_intelligence_runtime: object | None = None
+    content_intelligence_runtime: object | None = None
     integration_runtime: object | None = None
     commerce_runtime: object | None = None
     seo_marketing_runtime: object | None = None
@@ -1113,6 +1114,17 @@ def _finalize_runtime(
     if procurement_runtime is not None:
         engine.procurement_service = procurement_runtime.service
 
+    if content_intelligence_runtime is not None:
+        # Block 5.3 defect closure: ContentIntelligenceService was previously
+        # always constructed with ``tool_gateway=None`` and never patched
+        # (unlike every other consumer runtime above/below) -- research()'s
+        # new Search/Acquisition -> Research handoff (``research_from_web``)
+        # depends on a live gateway to invoke ``scrape.extract``, so leaving
+        # this unpatched silently broke the required Block 5.3 chain in
+        # production wiring even though targeted unit tests (which inject
+        # their own fake gateway) never exercised the real composition.
+        content_intelligence_runtime.service.tool_gateway = tool_gateway
+
     if acquisition_runtime is not None:
         # Ensure acquisition uses the same ToolGateway instance (built above,
         # after the acquisition runtime itself — see the ``acquisition_runtime =
@@ -1152,6 +1164,7 @@ def _finalize_runtime(
         document_runtime=document_runtime,
         knowledge_runtime=knowledge_runtime,
         procurement_runtime=procurement_runtime,
+        content_intelligence_runtime=content_intelligence_runtime,
         workflow_runtime=workflow_runtime,
         acquisition_runtime=acquisition_runtime,
         data_intelligence_runtime=data_intelligence_runtime,
