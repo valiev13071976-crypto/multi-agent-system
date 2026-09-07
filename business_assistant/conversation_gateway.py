@@ -305,6 +305,7 @@ class WorkflowPandaConversationGateway:
     async def _invoke_tool(self, request: ConversationRequest, action) -> ConversationResult:
         from business_assistant.action_continuation import (
             CALL_TOOL,
+            FAMILY_EXCEL,
             TOOL_IMAGE_EDIT,
             artifacts_from_tool_data,
             format_tool_user_text,
@@ -352,6 +353,11 @@ class WorkflowPandaConversationGateway:
             except Exception:
                 resolved = []
             arguments["attachment_refs"] = resolved
+        # Block 5.1: data_intel's DataIntelToolAdapter registers generated
+        # workbooks as conversation-attached artifacts; ToolRequest carries
+        # no dedicated conversation field, so it travels through arguments
+        # like attachment_refs above (harmless/ignored by every other adapter).
+        arguments.setdefault("conversation_id", str(request.conversation_id or ""))
 
         if action.tool_id == TOOL_IMAGE_EDIT:
             # Production acceptance defect closure: the direct "Редактировать"
@@ -480,6 +486,16 @@ class WorkflowPandaConversationGateway:
                     pass
         if idem and success:
             self._executed_keys.add(idem)
+        if family == FAMILY_EXCEL and success and task is not None:
+            # Block 5.1 multi-turn continuation (spec section 13): persist the
+            # resulting dataset_id (new dataset after a transform, or the
+            # unchanged source dataset after an analyze/ambiguous turn) BEFORE
+            # mark_executed() below re-reads the task from the store, so the
+            # next turn can resolve "them"/"it" without re-upload.
+            new_dataset_id = str(data.get("dataset_id") or "")
+            if new_dataset_id:
+                task.parameters["dataset_id"] = new_dataset_id
+                self._action_store.put(task)
         if task is not None:
             mark_executed(
                 self._action_store,
@@ -604,6 +620,27 @@ class WorkflowPandaConversationGateway:
         follow_up_ms = int((time.monotonic() - t0) * 1000)
         task_id = str(uuid.uuid4())
 
+        # Block 5.1 chat integration (spec section 12): family detection needs
+        # to know -- deterministically, before any tool call -- whether THIS
+        # turn attached a spreadsheet, so "attachment + free text" alone
+        # routes to Excel without the user ever naming "Excel mode". Resolves
+        # through the same trusted, tenant/conversation-verified boundary
+        # _invoke_tool() uses for the actual tool call below; cheap (no blob
+        # fetch), and resolving twice per turn is a harmless bounded cost.
+        spreadsheet_attachment_count = 0
+        if self._artifact_service is not None and request.attachment_refs:
+            try:
+                _pre_resolved = self._artifact_service.resolve_trusted_refs(
+                    tenant_id=str(request.tenant_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    refs=tuple(request.attachment_refs),
+                )
+            except Exception:
+                _pre_resolved = []
+            spreadsheet_attachment_count = sum(
+                1 for r in _pre_resolved if str(r.get("kind") or "") == "spreadsheet"
+            )
+
         action = resolve_action_turn(
             text,
             tenant_id=request.tenant_id,
@@ -613,6 +650,7 @@ class WorkflowPandaConversationGateway:
             follow_up=resolution,
             gateway=self._tool_gateway,
             request_id=str(request.request_id or request.correlation_id or ""),
+            spreadsheet_attachment_count=spreadsheet_attachment_count,
         )
         self.last_action_decision = action
 

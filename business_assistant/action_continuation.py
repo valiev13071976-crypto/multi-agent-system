@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from agents.routing_requirements import FRESHNESS_CURRENT, derive_task_requirements
-from autonomy.capabilities import CAP_IMAGE_EDIT, CAP_IMAGE_GENERATE
+from autonomy.capabilities import CAP_FILESYSTEM_WRITE, CAP_IMAGE_EDIT, CAP_IMAGE_GENERATE
 from business_assistant.follow_up import (
     KIND_NEW_TOPIC,
     KIND_REFERENT,
@@ -23,7 +23,13 @@ from business_assistant.follow_up import (
 from business_assistant.intent import requires_business_integration
 from security.tenant import require_tenant_id
 
+# Block 5.1: FAMILY_EXCEL now routes to the real, active data_intel capability
+# (chat-driven Excel/CSV analysis/transform/compare) instead of the disabled
+# excel.inspect stub. TOOL_EXCEL_INSPECT is kept only as a historical alias --
+# nothing still routes to it.
 TOOL_EXCEL_INSPECT = "excel.inspect"
+TOOL_DATA_EXCEL_ASSISTANT = "data.excel_assistant"
+TOOL_DATA_COMPARE_WORKBOOKS = "data.compare_workbooks"
 TOOL_IMAGE_EDIT = "image.edit"
 TOOL_IMAGE_GENERATE = "image.generate"
 
@@ -117,13 +123,30 @@ IMAGE_EDIT_CONTRACT = CapabilityContract(
 
 EXCEL_CONTRACT = CapabilityContract(
     family=FAMILY_EXCEL,
-    tool_id=TOOL_EXCEL_INSPECT,
-    operation="inspect",
-    required=(PARAM_FILE,),
-    optional=(),
+    tool_id=TOOL_DATA_EXCEL_ASSISTANT,
+    operation="assist",
+    # No statically-required parameter: a fresh spreadsheet attachment OR an
+    # inherited ``dataset_id`` from a prior turn each independently satisfy
+    # "do we have data to operate on" -- checked explicitly in the FAMILY_EXCEL
+    # branch of resolve_action_turn() below, not through the generic
+    # required-params gate (which cannot express an OR of two sources).
+    required=(),
+    optional=("text", "dataset_id"),
     defaults={},
     risk=RISK_READ,
-    required_capabilities=(),
+    required_capabilities=(CAP_FILESYSTEM_WRITE,),
+    artifact_type="workbook",
+)
+
+COMPARE_WORKBOOKS_CONTRACT = CapabilityContract(
+    family=FAMILY_EXCEL,
+    tool_id=TOOL_DATA_COMPARE_WORKBOOKS,
+    operation="compare_workbooks",
+    required=(),
+    optional=("text",),
+    defaults={},
+    risk=RISK_READ,
+    required_capabilities=(CAP_FILESYSTEM_WRITE,),
     artifact_type="workbook",
 )
 
@@ -440,14 +463,32 @@ def _apply_time_setting(parameters: dict[str, Any], text: str, *, correction: bo
         parameters[PARAM_SCENE] = _merge_scene(scene, "wolf")
 
 
-def detect_family(text: str, active: ActiveTask | None) -> str | None:
+def detect_family(
+    text: str, active: ActiveTask | None, *, has_spreadsheet_attachment: bool = False
+) -> str | None:
     raw = text or ""
     if _has_stem(raw, _WRITE_STEMS):
         return FAMILY_WRITE
+    # Block 5.1 chat integration (spec section 12): the user never selects an
+    # "Excel mode" -- attaching a spreadsheet is itself the strongest, fully
+    # deterministic signal, regardless of the accompanying wording.
+    if has_spreadsheet_attachment:
+        return FAMILY_EXCEL
     if _has_stem(raw, _EXCEL_STEMS) and (
         _has_stem(raw, ("анализ", "analyze", "inspect", "проанализ")) or _has_stem(raw, _MAKE_STEMS)
     ):
         return FAMILY_EXCEL
+    if active is not None and active.family == FAMILY_EXCEL:
+        # Block 5.1 multi-turn continuation (spec section 13): legitimate
+        # follow-ups ("Оставь Samsung", "Только дешевле 50000", "Минус 12%",
+        # "Сохрани Excel") are short deterministic data commands that often
+        # ARE business/data-domain keywords ("прайс", "samsung", "excel")
+        # themselves -- unlike image continuation, domain-keyword presence
+        # must not be treated as evidence of an unrelated new task here.
+        # Only a genuinely different top-level ask (weather/general trivia)
+        # breaks continuation.
+        if not (_has_stem(raw, _WEATHER_STEMS) or _has_stem(raw, _QUESTION_NEW_STEMS)):
+            return FAMILY_EXCEL
     if _is_image_artifact_request(raw) or (
         _is_image_execute_verb(raw) and (active is None or active.family == FAMILY_IMAGE_GENERATE)
     ):
@@ -469,15 +510,22 @@ def continuation_decision(
     *,
     active: ActiveTask | None,
     follow_up: FollowUpResolution | None = None,
+    has_spreadsheet_attachment: bool = False,
 ) -> str:
     if active is None:
         return NEW_TASK
+    family = detect_family(text, active, has_spreadsheet_attachment=has_spreadsheet_attachment)
     if follow_up is not None and follow_up.kind in {KIND_TRANSFORM, KIND_REFERENT}:
-        if not detect_family(text, active):
+        if not family:
             return NEW_TASK
-    if _is_unrelated_new_task(text) and not _is_quantity_only(text):
+    # Block 5.1: an Excel-continuation turn commonly contains business/data
+    # keywords ("прайс", "samsung", "excel") that would otherwise look like
+    # an unrelated new top-level business-integration task (see
+    # requires_business_integration._BUSINESS_TASK_KEYWORDS) -- once
+    # detect_family has already deterministically resolved this turn to the
+    # active Excel task, that heuristic must not override it.
+    if family != FAMILY_EXCEL and _is_unrelated_new_task(text) and not _is_quantity_only(text):
         return NEW_TASK
-    family = detect_family(text, active)
     if family == FAMILY_WRITE:
         return NEW_TASK
     if family and family != active.family and family not in {FAMILY_IMAGE_EDIT, FAMILY_IMAGE_GENERATE}:
@@ -647,6 +695,11 @@ def resolve_action_turn(
     follow_up: FollowUpResolution | None = None,
     gateway=None,
     request_id: str = "",
+    # Block 5.1: deterministic count of THIS turn's attachments already
+    # resolved (trusted, tenant/conversation-verified) to kind=="spreadsheet"
+    # -- never a raw/unresolved ref count. 0 for every pre-5.1 caller/test
+    # (default), so existing image/document/search routing is unaffected.
+    spreadsheet_attachment_count: int = 0,
 ) -> ActionDecision:
     """Pure-ish turn resolver. At most one extra LLM call: never (extra_llm=False)."""
     current = (text or "").strip()
@@ -654,9 +707,23 @@ def resolve_action_turn(
     owner = str(owner_id or "")
     conv = str(conversation_id or "")
     active = store.get(tenant_id=tenant, owner_id=owner, conversation_id=conv)
+    has_spreadsheet_attachment = spreadsheet_attachment_count > 0
 
     if follow_up is not None and follow_up.kind in {KIND_TRANSFORM, KIND_REFERENT}:
-        if not (active and detect_family(current, active) == active.family and _is_image_artifact_request(current)):
+        resolved_family = (
+            detect_family(current, active, has_spreadsheet_attachment=has_spreadsheet_attachment)
+            if active is not None
+            else None
+        )
+        excel_continuation = (
+            active is not None and active.family == FAMILY_EXCEL and resolved_family == FAMILY_EXCEL
+        )
+        image_continuation = (
+            active is not None
+            and resolved_family == active.family
+            and _is_image_artifact_request(current)
+        )
+        if not (excel_continuation or image_continuation):
             return ActionDecision(
                 decision=ANSWER_TEXT,
                 readiness=CONVERSATIONAL_ONLY,
@@ -688,8 +755,17 @@ def resolve_action_turn(
             extra_llm=False,
         )
 
-    mode = continuation_decision(current, active=active, follow_up=follow_up)
-    family = detect_family(current, active if mode != NEW_TASK else None)
+    mode = continuation_decision(
+        current,
+        active=active,
+        follow_up=follow_up,
+        has_spreadsheet_attachment=has_spreadsheet_attachment,
+    )
+    family = detect_family(
+        current,
+        active if mode != NEW_TASK else None,
+        has_spreadsheet_attachment=has_spreadsheet_attachment,
+    )
 
     if family == FAMILY_WRITE:
         if active is not None:
@@ -847,28 +923,96 @@ def resolve_action_turn(
         )
 
     if family == FAMILY_EXCEL:
-        task = ActiveTask(
-            task_id=str(uuid.uuid4()),
-            tenant_id=tenant,
-            owner_id=owner,
-            conversation_id=conv,
-            family=FAMILY_EXCEL,
-            tool_id=EXCEL_CONTRACT.tool_id,
-            operation=EXCEL_CONTRACT.operation,
-            goal=current,
-            artifact_type="workbook",
-            status=STATUS_WAITING_FOR_INPUT,
-            missing_required=(PARAM_FILE,),
-            risk=RISK_READ,
-        )
+        is_new = mode == NEW_TASK or active is None or active.family != FAMILY_EXCEL
+        if is_new:
+            if active is not None:
+                active.status = STATUS_SUPERSEDED
+                store.put(active)
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant,
+                owner_id=owner,
+                conversation_id=conv,
+                family=FAMILY_EXCEL,
+                tool_id=EXCEL_CONTRACT.tool_id,
+                operation=EXCEL_CONTRACT.operation,
+                goal=current,
+                artifact_type="workbook",
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+        else:
+            task = active
+            if task.status in {STATUS_COMPLETED, STATUS_FAILED_RETRYABLE}:
+                task.status = STATUS_DRAFT
+        task.goal = current
+
+        # Section 13 (multi-turn continuation): a new attachment always wins
+        # over any inherited dataset_id (the user is deliberately switching
+        # data). Otherwise resolve the prior dataset so the user never has to
+        # re-upload/re-state which file to operate on.
+        inherited_dataset_id = str(task.parameters.get("dataset_id") or "")
+        has_dataset = bool(inherited_dataset_id) and spreadsheet_attachment_count <= 0
+        if spreadsheet_attachment_count <= 0 and not inherited_dataset_id:
+            task.missing_required = (PARAM_FILE,)
+            task.status = STATUS_WAITING_FOR_INPUT
+            store.put(task)
+            return ActionDecision(
+                decision=ASK_CLARIFICATION,
+                readiness=NEEDS_REQUIRED_INPUT,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                user_message="Приложите файл Excel/CSV, чтобы я мог его обработать.",
+                extra_llm=False,
+            )
+
+        # Section 9/12 (reconciliation, chat integration): two spreadsheet
+        # attachments in the same turn is the deterministic signal for the
+        # two-workbook comparison capability -- the user never picks a
+        # separate "compare mode".
+        if spreadsheet_attachment_count >= 2:
+            contract = COMPARE_WORKBOOKS_CONTRACT
+        else:
+            contract = EXCEL_CONTRACT
+        task.tool_id = contract.tool_id
+        task.operation = contract.operation
+        task.missing_required = ()
+
+        args: dict[str, Any] = {"text": current}
+        if has_dataset:
+            args["dataset_id"] = inherited_dataset_id
+
+        cap_status = inspect_capability(gateway, contract.tool_id)
+        if cap_status != CAPABILITY_AVAILABLE_AND_AUTHORIZED:
+            task.status = STATUS_FAILED_RETRYABLE
+            store.put(task)
+            return ActionDecision(
+                decision=FAIL_UNAVAILABLE,
+                readiness=NOT_EXECUTABLE,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                arguments=args,
+                user_message=user_unavailable_message(FAMILY_EXCEL),
+                tool_id=contract.tool_id,
+                operation=contract.operation,
+                extra_llm=False,
+                capability_status=cap_status,
+            )
+
+        idem = _idempotency_key(request_id, contract.tool_id, args)
+        task.status = STATUS_READY
         store.put(task)
         return ActionDecision(
-            decision=ASK_CLARIFICATION,
-            readiness=NEEDS_REQUIRED_INPUT,
-            continuation=NEW_TASK,
+            decision=CALL_TOOL,
+            readiness=READY_TO_EXECUTE,
+            continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
             task=task,
-            user_message="Приложите файл Excel.",
+            arguments=args,
+            tool_id=contract.tool_id,
+            operation=contract.operation,
             extra_llm=False,
+            capability_status=cap_status,
+            idempotency_key=idem,
         )
 
     return ActionDecision(
@@ -916,6 +1060,28 @@ def format_tool_user_text(
     if not success:
         return _user_tool_error()
     payload = dict(data or {})
+    if family == FAMILY_EXCEL:
+        status = str(payload.get("status") or "OK")
+        if status == "AMBIGUOUS":
+            msg = str(payload.get("message_safe") or "Уточните запрос.")
+            candidates = list(payload.get("candidates") or [])
+            if candidates:
+                msg += " Варианты: " + ", ".join(str(c) for c in candidates) + "."
+            return msg
+        if status == "NEEDS_USER_MAPPING":
+            return str(payload.get("message_safe") or "Не удалось сопоставить столбцы для сравнения.")
+        if status == "BATCH_QUEUED":
+            return str(payload.get("summary_text") or "Файл большой — обрабатываю в фоне.")
+        lines: list[str] = []
+        summary_text = str(payload.get("summary_text") or "").strip()
+        if summary_text:
+            lines.append(summary_text)
+        workbook = payload.get("workbook")
+        if isinstance(workbook, dict) and workbook.get("view_url"):
+            lines.append(f"[Скачать Excel]({workbook['view_url']})")
+        if not lines:
+            lines.append("Готово.")
+        return "\n".join(lines)
     if family in (FAMILY_IMAGE_GENERATE, FAMILY_IMAGE_EDIT):
         urls: list[str] = []
         seen: set[str] = set()
@@ -965,6 +1131,23 @@ def format_tool_user_text(
 def artifacts_from_tool_data(data: Mapping[str, Any] | None, *, tool_id: str) -> list[dict[str, Any]]:
     payload = dict(data or {})
     out: list[dict[str, Any]] = []
+    # Block 5.1: a generated workbook (data.excel_assistant/data.compare_workbooks,
+    # only present when execute_nl_request()'s plan wanted an export, or a
+    # workbook comparison succeeded) -- registered through the canonical
+    # ArtifactService by data_intel.service, so artifact_id/view_url here are
+    # already the real, authorized ones (never a raw internal blob ref).
+    workbook = payload.get("workbook")
+    if isinstance(workbook, dict) and workbook.get("artifact_id"):
+        return [
+            {
+                "type": "workbook",
+                "artifact_type": "workbook",
+                "ref": str(workbook.get("artifact_id")),
+                "artifact_id": str(workbook.get("artifact_id")),
+                "mime_type": str(workbook.get("mime_type") or ""),
+                "view_url": str(workbook.get("view_url") or ""),
+            }
+        ]
     # Prefer the per-item "assets" list (ProductMediaToolAdapter always provides one) so
     # each artifact gets its OWN view_url/mime_type. The version_ids-only fallback below
     # previously reused the single top-level "view_url" (the first generated image) for
@@ -1005,6 +1188,14 @@ def artifacts_from_tool_data(data: Mapping[str, Any] | None, *, tool_id: str) ->
                     "view_url": payload.get("view_url") or "",
                 }
             )
+        return out
+    # Block 5.1: data_intel tools (analyze/filter/ambiguous/batch-queued
+    # results) legitimately have NO artifact at all -- the generic
+    # "tool_result" pseudo-artifact fallback below exists for other
+    # capabilities' UI needs and must not manufacture a fake, non-downloadable
+    # "artifact" here (would wrongly look like a generated file, and would
+    # get persisted into ActiveTask.last_artifact_ids).
+    if tool_id in {TOOL_DATA_EXCEL_ASSISTANT, TOOL_DATA_COMPARE_WORKBOOKS}:
         return out
     if payload:
         out.append(
