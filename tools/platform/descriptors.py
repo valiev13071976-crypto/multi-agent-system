@@ -705,7 +705,10 @@ def mcp_descriptor(*, enabled: bool = False) -> ToolDescriptor:
         category="mcp",
         adapter_id="mcp",
         capabilities=(CAP_MCP_INVOKE, CAP_EXTERNAL_READ),
-        operations=("invoke",),
+        # Block 5.4: "list_tools" (governed discovery via tools/list) added
+        # alongside the existing "invoke" (tools/call) operation -- same
+        # allowlist/trust gate, same read-only capability set.
+        operations=("invoke", "list_tools"),
         enabled=enabled,
         network=True,
     )

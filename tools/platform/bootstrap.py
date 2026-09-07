@@ -213,6 +213,25 @@ def _csv_env(env: dict | None, key: str) -> tuple[str, ...]:
     return tuple(p.strip() for p in raw.split(",") if p.strip())
 
 
+def _mcp_transports_from_env(env: dict | None) -> dict[str, object]:
+    """Block 5.4: ``TOOL_MCP_SERVER_URLS=name1:url1,name2:url2`` builds one
+    real ``HttpMcpTransport`` per named server. Absent (the default), no
+    transports are built and every allowlisted server stays exactly as
+    ``scaffold_only`` as before this activation."""
+
+    from tools.platform.mcp_client import HttpMcpTransport
+
+    out: dict[str, object] = {}
+    for pair in _csv_env(env, "TOOL_MCP_SERVER_URLS"):
+        name, _, url = pair.partition(":")
+        name = name.strip().lower()
+        url = url.strip()
+        if not name or not url:
+            continue
+        out[name] = HttpMcpTransport(base_url=url)
+    return out
+
+
 def register_platform_tools(
     registry: ToolRegistry,
     *,
@@ -231,6 +250,7 @@ def register_platform_tools(
     seo_marketing_service=None,
     b2b_commerce_service=None,
     acquisition_service=None,
+    mcp_transports: dict[str, object] | None = None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
     creds = credential_store or IntegrationCredentialStore()
@@ -270,6 +290,8 @@ def register_platform_tools(
         "true",
         "yes",
     }
+    resolved_mcp_transports = dict(_mcp_transports_from_env(env))
+    resolved_mcp_transports.update({str(k).lower(): v for k, v in dict(mcp_transports or {}).items()})
     mcp = McpAdapter(
         enabled=mcp_enabled,
         allowed_servers=_csv_env(env, "TOOL_MCP_ALLOWED_SERVERS"),
@@ -277,6 +299,7 @@ def register_platform_tools(
         server_trust={
             s: "trusted" for s in _csv_env(env, "TOOL_MCP_TRUSTED_SERVERS")
         },
+        transports=resolved_mcp_transports,
     )
     bitrix_enabled = (env or os.environ).get("BITRIX_ENABLED", "").lower() in {
         "1",
