@@ -421,6 +421,41 @@ class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
             "first audio must stream to the client before the FINAL sentence is synthesized",
         )
 
+    async def test_uncommitted_capture_stops_calling_stt_after_the_hard_ceiling_not_forever(self):
+        # PRODUCTION ACCEPTANCE FAILED follow-up defense-in-depth: even if a
+        # capture somehow never gets committed (client bug / dropped
+        # commit frame), partial re-transcription must not keep calling the
+        # real (paid) STT provider for the entire lifetime of the
+        # WebSocket -- it must stop after a bounded ceiling.
+        stt = _SpyProvider(reply="привет")
+        bridge = self._bridge(stt, _SpyTts())
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        fake_now = [1_000.0]
+        with mock.patch("realtime.bridge.time.monotonic", side_effect=lambda: fake_now[0]):
+            await bridge.on_audio_chunk(session, b"x")  # first chunk: sets turn_started_monotonic
+            self.assertEqual(len(stt.calls), 1)
+
+            fake_now[0] += 1.0
+            await bridge.on_audio_chunk(session, b"x")
+            self.assertEqual(len(stt.calls), 2, "still calling STT well within the ceiling")
+
+            fake_now[0] += 25.0  # now ~26s since turn_started_monotonic -- past the 20s ceiling
+            with self.assertLogs("realtime.voice_diagnostics", level="INFO") as cm:
+                await bridge.on_audio_chunk(session, b"x")
+            capped = [
+                r
+                for r in cm.records
+                if getattr(r, "voice_event", {}).get("event") == "voice_capture_partial_stt_capped"
+            ]
+            self.assertEqual(len(capped), 1)
+            self.assertEqual(len(stt.calls), 2, "STT is no longer called once the uncommitted ceiling is exceeded")
+
+            fake_now[0] += 5.0
+            await bridge.on_audio_chunk(session, b"x")
+            self.assertEqual(len(stt.calls), 2, "stays capped, not just delayed, for the rest of this capture")
+
     async def test_full_turn_latency_timeline_records_every_defect_b_stage(self):
         reply = "Хорошо, а у тебя?"
         stt = _SpyProvider(reply="Привет, как дела?")

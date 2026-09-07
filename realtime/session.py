@@ -75,6 +75,12 @@ class RealtimeSession:
     # backlog drains -- the exact "user stops talking -> long silent wait"
     # symptom. None until the first partial call of a turn.
     last_partial_stt_monotonic: float | None = None
+    # PRODUCTION ACCEPTANCE FAILED follow-up: True once this uncommitted
+    # capture has exceeded _PARTIAL_STT_MAX_UNCOMMITTED_SECONDS and further
+    # partial-STT calls have been suppressed -- logged once (not every
+    # chunk) via voice_capture_partial_stt_capped. Reset on every new
+    # capture's first chunk.
+    partial_stt_capped_logged: bool = False
     # DEFECT B latency acceptance: one monotonic timestamp per named stage
     # (speech_start, speech_end, stt_partial, stt_final, turn_committed,
     # assistant_processing_started, first_text_delta, tts_started,

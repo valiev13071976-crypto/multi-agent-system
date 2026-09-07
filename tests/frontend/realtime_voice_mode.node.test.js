@@ -111,10 +111,24 @@ function silentAnalyser() {
   return { getByteTimeDomainData: (buf) => buf.fill(128) };
 }
 function loudAnalyser() {
-  // RMS well above VAD_RMS_THRESHOLD (0.02): alternating 0/255 -> deviation 1.0
+  // RMS well above ANY reasonable adaptive floor: alternating 0/255 -> deviation 1.0
   return {
     getByteTimeDomainData: (buf) => {
       for (let i = 0; i < buf.length; i++) buf[i] = i % 2 === 0 ? 0 : 255;
+    },
+  };
+}
+/** Constant, moderate background noise (a real "noisy room" -- e.g. a fan
+ * or an open-plan office), well above the OLD fixed VAD_RMS_THRESHOLD
+ * (0.02) this production defect closure removes, but not loud enough to be
+ * mistaken for real speech relative to itself. */
+function noisyRoomAnalyser(amplitude) {
+  return {
+    getByteTimeDomainData: (buf) => {
+      for (let i = 0; i < buf.length; i++) {
+        const wobble = i % 2 === 0 ? amplitude : -amplitude;
+        buf[i] = Math.max(0, Math.min(255, 128 + Math.round(wobble * 128)));
+      }
     },
   };
 }
@@ -368,6 +382,116 @@ test("start() negotiates and reports the ACTUAL MediaRecorder mime type to the s
     // _startVad() started a real setInterval -- must be torn down or the
     // Node test runner's process hangs waiting for the timer forever.
     controller.close();
+  }
+});
+
+test("PRODUCTION ACCEPTANCE FAILED follow-up: adaptive noise floor auto-commits in a noisy room where the OLD fixed threshold never would", async () => {
+  const { PandaRealtime } = loadRealtimeModule();
+  const sent = [];
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller._send = (payload) => sent.push(payload);
+  controller._stopRecording = () => {};
+  controller._setState(PandaRealtime.STATE_LISTENING);
+  controller._vadBuf = new Uint8Array(4);
+
+  // A room with constant background noise at RMS ~0.03 -- ABOVE the OLD
+  // fixed VAD_RMS_THRESHOLD (0.02) this root-cause fix removes. With the
+  // old code this noise ALONE would be permanently misread as "active
+  // speech" (0.03 > 0.02, forever), the 900ms silence timer would never
+  // start, and audio.commit would never fire automatically -- exactly the
+  // reported production defect ("user has to press the mic button").
+  const noiseAmplitude = 0.03;
+  controller._noiseFloor = noiseAmplitude; // already calibrated to this room
+
+  let now = 9000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    controller._analyser = noisyRoomAnalyser(noiseAmplitude);
+    for (let i = 0; i < 3; i++) {
+      now += 100;
+      controller._sampleVad();
+    }
+    assert.equal(
+      controller._sawSpeechThisTurn,
+      false,
+      "constant ambient noise relative to its OWN calibrated floor is never mistaken for speech"
+    );
+
+    controller._analyser = loudAnalyser();
+    now += 100;
+    controller._sampleVad();
+    assert.equal(controller._sawSpeechThisTurn, true, "real speech is still detected relative to the calibrated floor");
+
+    // Speech ends -- the room returns to its OWN ambient noise level (never
+    // perfect digital silence in a real room). The fix must recognize THIS
+    // as "end of speech", not permanent continued "activity".
+    controller._analyser = noisyRoomAnalyser(noiseAmplitude);
+    now += 100;
+    controller._sampleVad();
+    assert.equal(sent.length, 0, "does not commit on the very first quiet-again sample");
+
+    now += 1000; // exceeds VAD_SILENCE_COMMIT_MS
+    controller._sampleVad();
+    assert.equal(
+      sent.length,
+      1,
+      "auto-commits once the room returns to its OWN ambient noise level after real speech -- no button press needed"
+    );
+    assert.equal(sent[0].type, "audio.commit");
+  } finally {
+    Date.now = realNow;
+  }
+});
+
+test("adaptive noise floor is calibrated from THIS session's real ambient mic input, not a hardcoded constant", async () => {
+  const { PandaRealtime } = loadRealtimeModule();
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller.mediaStream = { getTracks: () => [], getAudioTracks: () => [] };
+  const noiseAmplitude = 0.05; // a fairly loud, but constant, real room
+  controller._startVad();
+  controller._analyser = noisyRoomAnalyser(noiseAmplitude);
+  controller._vadBuf = new Uint8Array(4);
+
+  try {
+    // Drive the calibration window directly (real timer torn down below) --
+    // 5 samples of pure ambient noise, no state classification happens yet.
+    for (let i = 0; i < 5; i++) controller._sampleVad();
+    assert.ok(
+      Math.abs(controller._noiseFloor - noiseAmplitude) < 0.005,
+      `expected the floor to converge to this room's real ~${noiseAmplitude} ambient level, got ${controller._noiseFloor}`
+    );
+  } finally {
+    controller._stopVad();
+  }
+});
+
+test("forward-progress safety net: a single utterance auto-commits after VAD_MAX_TURN_MS even if silence never cleanly registers", async () => {
+  const { PandaRealtime } = loadRealtimeModule();
+  const sent = [];
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller._send = (payload) => sent.push(payload);
+  controller._stopRecording = () => {};
+  controller._setState(PandaRealtime.STATE_LISTENING);
+  controller._analyser = loudAnalyser();
+  controller._vadBuf = new Uint8Array(4);
+
+  let now = 20000;
+  const realNow = Date.now;
+  Date.now = () => now;
+  try {
+    controller._sampleVad(); // speech onset
+    assert.equal(sent.length, 0);
+    now += 15000; // exceeds VAD_MAX_TURN_MS (15000) of CONTINUOUS "speech", silence never occurs
+    controller._sampleVad();
+    assert.equal(
+      sent.length,
+      1,
+      "a single utterance must never hold LISTENING open forever, even if the room never goes quiet"
+    );
+    assert.equal(sent[0].type, "audio.commit");
+  } finally {
+    Date.now = realNow;
   }
 });
 

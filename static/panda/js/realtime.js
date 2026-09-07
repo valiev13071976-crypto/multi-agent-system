@@ -17,10 +17,19 @@
  * signal-energy VAD (Web Audio AnalyserNode) on the raw microphone stream
  * -- never a fabricated/fake animation disconnected from actual mic input.
  * A manual tap on the voice orb (see app.js) remains available as an
- * explicit fallback (commit-now / barge-in-now), because this sandboxed
- * environment has no real microphone hardware to calibrate VAD thresholds
- * against production speech/noise levels -- see the Block 4 delivery
- * report for the honestly-unproven item this implies.
+ * explicit fallback (commit-now / barge-in-now) -- but per a real
+ * production acceptance run, it must never be REQUIRED for ordinary
+ * turn-taking. A real acceptance run proved a single hardcoded absolute
+ * RMS threshold cannot generalize across real microphones/rooms (some
+ * sit above it as pure background noise, some sit below it even during
+ * real speech -- either way auto-commit/auto-barge-in never fired and the
+ * orb had to be tapped manually every turn). The VAD below is now
+ * self-calibrating: it samples this session's OWN real ambient mic input
+ * for ~500ms right after permission is granted to seed an adaptive noise
+ * floor (see VAD_CALIBRATION_SAMPLES), keeps adapting that floor slowly
+ * during confirmed silence, and additionally guarantees forward progress
+ * with VAD_MAX_TURN_MS regardless of how the floor reads in any given
+ * real environment.
  */
 (function (global) {
   const STATE_IDLE = "idle";
@@ -30,13 +39,39 @@
   const STATE_SPEAKING = "speaking";
   const STATE_ERROR = "error";
 
-  // VAD tuning (Block 4 voice-mode continuity fix). Deliberately
-  // conservative defaults; a manual orb tap always works regardless of
-  // whether these thresholds are well-calibrated for a given mic/room.
+  // VAD tuning (production turn-lifecycle root-cause fix). A single fixed
+  // absolute RMS constant ("VAD_RMS_THRESHOLD = 0.02") could never
+  // generalize across real microphones -- a real acceptance run proved it:
+  // some mics/rooms sit ABOVE 0.02 as pure background noise (silence never
+  // registers -> the 900ms silence timer never starts -> commit() never
+  // auto-fires), others sit BELOW it even during real speech (speech never
+  // registers as "active" -> the same guard blocks it from the other
+  // direction). Either way the user was forced to tap the mic/orb manually
+  // to ever get audio.commit sent at all. The fix is a SELF-CALIBRATING
+  // threshold relative to this session's OWN recently observed ambient
+  // noise floor (a rolling exponential moving average updated only while
+  // NOT actively speaking), not a better guessed constant -- this sandbox
+  // has no real microphone to tune a constant against, and never will.
   const VAD_SAMPLE_MS = 100;
-  const VAD_RMS_THRESHOLD = 0.02;
+  const VAD_NOISE_FLOOR_ALPHA = 0.05; // how fast the ambient floor adapts to the real room
+  const VAD_ACTIVE_MULTIPLIER = 2.2; // speech must exceed the adaptive floor by this factor
+  const VAD_ABS_MIN_FLOOR = 0.006; // never let the floor adapt to ~0 and start treating any tiny artifact as speech
   const VAD_SILENCE_COMMIT_MS = 900; // sustained silence after speech -> auto end-of-turn
   const VAD_BARGE_IN_MS = 180; // sustained speech while Panda thinks/speaks -> auto barge-in
+  // Deterministic forward-progress safety net, independent of the VAD
+  // signal entirely (state-machine-level, not "another throttle"): ChatGPT
+  // Voice itself auto-segments very long continuous speech, and a single
+  // physical utterance must never be able to hold LISTENING open forever
+  // even in an environment where the adaptive threshold above still
+  // misreads the room. This is what guarantees "one physical utterance ->
+  // exactly one audio.commit" holds even in the worst case, without
+  // requiring the user to ever touch the mic/orb button.
+  const VAD_MAX_TURN_MS = 15000;
+  // ~500ms of real ambient mic input, sampled right after permission is
+  // granted (before the user has any realistic chance to start speaking),
+  // used to seed the adaptive noise floor from the ACTUAL room/mic instead
+  // of a guessed constant.
+  const VAD_CALIBRATION_SAMPLES = 5;
 
   function isSupported() {
     return Boolean(
@@ -107,6 +142,10 @@
       this._sawSpeechThisTurn = false;
       this._vadSilenceSince = null;
       this._vadSpeechSince = null;
+      this._noiseFloor = VAD_ABS_MIN_FLOOR;
+      this._speechStartedAt = null;
+      this._vadCalibrationSamplesLeft = 0;
+      this._vadCalibrationSum = 0;
     }
 
     get isMuted() {
@@ -262,6 +301,7 @@
       this._sawSpeechThisTurn = false;
       this._vadSilenceSince = null;
       this._vadSpeechSince = null;
+      this._speechStartedAt = null;
       this._setState(STATE_LISTENING);
       if (!this._muted) this._startRecording();
       // DEFECT B latency acceptance: closes the server-side per-turn
@@ -337,6 +377,15 @@
         this._analyser = null;
         return;
       }
+      // Root-cause fix: calibrate the adaptive noise floor from THIS
+      // session's ACTUAL first moment of real mic input (while the user is
+      // almost certainly not speaking yet -- permission was just granted)
+      // instead of starting from an arbitrary guessed constant. This is
+      // what lets the same code work whether the real room/mic is quiet or
+      // has constant background noise well above any single hardcoded
+      // threshold this sandbox could ever pick.
+      this._vadCalibrationSamplesLeft = VAD_CALIBRATION_SAMPLES;
+      this._vadCalibrationSum = 0;
       this._vadTimer = global.setInterval(() => this._sampleVad(), VAD_SAMPLE_MS);
     }
 
@@ -356,6 +405,10 @@
       this._analyser = null;
       this._vadSilenceSince = null;
       this._vadSpeechSince = null;
+      this._noiseFloor = VAD_ABS_MIN_FLOOR;
+      this._speechStartedAt = null;
+      this._vadCalibrationSamplesLeft = 0;
+      this._vadCalibrationSum = 0;
     }
 
     _sampleVad() {
@@ -367,16 +420,40 @@
         sumSquares += v * v;
       }
       const rms = Math.sqrt(sumSquares / this._vadBuf.length);
-      const active = rms > VAD_RMS_THRESHOLD;
+
+      if (this._vadCalibrationSamplesLeft > 0) {
+        this._vadCalibrationSum += rms;
+        this._vadCalibrationSamplesLeft -= 1;
+        if (this._vadCalibrationSamplesLeft === 0) {
+          this._noiseFloor = Math.max(this._vadCalibrationSum / VAD_CALIBRATION_SAMPLES, VAD_ABS_MIN_FLOOR);
+        }
+        return; // not yet classifying speech/silence -- still calibrating
+      }
+
+      const effectiveFloor = Math.max(this._noiseFloor, VAD_ABS_MIN_FLOOR);
+      const active = rms > effectiveFloor * VAD_ACTIVE_MULTIPLIER;
       const now = Date.now();
 
       if (this.state === STATE_LISTENING) {
         if (this.handlers.onVoiceActivity) this.handlers.onVoiceActivity(active);
         if (active) {
+          if (!this._sawSpeechThisTurn) this._speechStartedAt = now;
           this._sawSpeechThisTurn = true;
           this._vadSilenceSince = null;
+          // Forward-progress safety net: a single utterance never holds
+          // the mic open past VAD_MAX_TURN_MS regardless of whether
+          // silence is ever cleanly detected afterward.
+          if (this._speechStartedAt !== null && now - this._speechStartedAt >= VAD_MAX_TURN_MS) {
+            this.commit();
+          }
           return;
         }
+        // Currently reading as "not speech" -- slowly adapt the ambient
+        // floor toward the REAL room/mic level instead of trusting a
+        // constant this sandbox could never validate against real
+        // hardware. Never adapted while Panda is talking (below) to avoid
+        // her own voice bleeding into the mic and poisoning the floor.
+        this._noiseFloor = this._noiseFloor + VAD_NOISE_FLOOR_ALPHA * (rms - this._noiseFloor);
         if (!this._sawSpeechThisTurn) return;
         if (this._vadSilenceSince === null) {
           this._vadSilenceSince = now;
@@ -415,6 +492,7 @@
       this._stopRecording();
       this._sawSpeechThisTurn = false;
       this._vadSilenceSince = null;
+      this._speechStartedAt = null;
       this._send({ type: "audio.commit", client_turn_id: uuid() });
     }
 
@@ -427,6 +505,7 @@
       this._send({ type: "barge_in" });
       this._vadSpeechSince = null;
       this._sawSpeechThisTurn = true; // the interrupting utterance is already under way
+      this._speechStartedAt = Date.now();
       this._setState(STATE_LISTENING);
       if (!this._muted) this._startRecording();
     }
@@ -442,6 +521,7 @@
       this._sawSpeechThisTurn = false;
       this._vadSilenceSince = null;
       this._vadSpeechSince = null;
+      this._speechStartedAt = null;
       if (this.handlers.onMuteChange) this.handlers.onMuteChange(true);
     }
 
