@@ -337,6 +337,16 @@ if voice_interface_enabled():
 # style/tone/length/language/voice preference source.
 personalization_runtime = build_personalization_runtime()
 ba_api_runtime.service.personalization_service = personalization_runtime.service
+# Block 5.1: DataIntelligenceService is constructed inside side_effect_runtime
+# (before the canonical ArtifactService exists) -- wire it post-construction,
+# same pattern as personalization_service above, so generated workbooks
+# register as tenant/conversation-owned artifacts through the existing
+# Unified Files/Artifacts layer instead of only the internal data_intel blob
+# store. None-safe: data_intelligence_runtime is optional (DATA_INTEL_ENABLED).
+if getattr(side_effect_runtime, "data_intelligence_runtime", None) is not None:
+    side_effect_runtime.data_intelligence_runtime.service.artifact_service = (
+        ba_api_runtime.artifact_service
+    )
 realtime_runtime = None
 if realtime_enabled():
     # Block 4: realtime session bridge reuses ba_api_runtime.service directly
