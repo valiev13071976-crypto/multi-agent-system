@@ -305,7 +305,9 @@ class WorkflowPandaConversationGateway:
     async def _invoke_tool(self, request: ConversationRequest, action) -> ConversationResult:
         from business_assistant.action_continuation import (
             CALL_TOOL,
+            FAMILY_ACQUISITION,
             FAMILY_EXCEL,
+            TOOL_DATA_EXCEL_ASSISTANT,
             TOOL_IMAGE_EDIT,
             artifacts_from_tool_data,
             format_tool_user_text,
@@ -495,6 +497,21 @@ class WorkflowPandaConversationGateway:
             new_dataset_id = str(data.get("dataset_id") or "")
             if new_dataset_id:
                 task.parameters["dataset_id"] = new_dataset_id
+                self._action_store.put(task)
+        if family == FAMILY_ACQUISITION and success and task is not None:
+            # Block 5.2 multi-turn continuation (spec section 22): once
+            # acquisition/extraction produced a Block 5.1 dataset, hand the
+            # conversation frame to FAMILY_EXCEL so "Оставь Samsung"/"Только
+            # дешевле 50000"/"Сохрани в Excel" operate on THIS dataset without
+            # re-crawling/re-acquiring -- the exact same continuation path an
+            # uploaded spreadsheet would already use.
+            new_dataset_id = str(data.get("dataset_id") or "")
+            if new_dataset_id:
+                task.parameters["dataset_id"] = new_dataset_id
+                task.family = FAMILY_EXCEL
+                task.tool_id = TOOL_DATA_EXCEL_ASSISTANT
+                task.operation = "assist"
+                task.artifact_type = "workbook"
                 self._action_store.put(task)
         if task is not None:
             mark_executed(

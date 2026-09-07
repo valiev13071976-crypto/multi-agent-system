@@ -28,7 +28,7 @@ from acquisition.models import (
     utc_now,
 )
 from acquisition.registry import SourceRegistry
-from autonomy.capabilities import CAP_EXTERNAL_READ, CAP_FILESYSTEM_READ
+from autonomy.capabilities import CAP_EXTERNAL_READ, CAP_FILESYSTEM_READ, CAP_SCRAPE
 from tools.models import ToolRequest
 
 
@@ -81,7 +81,18 @@ class AcquisitionManager:
         raise AcquisitionDeniedError("unsupported_acquisition_type")
 
     async def _invoke(self, tool_id: str, operation: str, arguments: dict, request: AcquisitionRequest):
+        # ``scrape.*`` tools (see ``tools/platform/descriptors.py``'s
+        # ``scrape_fetch_descriptor``/``scrape_extract_descriptor``) declare
+        # CAP_SCRAPE as a required capability — the legacy capability pair
+        # below predates scrape.fetch and never granted it, so every
+        # ephemeral general-web fetch (``acquisition/web_source.py``,
+        # ``tool_id="scrape.fetch"``) would fail ToolGateway's capability
+        # check with ``missing_tool_capability`` even though the request was
+        # otherwise policy-valid. Grant CAP_SCRAPE alongside the existing
+        # capabilities whenever the target tool is a ``scrape.*`` tool.
         caps = (CAP_EXTERNAL_READ, CAP_FILESYSTEM_READ)
+        if str(tool_id or "").startswith("scrape."):
+            caps = caps + (CAP_SCRAPE,)
         tool_req = ToolRequest(
             request_id=str(uuid.uuid4()),
             workflow_id=request.workflow_id or "acquisition",

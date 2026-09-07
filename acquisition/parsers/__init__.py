@@ -170,6 +170,7 @@ def build_default_parser_registry() -> ParserRegistry:
     from acquisition.parsers.price import PriceListCsvParser
     from acquisition.parsers.search import SearchResultParser
     from acquisition.parsers.supplier import SupplierFeedParser
+    from acquisition.parsers.web_generic import WebGenericHtmlParser
 
     reg = ParserRegistry()
     for parser in (
@@ -178,6 +179,7 @@ def build_default_parser_registry() -> ParserRegistry:
         CompetitorHtmlParser(),
         MarketplaceJsonParser(),
         SearchResultParser(),
+        WebGenericHtmlParser(),
         CsvTableParser(),
         JsonParser(),
         XmlParser(),

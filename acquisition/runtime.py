@@ -121,6 +121,7 @@ def build_acquisition_runtime(
     *,
     tool_gateway=None,
     workflow_scheduler: WorkflowScheduler | None = None,
+    workflow_runtime=None,
     freeze_sources: bool = False,
     store: AcquisitionStore | None = None,
 ) -> AcquisitionService:
@@ -134,6 +135,7 @@ def build_acquisition_runtime(
         parser_registry=build_default_parser_registry(),
         tool_gateway=tool_gateway,
         scheduler=AcquisitionScheduler(workflow_scheduler or WorkflowScheduler()),
+        workflow_runtime=workflow_runtime,
     )
     if freeze_sources:
         sources.freeze()
@@ -144,6 +146,7 @@ def build_acquisition_runtime_bundle(
     *,
     tool_gateway=None,
     workflow_scheduler: WorkflowScheduler | None = None,
+    workflow_runtime=None,
     env: dict | None = None,
     shared_connection=None,
     freeze_sources: bool = False,
@@ -158,6 +161,7 @@ def build_acquisition_runtime_bundle(
             parser_registry=build_default_parser_registry(),
             tool_gateway=tool_gateway,
             scheduler=AcquisitionScheduler(workflow_scheduler or WorkflowScheduler()),
+            workflow_runtime=workflow_runtime,
         )
         return AcquisitionRuntime(service=service, store=store, enabled=False)
 
@@ -186,6 +190,7 @@ def build_acquisition_runtime_bundle(
         parser_registry=build_default_parser_registry(),
         tool_gateway=tool_gateway,
         scheduler=AcquisitionScheduler(workflow_scheduler or WorkflowScheduler()),
+        workflow_runtime=workflow_runtime,
     )
     if freeze_sources:
         sources.freeze()

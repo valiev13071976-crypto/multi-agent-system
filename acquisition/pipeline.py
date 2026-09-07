@@ -79,7 +79,20 @@ class AcquisitionPipeline:
         normalized: list[NormalizedRecord] = []
         decisions: list[DedupeDecision] = []
         for art in artifacts:
-            records = self.service.parse(art)
+            records = tuple(self.service.parse(art))
+            # A parser may legitimately emit MULTIPLE records from a single
+            # artifact (e.g. repeated-item/card extraction, marketplace/search
+            # listings). The artifact-level URL/checksum identify the PAGE, not
+            # any individual record on it -- keying dedupe layer 1 (url) and
+            # layer 2 (raw_hash) off the shared page URL/checksum for every
+            # record would falsely collapse distinct same-page records into
+            # "duplicates" of each other. Use a per-record URL (when the
+            # record itself carries one) for multi-record artifacts, and skip
+            # the page-level raw_hash layer entirely for them -- layers 3/4
+            # (structured fingerprint / composite key) still dedupe correctly
+            # per-record. Single-record artifacts keep the original page-level
+            # identity (unchanged behavior).
+            multi_record = len(records) > 1
             for rec in records:
                 result = self.normalizer.normalize_parsed(
                     rec, job_id=job.job_id, resource_id=art.artifact_id
@@ -87,11 +100,31 @@ class AcquisitionPipeline:
                 normalized.append(result.record)
                 if hasattr(self.service.store, "save_normalized_record"):
                     self.service.store.save_normalized_record(result.record)
+                if multi_record:
+                    rec_fields = dict(result.record.fields)
+                    dedupe_url = str(rec_fields.get("url") or rec_fields.get("link") or "")
+                    # A record's own "url"/"link" field only identifies that
+                    # SPECIFIC record (e.g. a card's product-detail link) when
+                    # it differs from the shared page URL. Generic table-row
+                    # extraction (acquisition/parsers/web_generic.py) stamps
+                    # every row with the same page URL for provenance -- using
+                    # that shared value as a per-record dedupe key here would
+                    # falsely collapse distinct rows on the same page into
+                    # "duplicates" of each other (layer 1). Fall through to
+                    # the structured-fingerprint layer (3), which already
+                    # incorporates every field and correctly distinguishes
+                    # same-page records, whenever the URL isn't record-unique.
+                    if dedupe_url and dedupe_url == (art.url or ""):
+                        dedupe_url = ""
+                    dedupe_raw_hash = ""
+                else:
+                    dedupe_url = art.url or ""
+                    dedupe_raw_hash = art.checksum or ""
                 decision = self.dedupe.decide(
                     result.record,
                     job_id=job.job_id,
-                    url=art.url or "",
-                    raw_hash=art.checksum or "",
+                    url=dedupe_url,
+                    raw_hash=dedupe_raw_hash,
                 )
                 decisions.append(decision)
 

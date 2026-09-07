@@ -198,6 +198,7 @@ class AcquisitionPlanner:
                 "seed_count": len(seed_urls),
                 "max_pages": int(policy.max_pages),
                 "max_frontier": int(policy.max_frontier),
+                "max_depth": int(policy.max_depth),
             },
             metadata={
                 **dict(metadata or {}),

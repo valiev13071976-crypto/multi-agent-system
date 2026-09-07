@@ -19,7 +19,6 @@ from tools.platform.contracts import (
     ExternalApiContractAdapter,
     ImageContractAdapter,
     McpAdapter,
-    ScrapingContractAdapter,
     SeoAnalyticsContractAdapter,
     TelegramContractAdapter,
     WebSearchContractAdapter,
@@ -167,6 +166,8 @@ from tools.platform.descriptors import (
 from tools.platform.documents import DocumentToolAdapter
 from tools.platform.filesystem import FilesystemAdapter
 from tools.platform.http_adapter import HttpAdapter
+from tools.platform.web_fetch_adapter import WebFetchAdapter
+from acquisition.tools import AcquisitionToolAdapter
 from tools.platform.scaffold import (
     AsproAdapter,
     BitrixAdapter,
@@ -227,6 +228,7 @@ def register_platform_tools(
     product_platform_service=None,
     seo_marketing_service=None,
     b2b_commerce_service=None,
+    acquisition_service=None,
 ) -> dict:
     """Register platform adapters. Returns adapter map for health wiring."""
     creds = credential_store or IntegrationCredentialStore()
@@ -297,7 +299,17 @@ def register_platform_tools(
     )
     database = DatabaseContractAdapter(enabled=False)
     image = ImageContractAdapter(enabled=False)
-    scrape = ScrapingContractAdapter(enabled=False)
+    # Block 5.2 Data Acquisition & Parsing Platform — real adapters, not the
+    # disabled contract scaffold. ``web_fetch`` is self-contained (SSRF-hardened,
+    # no external service dependency) so it is safe to enable unconditionally;
+    # ``acquisition_tool`` requires the live ``AcquisitionService``.
+    web_fetch = WebFetchAdapter()
+    acquisition_tool = AcquisitionToolAdapter(
+        acquisition_service,
+        workflow_runtime=getattr(acquisition_service, "workflow_runtime", None),
+        data_intelligence=data_intelligence,
+    )
+    acquisition_enabled = acquisition_service is not None
     seo = SeoAnalyticsContractAdapter(enabled=False)
     web_search = WebSearchContractAdapter(enabled=False)
 
@@ -403,8 +415,8 @@ def register_platform_tools(
         (excel_write_descriptor(enabled=False), excel),
         (image_generate_descriptor(enabled=media_enabled), media if media_enabled else image),
         (image_edit_descriptor(enabled=media_enabled), media if media_enabled else image),
-        (scrape_fetch_descriptor(enabled=False), scrape),
-        (scrape_extract_descriptor(enabled=False), scrape),
+        (scrape_fetch_descriptor(enabled=True), web_fetch),
+        (scrape_extract_descriptor(enabled=acquisition_enabled), acquisition_tool),
         (seo_analytics_read_descriptor(enabled=seo_enabled), seo_marketing if seo_enabled else seo),
         (seo_search_console_read_descriptor(enabled=seo_enabled), seo_marketing if seo_enabled else seo),
         (seo_metadata_write_descriptor(enabled=seo_enabled), seo_marketing if seo_enabled else seo),
@@ -459,7 +471,8 @@ def register_platform_tools(
         "product_platform": product_platform,
         "seo_marketing": seo_marketing if seo_enabled else seo,
         "b2b_commerce": b2b_commerce if b2b_enabled else telegram,
-        "scrape": scrape,
+        "scrape": web_fetch,
+        "acquisition": acquisition_tool,
         "seo": seo,
         "web_search": web_search,
         "mcp": mcp,
