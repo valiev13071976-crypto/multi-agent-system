@@ -1348,11 +1348,16 @@ def scrape_fetch_descriptor(*, enabled: bool = False) -> ToolDescriptor:
     return _read_desc(
         tool_id=TOOL_SCRAPE_FETCH,
         name="Scrape Fetch",
-        description="Fetch page content for extraction (foundation)",
+        description="SSRF-hardened bounded public page fetch (Block 5.2)",
         category="scrape",
         adapter_id="scrape",
+        # "get" is accepted alongside "fetch" so AcquisitionManager's existing
+        # hardcoded ACQ_HTTP_GET -> operation="get" path can route through this
+        # tool for general-web sources without a second internal tool_id (which
+        # would otherwise be indistinguishable from — and risk recursing into —
+        # this same tool).
         capabilities=(CAP_SCRAPE, CAP_EXTERNAL_READ),
-        operations=("fetch",),
+        operations=("fetch", "get"),
         enabled=enabled,
         timeout=45.0,
         network=True,
@@ -1365,7 +1370,7 @@ def scrape_extract_descriptor(*, enabled: bool = False) -> ToolDescriptor:
         name="Scrape Extract",
         description="Extract structured fields from fetched content",
         category="scrape",
-        adapter_id="scrape",
+        adapter_id="acquisition",
         capabilities=(CAP_SCRAPE,),
         operations=("extract",),
         enabled=enabled,

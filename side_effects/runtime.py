@@ -493,6 +493,7 @@ def build_tool_gateway(
     product_platform_service=None,
     seo_marketing_service=None,
     b2b_commerce_service=None,
+    acquisition_service=None,
     freeze: bool = True,
 ) -> tuple[ToolRegistry, ToolGateway]:
     """Register built-in tools, platform adapters, optionally GitHub write, then freeze."""
@@ -559,6 +560,7 @@ def build_tool_gateway(
         product_platform_service=product_platform_service,
         seo_marketing_service=seo_marketing_service,
         b2b_commerce_service=b2b_commerce_service,
+        acquisition_service=acquisition_service,
     )
     if product_platform_service is not None:
         from commerce.product_platform.side_effect import register_commerce_platform_side_effects
@@ -911,6 +913,41 @@ def _finalize_runtime(
     except Exception:
         b2b_commerce_runtime = None
 
+    # Built BEFORE build_tool_gateway (unlike other consumer runtimes above)
+    # so ``register_platform_tools`` can wire the real ``AcquisitionToolAdapter``
+    # (scrape.extract) against the live ``AcquisitionService`` at tool-registry
+    # construction time. ``tool_gateway=None`` here — patched onto the service
+    # right after ``build_tool_gateway`` returns, same as every other runtime's
+    # post-hoc gateway wiring below.
+    acquisition_runtime = None
+    try:
+        from acquisition.runtime import build_acquisition_runtime_bundle
+
+        shared_acq = None
+        acq_env = dict(env or {})
+        if (
+            persistence is not None
+            and persistence.backend == "sqlite"
+            and persistence.connection is not None
+            and persistence.ready
+        ):
+            shared_acq = persistence.connection
+            acq_env.setdefault("ACQUISITION_USE_SHARED_DB", "true")
+        wf_scheduler = None
+        if workflow_runtime is not None:
+            wf_scheduler = getattr(workflow_runtime, "scheduler", None)
+        acquisition_runtime = build_acquisition_runtime_bundle(
+            tool_gateway=None,
+            workflow_scheduler=wf_scheduler,
+            workflow_runtime=workflow_runtime,
+            env=acq_env,
+            shared_connection=shared_acq,
+            freeze_sources=False,
+        )
+        engine.acquisition_service = acquisition_runtime.service
+    except Exception:
+        acquisition_runtime = None
+
     tool_registry, tool_gateway = build_tool_gateway(
         side_effect_registry=registry,
         executor=executor,
@@ -919,6 +956,9 @@ def _finalize_runtime(
         github_enabled=bool(config.enabled and registry.get("github.issue_labels") is not None)
         if hasattr(registry, "get")
         else False,
+        acquisition_service=(
+            acquisition_runtime.service if acquisition_runtime else None
+        ),
         observability=obs,
         env=env,
         document_service=document_runtime.service if document_runtime else None,
@@ -1073,33 +1113,10 @@ def _finalize_runtime(
     if procurement_runtime is not None:
         engine.procurement_service = procurement_runtime.service
 
-    acquisition_runtime = None
-    try:
-        from acquisition.runtime import build_acquisition_runtime_bundle
-
-        shared_acq = None
-        acq_env = dict(env or {})
-        # Prefer durable when side-effect persistence is sqlite (shared DB)
-        if (
-            persistence is not None
-            and persistence.backend == "sqlite"
-            and persistence.connection is not None
-            and persistence.ready
-        ):
-            shared_acq = persistence.connection
-            acq_env.setdefault("ACQUISITION_USE_SHARED_DB", "true")
-        wf_scheduler = None
-        if workflow_runtime is not None:
-            wf_scheduler = getattr(workflow_runtime, "scheduler", None)
-        acquisition_runtime = build_acquisition_runtime_bundle(
-            tool_gateway=tool_gateway,
-            workflow_scheduler=wf_scheduler,
-            env=acq_env,
-            shared_connection=shared_acq,
-            freeze_sources=False,
-        )
-        engine.acquisition_service = acquisition_runtime.service
-        # Ensure acquisition uses the same ToolGateway instance
+    if acquisition_runtime is not None:
+        # Ensure acquisition uses the same ToolGateway instance (built above,
+        # after the acquisition runtime itself — see the ``acquisition_runtime =
+        # build_acquisition_runtime_bundle(...)`` construction earlier).
         acquisition_runtime.service.gateway = tool_gateway
         acquisition_runtime.service.manager.gateway = tool_gateway
         if data_intelligence_runtime is not None:
@@ -1110,10 +1127,8 @@ def _finalize_runtime(
             commerce_runtime.service.acquisition_service = acquisition_runtime.service
         if seo_marketing_runtime is not None:
             seo_marketing_runtime.service.acquisition = acquisition_runtime.service
-        if b2b_commerce_runtime is not None and acquisition_runtime is not None:
+        if b2b_commerce_runtime is not None:
             b2b_commerce_runtime.service.acquisition = acquisition_runtime.service
-    except Exception:
-        acquisition_runtime = None
 
     return SideEffectRuntime(
         config=config,

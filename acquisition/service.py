@@ -51,12 +51,23 @@ class AcquisitionService:
         scheduler: AcquisitionScheduler | None = None,
         task_queue=None,
         max_frontier: int = 500,
+        workflow_runtime=None,
     ):
         self.sources = source_registry or SourceRegistry()
         self.store = store or InMemoryAcquisitionStore()
         self.parsers = parser_registry or build_default_parser_registry()
         self.gateway = tool_gateway
         self.task_queue = task_queue
+        self.workflow_runtime = workflow_runtime
+        if workflow_runtime is not None:
+            try:
+                from acquisition.workflow_def import register_acquisition_workflows
+
+                register_acquisition_workflows(
+                    workflow_runtime.definitions, workflow_runtime.platform
+                )
+            except Exception:
+                pass
         self.max_frontier = int(max_frontier)
         self.manager = AcquisitionManager(
             source_registry=self.sources,
@@ -291,12 +302,22 @@ class AcquisitionService:
             if not process:
                 return scrape_result  # type: ignore[return-value]
         elif job.mode in {MODE_CRAWL, MODE_SINGLE}:
+            # ``max_depth`` for crawl mode is read from the planned job's
+            # stamped policy counters (set from the caller's CrawlPolicy at
+            # plan time) rather than a fixed "2" — a hardcoded shallow depth
+            # would silently truncate link discovery on a deep/linear
+            # pagination chain (page1 -> page2 -> ... -> pageN) well before
+            # ``max_pages`` is reached, under-delivering "crawl the first N
+            # pages" requests. Single-page requests stay depth 1 (bounded
+            # anyway by max_pages=1 — depth cannot matter).
             result = await self.crawl(
                 source_id=job.source_id,
                 tenant_id=job.tenant_id,
                 seeds=seed_urls,
                 workflow_id=job.workflow_id,
-                max_depth=1 if job.mode == MODE_SINGLE else 2,
+                max_depth=1 if job.mode == MODE_SINGLE else int(
+                    dict(job.counters).get("max_depth") or 2
+                ),
                 max_pages=1 if job.mode == MODE_SINGLE else int(
                     dict(job.counters).get("max_pages") or 50
                 ),

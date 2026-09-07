@@ -13,7 +13,12 @@ from dataclasses import dataclass, field
 from typing import Any, Mapping
 
 from agents.routing_requirements import FRESHNESS_CURRENT, derive_task_requirements
-from autonomy.capabilities import CAP_FILESYSTEM_WRITE, CAP_IMAGE_EDIT, CAP_IMAGE_GENERATE
+from autonomy.capabilities import (
+    CAP_FILESYSTEM_WRITE,
+    CAP_IMAGE_EDIT,
+    CAP_IMAGE_GENERATE,
+    CAP_SCRAPE,
+)
 from business_assistant.follow_up import (
     KIND_NEW_TOPIC,
     KIND_REFERENT,
@@ -32,6 +37,10 @@ TOOL_DATA_EXCEL_ASSISTANT = "data.excel_assistant"
 TOOL_DATA_COMPARE_WORKBOOKS = "data.compare_workbooks"
 TOOL_IMAGE_EDIT = "image.edit"
 TOOL_IMAGE_GENERATE = "image.generate"
+# Block 5.2: single chat-facing entry point for the Data Acquisition &
+# Parsing Platform (see ``acquisition/tools.py``'s ``AcquisitionToolAdapter``).
+# Panda -- not the user -- decides fetch vs. crawl inside this one tool.
+TOOL_SCRAPE_EXTRACT = "scrape.extract"
 
 
 # --- Public decision / lifecycle labels (internal only) -------------------
@@ -67,6 +76,11 @@ FAMILY_SEARCH = "search"
 FAMILY_EXCEL = "excel"
 FAMILY_DOCUMENT = "document"
 FAMILY_WRITE = "write_governed"
+# Block 5.2: acquisition (scrape/crawl/extract a public web page) -- distinct
+# from FAMILY_EXCEL (analyze/transform already-acquired structured data) and
+# FAMILY_SEARCH (find pages, never fetch/parse their content). See section 21
+# of the Block 5.2 spec: SEARCH != ACQUISITION != CRAWL != DATA INTELLIGENCE.
+FAMILY_ACQUISITION = "acquisition"
 
 RISK_GENERATE = "generate"
 RISK_READ = "read"
@@ -150,10 +164,29 @@ COMPARE_WORKBOOKS_CONTRACT = CapabilityContract(
     artifact_type="workbook",
 )
 
+ACQUISITION_CONTRACT = CapabilityContract(
+    family=FAMILY_ACQUISITION,
+    tool_id=TOOL_SCRAPE_EXTRACT,
+    operation="extract",
+    # The URL is deterministically extracted from the user's message BEFORE
+    # the task is created (see ``_extract_url`` / the FAMILY_ACQUISITION
+    # branch of ``resolve_action_turn``) and stamped into ``task.parameters``
+    # up front, so this "required" field is satisfied at creation time rather
+    # than through a generic missing-params gate -- mirrors how FAMILY_EXCEL's
+    # dataset source (attachment OR inherited dataset_id) is resolved.
+    required=("url",),
+    optional=("max_pages", "extraction_plan"),
+    defaults={},
+    risk=RISK_READ,
+    required_capabilities=(CAP_SCRAPE,),
+    artifact_type="dataset",
+)
+
 CONTRACTS: dict[str, CapabilityContract] = {
     FAMILY_IMAGE_GENERATE: IMAGE_GENERATE_CONTRACT,
     FAMILY_IMAGE_EDIT: IMAGE_EDIT_CONTRACT,
     FAMILY_EXCEL: EXCEL_CONTRACT,
+    FAMILY_ACQUISITION: ACQUISITION_CONTRACT,
 }
 
 
@@ -325,6 +358,47 @@ _WRITE_STEMS = (
     "send email",
 )
 
+# Block 5.2: a bare http(s) URL in the message is the strongest, fully
+# deterministic acquisition signal -- mirrors how a spreadsheet attachment is
+# the strongest Excel signal (spec section 20: "no technical mode picker").
+_URL_RE = re.compile(r"https?://[^\s<>\"'()\[\]]+", re.I)
+_PAGES_COUNT_RE = re.compile(r"(\d{1,3})\s*(?:страниц\w*|pages?)", re.I)
+MAX_ACQUISITION_PAGES = 200
+
+# Weaker fallback signal than a URL: explicit "go acquire/parse" verbs with no
+# URL yet (e.g. referencing "this page" from earlier context) still route to
+# FAMILY_ACQUISITION so the turn resolver asks for the missing URL instead of
+# silently answering conversationally (spec section 39: "ask one useful
+# clarification").
+_ACQUISITION_INTENT_STEMS = (
+    "собери",
+    "вытащи",
+    "извлеки",
+    "спарси",
+    "спарсь",
+    "парсинг",
+    "scrape",
+    "crawl",
+)
+
+
+def _extract_url(text: str) -> str:
+    match = _URL_RE.search(text or "")
+    if not match:
+        return ""
+    return match.group(0).rstrip(".,;:!?)]}\u00bb\"'")
+
+
+def _extract_max_pages(text: str) -> int:
+    match = _PAGES_COUNT_RE.search(text or "")
+    if not match:
+        return 1
+    try:
+        value = int(match.group(1))
+    except ValueError:
+        return 1
+    return max(1, min(value, MAX_ACQUISITION_PAGES))
+
 
 def _is_image_artifact_request(text: str) -> bool:
     return _has_stem(text, _IMAGE_ARTIFACT_STEMS)
@@ -474,6 +548,13 @@ def detect_family(
     # deterministic signal, regardless of the accompanying wording.
     if has_spreadsheet_attachment:
         return FAMILY_EXCEL
+    # Block 5.2: an explicit URL always wins over any active task -- pasting
+    # a new link is a deliberate "acquire this" signal (spec section 20),
+    # stronger than a generic active-family continuation heuristic.
+    if _extract_url(raw):
+        return FAMILY_ACQUISITION
+    if _has_stem(raw, _ACQUISITION_INTENT_STEMS):
+        return FAMILY_ACQUISITION
     if _has_stem(raw, _EXCEL_STEMS) and (
         _has_stem(raw, ("анализ", "analyze", "inspect", "проанализ")) or _has_stem(raw, _MAKE_STEMS)
     ):
@@ -489,6 +570,11 @@ def detect_family(
         # breaks continuation.
         if not (_has_stem(raw, _WEATHER_STEMS) or _has_stem(raw, _QUESTION_NEW_STEMS)):
             return FAMILY_EXCEL
+    if active is not None and active.family == FAMILY_ACQUISITION:
+        # Continuation while still waiting for the URL (clarification asked
+        # last turn) -- keep the frame alive for a plain follow-up reply.
+        if not (_has_stem(raw, _WEATHER_STEMS) or _has_stem(raw, _QUESTION_NEW_STEMS)):
+            return FAMILY_ACQUISITION
     if _is_image_artifact_request(raw) or (
         _is_image_execute_verb(raw) and (active is None or active.family == FAMILY_IMAGE_GENERATE)
     ):
@@ -524,7 +610,11 @@ def continuation_decision(
     # requires_business_integration._BUSINESS_TASK_KEYWORDS) -- once
     # detect_family has already deterministically resolved this turn to the
     # active Excel task, that heuristic must not override it.
-    if family != FAMILY_EXCEL and _is_unrelated_new_task(text) and not _is_quantity_only(text):
+    if (
+        family not in {FAMILY_EXCEL, FAMILY_ACQUISITION}
+        and _is_unrelated_new_task(text)
+        and not _is_quantity_only(text)
+    ):
         return NEW_TASK
     if family == FAMILY_WRITE:
         return NEW_TASK
@@ -660,6 +750,8 @@ def user_unavailable_message(family: str) -> str:
         return "Сейчас не могу обработать таблицу — возможность недоступна."
     if family == FAMILY_DOCUMENT:
         return "Сейчас не могу создать документ — возможность недоступна."
+    if family == FAMILY_ACQUISITION:
+        return "Сейчас не могу собрать данные со страницы — возможность недоступна."
     return "Эта возможность сейчас недоступна."
 
 
@@ -781,7 +873,9 @@ def resolve_action_turn(
         )
 
     if family == FAMILY_SEARCH or (
-        mode == NEW_TASK and _is_unrelated_new_task(current) and family not in {FAMILY_IMAGE_GENERATE, FAMILY_EXCEL}
+        mode == NEW_TASK
+        and _is_unrelated_new_task(current)
+        and family not in {FAMILY_IMAGE_GENERATE, FAMILY_EXCEL, FAMILY_ACQUISITION}
     ):
         if active is not None:
             active.status = STATUS_SUPERSEDED
@@ -917,6 +1011,93 @@ def resolve_action_turn(
             arguments=args,
             tool_id=task.tool_id,
             operation=task.operation,
+            extra_llm=False,
+            capability_status=cap_status,
+            idempotency_key=idem,
+        )
+
+    if family == FAMILY_ACQUISITION:
+        is_new = mode == NEW_TASK or active is None or active.family != FAMILY_ACQUISITION
+        if is_new:
+            if active is not None:
+                active.status = STATUS_SUPERSEDED
+                store.put(active)
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant,
+                owner_id=owner,
+                conversation_id=conv,
+                family=FAMILY_ACQUISITION,
+                tool_id=ACQUISITION_CONTRACT.tool_id,
+                operation=ACQUISITION_CONTRACT.operation,
+                goal=current,
+                parameters={
+                    "url": _extract_url(current),
+                    "max_pages": _extract_max_pages(current),
+                },
+                artifact_type=ACQUISITION_CONTRACT.artifact_type,
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+        else:
+            task = active
+            if task.status in {STATUS_COMPLETED, STATUS_FAILED_RETRYABLE}:
+                task.status = STATUS_DRAFT
+            new_url = _extract_url(current)
+            if new_url:
+                task.parameters["url"] = new_url
+                task.parameters["max_pages"] = _extract_max_pages(current)
+        task.goal = current
+
+        url = str(task.parameters.get("url") or "")
+        if not url:
+            task.missing_required = ("url",)
+            task.status = STATUS_WAITING_FOR_INPUT
+            store.put(task)
+            return ActionDecision(
+                decision=ASK_CLARIFICATION,
+                readiness=NEEDS_REQUIRED_INPUT,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                user_message="Пришлите ссылку на страницу, которую нужно собрать/разобрать.",
+                extra_llm=False,
+            )
+        task.missing_required = ()
+
+        args: dict[str, Any] = {
+            "url": url,
+            "max_pages": int(task.parameters.get("max_pages") or 1),
+            "conversation_id": conv,
+        }
+
+        cap_status = inspect_capability(gateway, ACQUISITION_CONTRACT.tool_id)
+        if cap_status != CAPABILITY_AVAILABLE_AND_AUTHORIZED:
+            task.status = STATUS_FAILED_RETRYABLE
+            store.put(task)
+            return ActionDecision(
+                decision=FAIL_UNAVAILABLE,
+                readiness=NOT_EXECUTABLE,
+                continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+                task=task,
+                arguments=args,
+                user_message=user_unavailable_message(FAMILY_ACQUISITION),
+                tool_id=ACQUISITION_CONTRACT.tool_id,
+                operation=ACQUISITION_CONTRACT.operation,
+                extra_llm=False,
+                capability_status=cap_status,
+            )
+
+        idem = _idempotency_key(request_id, ACQUISITION_CONTRACT.tool_id, args)
+        task.status = STATUS_READY
+        store.put(task)
+        return ActionDecision(
+            decision=CALL_TOOL,
+            readiness=READY_TO_EXECUTE,
+            continuation=CONTINUE_ACTIVE_TASK if not is_new else NEW_TASK,
+            task=task,
+            arguments=args,
+            tool_id=ACQUISITION_CONTRACT.tool_id,
+            operation=ACQUISITION_CONTRACT.operation,
             extra_llm=False,
             capability_status=cap_status,
             idempotency_key=idem,
@@ -1082,6 +1263,17 @@ def format_tool_user_text(
         if not lines:
             lines.append("Готово.")
         return "\n".join(lines)
+    if family == FAMILY_ACQUISITION:
+        status = str(payload.get("status") or "OK")
+        if status == "BATCH_QUEUED":
+            return str(
+                payload.get("summary_text")
+                or "Собираю данные — задача большая, выполняю в фоне."
+            )
+        record_count = int(payload.get("record_count") or 0)
+        if record_count:
+            return f"Собрал {record_count} записей со страницы."
+        return "Не нашёл структурированных данных на странице."
     if family in (FAMILY_IMAGE_GENERATE, FAMILY_IMAGE_EDIT):
         urls: list[str] = []
         seen: set[str] = set()
@@ -1195,7 +1387,7 @@ def artifacts_from_tool_data(data: Mapping[str, Any] | None, *, tool_id: str) ->
     # capabilities' UI needs and must not manufacture a fake, non-downloadable
     # "artifact" here (would wrongly look like a generated file, and would
     # get persisted into ActiveTask.last_artifact_ids).
-    if tool_id in {TOOL_DATA_EXCEL_ASSISTANT, TOOL_DATA_COMPARE_WORKBOOKS}:
+    if tool_id in {TOOL_DATA_EXCEL_ASSISTANT, TOOL_DATA_COMPARE_WORKBOOKS, TOOL_SCRAPE_EXTRACT}:
         return out
     if payload:
         out.append(
