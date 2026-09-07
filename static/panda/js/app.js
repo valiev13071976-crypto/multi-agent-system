@@ -31,6 +31,19 @@
     // live-generation indicator (see components.renderPendingAssistant),
     // or null when none is showing. Never persisted to state.messages.
     pendingIndicatorEl: null,
+    // Block 4 — realtime voice session UI state. `controller` is the one
+    // PandaRealtime.RealtimeVoiceController instance for the lifetime of the
+    // page; `streamingEl`/`streamingText` track the transient in-progress
+    // assistant bubble for the CURRENT voice turn only (never persisted
+    // until assistant.text.completed lands it in state.messages, same
+    // pattern as showPendingIndicator for REST turns).
+    realtime: {
+      controller: null,
+      turnId: null,
+      streamingEl: null,
+      streamingText: "",
+      preferredVoiceId: "",
+    },
   };
 
   // Block 3.5.6/3.5.16: per-session cache so a reloaded conversation only
@@ -96,6 +109,10 @@
     imageEditError: document.getElementById("image-edit-error"),
     imageEditOk: document.getElementById("image-edit-ok"),
     imageEditCancel: document.getElementById("image-edit-cancel"),
+    micBtn: document.getElementById("mic-btn"),
+    voiceLiveCaption: document.getElementById("voice-live-caption"),
+    personalizationBtn: document.getElementById("personalization-btn"),
+    realtimeAudio: document.getElementById("realtime-audio-player"),
   };
 
   function show(el) { if (el) el.classList.remove("hidden"); }
@@ -177,6 +194,14 @@
     if (!state.conversationId) await newChat();
     const saved = loadActiveRequest();
     if (saved) await trackRequest(saved, { resume: true });
+    if (window.PandaPersonalizationApi) {
+      try {
+        const prefs = await window.PandaPersonalizationApi.getPreferences();
+        state.realtime.preferredVoiceId = prefs.voice_id || "";
+      } catch (_) {
+        /* personalization is additive -- never blocks chat entry */
+      }
+    }
   }
 
   async function onAuth() {
@@ -193,6 +218,7 @@
 
   function logout() {
     stopPolling();
+    if (state.realtime.controller) state.realtime.controller.close();
     const csrf = csrfHeader();
     fetch("/api/accounts/logout", {
       method: "POST",
@@ -971,11 +997,186 @@
     setStatus("");
   }
 
+  // --- Block 4: realtime voice ---------------------------------------------
+
+  function micIconFor(rtState) {
+    const RT = window.PandaRealtime;
+    if (!RT) return "🎤";
+    if (rtState === RT.STATE_LISTENING) return "⏺";
+    if (rtState === RT.STATE_THINKING || rtState === RT.STATE_SPEAKING) return "⏹";
+    if (rtState === RT.STATE_CONNECTING) return "…";
+    return "🎤";
+  }
+
+  function updateMicUi(rtState) {
+    const RT = window.PandaRealtime;
+    if (!els.micBtn || !RT) return;
+    els.micBtn.classList.remove("is-listening", "is-thinking", "is-speaking", "is-connecting", "is-error");
+    const iconEl = els.micBtn.querySelector(".mic-icon");
+    if (iconEl) iconEl.textContent = micIconFor(rtState);
+    els.micBtn.setAttribute("aria-pressed", rtState === RT.STATE_IDLE ? "false" : "true");
+    if (rtState === RT.STATE_LISTENING) {
+      els.micBtn.classList.add("is-listening");
+      els.micBtn.setAttribute("aria-label", "Остановить запись и отправить");
+    } else if (rtState === RT.STATE_THINKING) {
+      els.micBtn.classList.add("is-thinking");
+      els.micBtn.setAttribute("aria-label", "Прервать Panda и говорить");
+    } else if (rtState === RT.STATE_SPEAKING) {
+      els.micBtn.classList.add("is-speaking");
+      els.micBtn.setAttribute("aria-label", "Прервать Panda и говорить");
+    } else if (rtState === RT.STATE_CONNECTING) {
+      els.micBtn.classList.add("is-connecting");
+      els.micBtn.setAttribute("aria-label", "Подключение…");
+    } else if (rtState === RT.STATE_ERROR) {
+      els.micBtn.classList.add("is-error");
+      els.micBtn.setAttribute("aria-label", "Голосовой ввод — ошибка, повторите");
+    } else {
+      els.micBtn.setAttribute("aria-label", "Голосовой ввод");
+    }
+    if (rtState === RT.STATE_IDLE) {
+      hide(els.voiceLiveCaption);
+      els.voiceLiveCaption.textContent = "";
+    }
+  }
+
+  function showVoiceCaption(text) {
+    if (!els.voiceLiveCaption) return;
+    if (!text) {
+      hide(els.voiceLiveCaption);
+      return;
+    }
+    els.voiceLiveCaption.textContent = `🎤 ${text}`;
+    show(els.voiceLiveCaption);
+  }
+
+  function finalizeStreamingBubble(turnId, text) {
+    const rt = state.realtime;
+    if (rt.streamingEl && rt.streamingEl.parentNode) {
+      rt.streamingEl.parentNode.removeChild(rt.streamingEl);
+    }
+    rt.streamingEl = null;
+    rt.streamingText = "";
+    rt.turnId = null;
+    const trimmed = String(text || "").trim();
+    if (!trimmed) return;
+    state.messages.push({
+      role: "assistant",
+      content: trimmed,
+      created_at: new Date().toISOString(),
+      modality: "voice",
+    });
+    renderTimeline({ forceScroll: true });
+  }
+
+  function ensureRealtimeController() {
+    if (state.realtime.controller) return state.realtime.controller;
+    const RT = window.PandaRealtime;
+    const controller = new RT.RealtimeVoiceController({
+      onStateChange: (rtState) => updateMicUi(rtState),
+      onSessionStarted: ({ conversationId }) => {
+        if (conversationId && conversationId !== state.conversationId) {
+          state.conversationId = conversationId;
+          refreshConversations().catch(() => {});
+        }
+      },
+      onPartialTranscript: (text) => showVoiceCaption(text),
+      onUserTurnCommitted: ({ text }) => {
+        showVoiceCaption("");
+        if (text) {
+          state.messages.push({
+            role: "user",
+            content: text,
+            created_at: new Date().toISOString(),
+            modality: "voice",
+          });
+          renderTimeline({ forceScroll: true });
+        }
+        setStatus(window.PandaCopy.USER_THINKING || "Думаю…", "running");
+      },
+      onStatus: (status) => setStatus(status, "running"),
+      onAssistantTextDelta: ({ turnId, delta }) => {
+        const rt = state.realtime;
+        if (rt.turnId !== turnId) {
+          rt.turnId = turnId;
+          rt.streamingText = "";
+          rt.streamingEl = ui.renderMessage("assistant", "", null, null);
+          rt.streamingEl.classList.add("streaming");
+          els.timeline.appendChild(rt.streamingEl);
+          syncWelcome();
+        }
+        rt.streamingText += delta;
+        const body = rt.streamingEl.querySelector(".body");
+        if (body) window.PandaSanitize.renderRichText(body, rt.streamingText);
+        scrollTimelineToBottom();
+      },
+      onAssistantTextCompleted: ({ turnId, text }) => {
+        finalizeStreamingBubble(turnId, text);
+        setStatus("", "");
+      },
+      onAssistantAudio: ({ url }) => {
+        if (!els.realtimeAudio) return;
+        els.realtimeAudio.src = url;
+        els.realtimeAudio.play().catch(() => {});
+      },
+      onInterruption: () => {
+        const rt = state.realtime;
+        finalizeStreamingBubble(rt.turnId, rt.streamingText);
+        if (els.realtimeAudio) {
+          els.realtimeAudio.pause();
+          els.realtimeAudio.removeAttribute("src");
+        }
+        setStatus("", "");
+      },
+      onError: ({ code, message }) => {
+        els.composerError.textContent =
+          code === "mic_permission_denied"
+            ? "Доступ к микрофону запрещён. Разрешите доступ в настройках браузера."
+            : message || "Ошибка голосового режима";
+        setStatus("", "error");
+      },
+      onSessionClosed: () => {
+        showVoiceCaption("");
+      },
+    });
+    state.realtime.controller = controller;
+    return controller;
+  }
+
+  async function onMicClick() {
+    const RT = window.PandaRealtime;
+    if (!RT || !RT.isSupported()) {
+      els.composerError.textContent = "Голосовой режим не поддерживается в этом браузере.";
+      return;
+    }
+    els.composerError.textContent = "";
+    const controller = ensureRealtimeController();
+    if (controller.state === RT.STATE_IDLE || controller.state === RT.STATE_ERROR) {
+      if (!state.conversationId) await newChat();
+      await controller.start({ conversationId: state.conversationId, voiceId: state.realtime.preferredVoiceId });
+    } else if (controller.state === RT.STATE_LISTENING) {
+      controller.commit();
+    } else if (controller.state === RT.STATE_THINKING || controller.state === RT.STATE_SPEAKING) {
+      controller.interruptAndListen();
+    }
+  }
+
+  function openPersonalizationSettings() {
+    if (!state.personalizationDialog) return;
+    state.personalizationDialog.open((prefs) => {
+      state.realtime.preferredVoiceId = prefs.voice_id || "";
+      if (state.realtime.controller && state.realtime.controller.state !== window.PandaRealtime.STATE_IDLE) {
+        state.realtime.controller.selectVoice(prefs.voice_id);
+      }
+    });
+  }
+
   function bindEvents() {
     els.authSubmit.onclick = onAuth;
     els.logout.onclick = logout;
     els.newChat.onclick = () => newChat().catch((e) => { els.composerError.textContent = api.mapError(e); });
     els.sendBtn.onclick = sendMessage;
+    if (els.micBtn) els.micBtn.onclick = () => { onMicClick().catch((e) => { els.composerError.textContent = api.mapError(e); }); };
+    if (els.personalizationBtn) els.personalizationBtn.onclick = openPersonalizationSettings;
     els.approveBtn.onclick = onApprove;
     els.rejectBtn.onclick = onReject;
     els.cancelBtn.onclick = onCancel;
@@ -1109,6 +1310,15 @@
 
   async function boot() {
     initBrand();
+    if (window.PandaPersonalizationDialog) {
+      state.personalizationDialog = window.PandaPersonalizationDialog.create();
+    }
+    if (els.micBtn && (!window.PandaRealtime || !window.PandaRealtime.isSupported())) {
+      // Block 4.6/4.36: never show a control that can only ever fail --
+      // e.g. non-HTTPS/non-localhost origins where getUserMedia is not
+      // exposed at all, or browsers without MediaRecorder.
+      hide(els.micBtn);
+    }
     bindEvents();
     if (api.hasApiKey()) {
       try {

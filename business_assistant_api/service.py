@@ -145,9 +145,29 @@ class BusinessAssistantApiService:
         # Canonical artifact layer (Block 3.5) -- optional so existing callers
         # that never wire it (e.g. older tests) keep working unchanged.
         self.artifact_service = None
+        # Block 4.28: optional canonical personalization layer -- resolved
+        # fresh on every conversational turn (submit/submit_async below) so
+        # both the text chat pipeline AND the realtime voice pipeline
+        # (realtime.bridge, which also calls submit_async) get the exact
+        # same, single source of style/tone/length/language preference.
+        # None is safe (older tests/callers keep existing behavior).
+        self.personalization_service = None
 
     def close(self) -> None:
         self.store.close()
+
+    def _resolve_style_directive(self, *, tenant_id: str, owner_id: str) -> str:
+        if self.personalization_service is None:
+            return ""
+        try:
+            profile = self.personalization_service.resolve_style_profile(
+                tenant_id=tenant_id, owner_id=owner_id
+            )
+        except Exception:
+            # Best-effort: a personalization lookup failure must never break
+            # the already-working conversational reply path.
+            return ""
+        return profile.directive_text
 
     def _fail_conversation_unavailable(self, rec: ApiRequestRecord, exc: BusinessAssistantError) -> None:
         rec.status = ST_FAILED
@@ -396,6 +416,9 @@ class BusinessAssistantApiService:
                             owner_id=owner_id,
                             conversation_id=norm.conversation_id,
                         ),
+                        style_directive=self._resolve_style_directive(
+                            tenant_id=tenant, owner_id=owner_id
+                        ),
                     )
                 except BusinessAssistantError as exc:
                     if exc.code == BA_CONVERSATION_UNAVAILABLE:
@@ -471,6 +494,9 @@ class BusinessAssistantApiService:
                             tenant=tenant,
                             owner_id=owner_id,
                             conversation_id=norm.conversation_id,
+                        ),
+                        style_directive=self._resolve_style_directive(
+                            tenant_id=tenant, owner_id=owner_id
                         ),
                     )
                 except BusinessAssistantError as exc:

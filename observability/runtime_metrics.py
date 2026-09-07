@@ -221,6 +221,16 @@ def collect_operational_metrics(
     except Exception:
         artifact_counters = {}
 
+    # Block 4.25: realtime session lifecycle/latency counters, bucketed by
+    # the small fixed EVENT_NAMES/ERROR_CATEGORIES sets only (never
+    # session_id/conversation_id/tenant_id/transcript content).
+    try:
+        from realtime.metrics import REALTIME_METRICS
+
+        realtime_counters = REALTIME_METRICS.as_dict()
+    except Exception:
+        realtime_counters = {}
+
     # Scale 3.29/3.31: fleet-wide instance visibility, bounded (no per-tenant
     # cardinality; instance_id is a small, bounded set in practice).
     fleet_summary: dict[str, Any] = {}
@@ -284,6 +294,7 @@ def collect_operational_metrics(
         # denied counters, bucketed by artifact_kind/failure_category/
         # size_bucket only (never artifact_id/tenant_id/filename).
         "artifact_counters": artifact_counters,
+        "realtime_counters": realtime_counters,
         # Scale 3.29/3.31: fleet-wide instance visibility (bounded cardinality;
         # empty dict when no fleet_registry is configured -- single-instance
         # mode is unaffected).

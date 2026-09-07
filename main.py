@@ -271,6 +271,10 @@ from telegram_interface.router import configure_telegram_interface_router
 from voice_interface.config import voice_interface_enabled
 from voice_interface.runtime import build_voice_interface_runtime
 from voice_interface.router import configure_voice_interface_router
+from personalization.runtime import build_personalization_runtime
+from personalization.router import configure_personalization_router
+from realtime.runtime import build_realtime_runtime, realtime_enabled
+from realtime.router import configure_realtime_router
 from ui_chat.runtime import build_ui_chat_runtime
 from ui_chat.router import configure_ui_chat_router
 from operations_admin.runtime import build_operations_admin_runtime
@@ -326,6 +330,27 @@ if telegram_interface_enabled():
 voice_interface_runtime = None
 if voice_interface_enabled():
     voice_interface_runtime = build_voice_interface_runtime(ba_api=ba_api_runtime.service)
+# Block 4.28: one canonical personalization service, wired into the existing
+# BusinessAssistantApiService (resolved fresh per turn in submit()/
+# submit_async(), see business_assistant_api/service.py) so BOTH the text
+# chat pipeline and the realtime voice pipeline below share the exact same
+# style/tone/length/language/voice preference source.
+personalization_runtime = build_personalization_runtime()
+ba_api_runtime.service.personalization_service = personalization_runtime.service
+realtime_runtime = None
+if realtime_enabled():
+    # Block 4: realtime session bridge reuses ba_api_runtime.service directly
+    # (same object wire_panda_conversation_gateway() attaches the Panda
+    # conversation_gateway to below) -- voice turns dispatch through the
+    # exact same submit_async()/ToolGateway/HITL/idempotency boundary as text.
+    realtime_runtime = build_realtime_runtime(
+        ba_api=ba_api_runtime.service,
+        personalization=personalization_runtime.service,
+        # Block 4.37: the SAME shared cost ledger every other model/provider
+        # call already attributes to (agents.router_v2.RouterV2.finops) --
+        # not a second, realtime-only FinOps instance.
+        finops=getattr(router, "finops", None),
+    )
 ops_admin_runtime = build_operations_admin_runtime(
     side_effect_runtime=side_effect_runtime,
     router=router,
@@ -516,6 +541,9 @@ else:
     app.include_router(configure_telegram_interface_router(None, webhook_secret=""))
 if voice_interface_runtime is not None:
     app.include_router(configure_voice_interface_router(voice_interface_runtime.service))
+app.include_router(configure_personalization_router(personalization_runtime.service))
+if realtime_runtime is not None:
+    app.include_router(configure_realtime_router(realtime_runtime.bridge))
 _stripe_provider = _production_bundle.billing_provider if getattr(_production_bundle.billing_provider, "name", "") == "stripe" else None
 app.include_router(
     configure_production_integration_router(
