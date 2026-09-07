@@ -29,18 +29,27 @@ production are actually fixed at their source:
 4. `RouterPlaybackAckTests` -- the playback_event control frame (browser
    audio.play/ended ack) dispatches to the bridge.
 
-5. `DefectBContinuousDialogueLatencyTests` -- DEFECT B (voice mode must be
-   a real continuous dialogue, not request/wait/response): proves the ONE
-   proven root cause of "user stops talking -> long silent wait" (the
-   buffer-based partial-STT re-transcription firing on EVERY ~250ms audio
-   chunk, serializing into a backlog on the connection's single WebSocket
-   receive loop ahead of audio.commit) is now throttled; proves a
-   multi-sentence reply's TTS audio for the FIRST sentence streams to the
-   client before the LAST sentence has even been synthesized (real
-   streaming start, not "wait for everything"); and proves the full
-   per-turn DEFECT B latency timeline (speech_start .. listening_resumed)
-   is recorded with every required stage once a turn completes and the
-   client acks playback/listening-resumed.
+5. `DefectBContinuousDialogueLatencyTests` -- proves a multi-sentence
+   reply's TTS audio for the FIRST sentence streams to the client before
+   the LAST sentence has even been synthesized (real streaming start, not
+   "wait for everything"); and proves the full per-turn latency timeline
+   (speech_start .. listening_resumed) is recorded with every required
+   stage once a turn completes and the client acks playback/listening-
+   resumed.
+
+6. `PR22RootFixNoPerChunkSttTests` -- PR #22 "PRODUCTION ACCEPTANCE FAILED"
+   ROOT FIX: on_audio_chunk() (the hot path realtime/router.py's single
+   sequential WebSocket receive loop awaits for EVERY binary frame, ahead
+   of reading audio.commit/barge_in/session.close) must NEVER call the
+   real, paid, buffer-based STT provider -- the earlier "throttled partial
+   re-transcription" approach was still calling it repeatedly per
+   utterance (the actual reported "many /audio/transcriptions calls per
+   reply, /responses only appears later" production defect). Proves: 40
+   binary chunks -> audio.commit calls STT EXACTLY ONCE; chunk ingestion
+   stays fast even against a deliberately slow STT provider (structural
+   non-blocking proof, no live paid API calls); and a second turn produces
+   a second, independent STT call with no leftover audio bleeding across
+   turns.
 """
 
 from __future__ import annotations
@@ -51,7 +60,6 @@ import shutil
 import tempfile
 import time
 import unittest
-from unittest import mock
 
 from business_assistant.conversation_gateway import FakePandaConversationGateway
 from business_assistant_api.runtime import build_business_assistant_api_runtime
@@ -227,13 +235,14 @@ class SttTtsCallBoundaryTests(unittest.IsolatedAsyncioTestCase):
         turn_id = await bridge.on_audio_commit(session)
         await session.current_task
 
-        # STT called exactly once for the FINAL commit (the earlier
-        # on_audio_chunk call is a separate incremental-partial call, by
-        # design -- see realtime/bridge.py on_audio_chunk docstring).
-        commit_calls = [c for c in stt.calls if c["audio_len"] == len(b"some-real-recorded-bytes")]
-        self.assertGreaterEqual(len(commit_calls), 1)
-        for c in commit_calls:
-            self.assertEqual(c["mime_type"], "audio/webm;codecs=opus", "Boundary F: real negotiated mime type, not a hardcoded wav")
+        # Root fix (PR #22): on_audio_chunk never calls STT -- the ONE and
+        # ONLY STT call for this whole physical utterance happens at
+        # audio.commit.
+        self.assertEqual(len(stt.calls), 1)
+        self.assertEqual(stt.calls[0]["audio_len"], len(b"some-real-recorded-bytes"))
+        self.assertEqual(
+            stt.calls[0]["mime_type"], "audio/webm;codecs=opus", "Boundary F: real negotiated mime type, not a hardcoded wav"
+        )
 
         finals = [e for e in sink.events if e.type == "user.transcript.final"]
         committed = [e for e in sink.events if e.type == "user.turn.committed"]
@@ -273,14 +282,21 @@ class SttTtsCallBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(audio_completed.turn_id, turn_id)
         self.assertGreater(audio_completed.data["total_bytes"], 0, "TTS produced real, non-empty audio")
 
-    async def test_session_mime_type_defaults_to_webm_and_is_used_for_partial_transcription(self):
+    async def test_session_mime_type_defaults_to_webm_and_is_used_for_the_final_commit_transcription(self):
         stt = _SpyProvider(reply="")
         bridge = self._bridge(stt, _SpyTts())
         sink = NullSink()
         session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
         self.assertEqual(session.mime_type, "audio/webm")
 
+        # Root fix (PR #22): on_audio_chunk never calls STT, regardless of
+        # how many chunks arrive.
         await bridge.on_audio_chunk(session, b"chunk-1")
+        await bridge.on_audio_chunk(session, b"chunk-2")
+        self.assertEqual(stt.calls, [])
+
+        await bridge.on_audio_commit(session)
+        self.assertEqual(len(stt.calls), 1)
         self.assertEqual(stt.calls[-1]["mime_type"], "audio/webm")
 
 
@@ -329,7 +345,10 @@ class _TimedSpyTts:
 
 class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
     """DEFECT B -- voice mode must be a real continuous dialogue, not
-    request/wait/response. See module docstring section 5."""
+    request/wait/response. See module docstring section 5. (The original
+    "throttle the per-chunk partial-STT calls" mitigation tested here was
+    superseded by the PR #22 root fix -- on_audio_chunk no longer calls STT
+    at all; see PR22RootFixNoPerChunkSttTests below.)"""
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -359,36 +378,6 @@ class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
         chunks = _split_for_tts(text)
         self.assertGreater(len(chunks), 1, "a real multi-sentence reply must stream in more than one TTS call")
         self.assertEqual(" ".join(chunks).replace("  ", " "), text)
-
-    async def test_partial_stt_calls_are_throttled_to_bound_ws_receive_backlog(self):
-        # Root cause of "user stops talking -> long silent wait" (DEFECT B):
-        # a real STT provider call on EVERY ~250ms MediaRecorder chunk
-        # serializes into a backlog on this connection's single WS receive
-        # loop, so audio.commit is only READ after that backlog drains.
-        stt = _SpyProvider(reply="привет")
-        bridge = self._bridge(stt, _SpyTts())
-        sink = NullSink()
-        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
-
-        fake_now = [1_000.0]
-        with mock.patch("realtime.bridge.time.monotonic", side_effect=lambda: fake_now[0]):
-            # Ten rapid chunks with NO real-clock advance between them
-            # simulate the exact backlog scenario: many chunks queued up
-            # while the user is still talking.
-            for _ in range(10):
-                await bridge.on_audio_chunk(session, b"x")
-            self.assertEqual(
-                len(stt.calls),
-                1,
-                "only the FIRST chunk of a turn may call STT before the throttle window elapses",
-            )
-
-            # Recognized speech must still appear AS THE CONVERSATION
-            # PROGRESSES (DEFECT B point 2), not never again -- once the
-            # throttle window elapses, the next chunk calls STT again.
-            fake_now[0] += 1.0
-            await bridge.on_audio_chunk(session, b"x")
-            self.assertEqual(len(stt.calls), 2)
 
     async def test_multi_sentence_audio_streams_before_the_last_sentence_is_synthesized(self):
         reply = "Первое предложение подлиннее. Второе предложение тоже подлиннее. Третье подлиннее тоже."
@@ -421,41 +410,6 @@ class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
             "first audio must stream to the client before the FINAL sentence is synthesized",
         )
 
-    async def test_uncommitted_capture_stops_calling_stt_after_the_hard_ceiling_not_forever(self):
-        # PRODUCTION ACCEPTANCE FAILED follow-up defense-in-depth: even if a
-        # capture somehow never gets committed (client bug / dropped
-        # commit frame), partial re-transcription must not keep calling the
-        # real (paid) STT provider for the entire lifetime of the
-        # WebSocket -- it must stop after a bounded ceiling.
-        stt = _SpyProvider(reply="привет")
-        bridge = self._bridge(stt, _SpyTts())
-        sink = NullSink()
-        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
-
-        fake_now = [1_000.0]
-        with mock.patch("realtime.bridge.time.monotonic", side_effect=lambda: fake_now[0]):
-            await bridge.on_audio_chunk(session, b"x")  # first chunk: sets turn_started_monotonic
-            self.assertEqual(len(stt.calls), 1)
-
-            fake_now[0] += 1.0
-            await bridge.on_audio_chunk(session, b"x")
-            self.assertEqual(len(stt.calls), 2, "still calling STT well within the ceiling")
-
-            fake_now[0] += 25.0  # now ~26s since turn_started_monotonic -- past the 20s ceiling
-            with self.assertLogs("realtime.voice_diagnostics", level="INFO") as cm:
-                await bridge.on_audio_chunk(session, b"x")
-            capped = [
-                r
-                for r in cm.records
-                if getattr(r, "voice_event", {}).get("event") == "voice_capture_partial_stt_capped"
-            ]
-            self.assertEqual(len(capped), 1)
-            self.assertEqual(len(stt.calls), 2, "STT is no longer called once the uncommitted ceiling is exceeded")
-
-            fake_now[0] += 5.0
-            await bridge.on_audio_chunk(session, b"x")
-            self.assertEqual(len(stt.calls), 2, "stays capped, not just delayed, for the rest of this capture")
-
     async def test_full_turn_latency_timeline_records_every_defect_b_stage(self):
         reply = "Хорошо, а у тебя?"
         stt = _SpyProvider(reply="Привет, как дела?")
@@ -481,7 +435,6 @@ class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
 
         required_stages = [
             "speech_start",
-            "stt_partial",
             "speech_end",
             "stt_final",
             "turn_committed",
@@ -504,6 +457,168 @@ class DefectBContinuousDialogueLatencyTests(unittest.IsolatedAsyncioTestCase):
         # "where does real time go" evidence DEFECT B demands.
         values = [timeline[f"{s}_ms"] for s in required_stages]
         self.assertEqual(values, sorted(values), "latency timeline stages must be in non-decreasing chronological order")
+
+
+class PR22RootFixNoPerChunkSttTests(unittest.IsolatedAsyncioTestCase):
+    """PR #22 "PRODUCTION ACCEPTANCE FAILED" ROOT FIX.
+
+    Production/inspection of main proved the real architectural cause of
+    "one reply -> many /audio/transcriptions calls, /responses only shows
+    up later": on_audio_chunk() -- the hot path realtime/router.py's single
+    sequential WebSocket receive loop awaits for EVERY binary MediaRecorder
+    frame, ahead of reading the NEXT frame -- was calling the real, paid,
+    buffer-based STT provider (throttled, but still repeatedly) instead of
+    doing only cheap local buffering. The canonical turn invariant is: N
+    binary audio chunks -> 1 audio.commit -> 1 final STT provider request
+    -> 1 user turn -> 1 assistant response -> TTS -> playback -> LISTENING.
+    These tests use fake/counting providers only -- no live paid API calls.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.rt = build_business_assistant_api_runtime(
+            db_path=os.path.join(self.tmp, "ba.sqlite"), with_integration=False
+        )
+        self.pz_store = SqlitePersonalizationStore(os.path.join(self.tmp, "pz.sqlite"))
+        self.pz = PersonalizationService(store=self.pz_store, tts=FakeTextToSpeechProvider())
+        self.rt.service.personalization_service = self.pz
+
+    def tearDown(self):
+        self.pz.close()
+        self.rt.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _bridge(self, stt, tts) -> RealtimeConversationBridge:
+        return RealtimeConversationBridge(ba_api=self.rt.service, stt=stt, tts=tts, personalization=self.pz)
+
+    async def test_40_binary_audio_chunks_then_commit_calls_stt_exactly_once(self):
+        # The main required proof: a real MediaRecorder emits a binary
+        # chunk roughly every 250ms, so a several-second utterance is
+        # dozens of chunks. Regardless of chunk count, the STT provider
+        # must be called EXACTLY ONCE, at audio.commit -- never per chunk.
+        stt = _SpyProvider(reply="Привет, как дела?")
+        bridge = self._bridge(stt, _SpyTts())
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        for _ in range(40):
+            await bridge.on_audio_chunk(session, b"chunk-bytes")
+        self.assertEqual(stt.calls, [], "on_audio_chunk must never call STT, no matter how many chunks arrive")
+
+        turn_id = await bridge.on_audio_commit(session)
+        self.assertEqual(len(stt.calls), 1, "exactly ONE final STT call for the whole physical utterance")
+        await session.current_task
+
+        committed = [e for e in sink.events if e.type == "user.turn.committed"]
+        finals = [e for e in sink.events if e.type == "user.transcript.final"]
+        self.assertEqual(len(committed), 1)
+        self.assertEqual(len(finals), 1)
+        self.assertEqual(committed[0].turn_id, turn_id)
+
+    async def test_on_audio_chunk_ingestion_stays_fast_even_against_a_slow_stt_provider(self):
+        # Proves audio.commit/barge_in/session.close are never blocked by a
+        # remote STT round trip triggered from on_audio_chunk: a
+        # deliberately slow (but still fake/offline) provider is used so
+        # that IF on_audio_chunk ever called it, 40 chunks would take
+        # seconds; because on_audio_chunk does only cheap local buffering,
+        # ingesting all 40 chunks stays near-instant regardless of STT
+        # provider speed.
+        class _SlowProvider:
+            def __init__(self):
+                self.calls = 0
+
+            def transcribe(self, *, audio: bytes, mime_type: str, language: str = "auto") -> str:
+                self.calls += 1
+                time.sleep(0.05)
+                return "привет"
+
+        stt = _SlowProvider()
+        bridge = self._bridge(stt, _SpyTts())
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        started = time.monotonic()
+        for _ in range(40):
+            await bridge.on_audio_chunk(session, b"x")
+        elapsed = time.monotonic() - started
+        self.assertLess(
+            elapsed,
+            0.2,
+            "on_audio_chunk must stay cheap and non-blocking regardless of STT provider speed "
+            "(40 chunks * 50ms/call would be >= 2s if it called STT per chunk)",
+        )
+        self.assertEqual(stt.calls, 0)
+
+        await bridge.on_audio_commit(session)
+        self.assertEqual(stt.calls, 1)
+
+    async def test_second_turn_calls_stt_again_with_no_leftover_audio_between_turns(self):
+        stt = _SpyProvider(reply="первый вопрос")
+        bridge = self._bridge(stt, _SpyTts())
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        await bridge.on_audio_chunk(session, b"turn-1-bytes")
+        await bridge.on_audio_commit(session)
+        await session.current_task
+        self.assertEqual(bytes(session.audio_buffer), b"", "no leftover audio bytes remain after commit")
+
+        stt.reply = "второй вопрос"
+        await bridge.on_audio_chunk(session, b"turn-2-bytes-longer")
+        await bridge.on_audio_commit(session)
+        await session.current_task
+        self.assertEqual(bytes(session.audio_buffer), b"", "no leftover audio bytes remain after the second commit")
+
+        self.assertEqual(len(stt.calls), 2, "exactly one STT call per physical utterance, across turns")
+        self.assertEqual(stt.calls[0]["audio_len"], len(b"turn-1-bytes"))
+        self.assertEqual(
+            stt.calls[1]["audio_len"],
+            len(b"turn-2-bytes-longer"),
+            "turn 2's audio must be exactly turn 2's bytes, never turn 1's leftover buffer",
+        )
+
+        finals = [e for e in sink.events if e.type == "user.transcript.final"]
+        self.assertEqual([e.data["text"] for e in finals], ["первый вопрос", "второй вопрос"])
+        committed = [e for e in sink.events if e.type == "user.turn.committed"]
+        self.assertEqual(len(committed), 2)
+        self.assertEqual(len(session.committed_turn_ids), 2)
+
+    async def test_final_stt_reaches_assistant_text_and_tts_and_playback_can_resume_listening(self):
+        # End-to-end proof of: final STT -> user.turn.committed -> assistant
+        # processing -> assistant.text -> TTS -> assistant.audio -> browser
+        # playback -> LISTENING, all on one committed turn.
+        reply = "Хорошо, а у тебя?"
+        stt = _SpyProvider(reply="Привет, как дела?")
+        tts = _SpyTts()
+        self.rt.service.ba.conversation_gateway = FakePandaConversationGateway(response=reply)
+        bridge = self._bridge(stt, tts)
+        sink = NullSink()
+        session = await bridge.create_session(tenant_id="t1", owner_id="u1", sink=sink)
+
+        await bridge.on_audio_chunk(session, b"audio-bytes")
+        turn_id = await bridge.on_audio_commit(session)
+        await session.current_task
+
+        self.assertEqual(len(stt.calls), 1)
+        text_completed = next(e for e in sink.events if e.type == "assistant.text.completed")
+        self.assertEqual(text_completed.data["text"], reply)
+        self.assertEqual(len(tts.calls), 1)
+        self.assertEqual(tts.calls[0]["text"], reply)
+        audio_completed = next(e for e in sink.events if e.type == "assistant.audio.completed")
+        self.assertEqual(audio_completed.turn_id, turn_id)
+        self.assertGreater(audio_completed.data["total_bytes"], 0)
+
+        # Client acks that it actually played the audio and is listening
+        # again -- the bridge must accept this without error and log the
+        # completed per-turn latency timeline.
+        bridge.record_playback_event(session, stage="started", turn_id=turn_id)
+        with self.assertLogs("realtime.voice_diagnostics", level="INFO") as cm:
+            bridge.record_playback_event(session, stage="listening_resumed", turn_id=turn_id)
+        timeline_records = [
+            r for r in cm.records if getattr(r, "voice_event", {}).get("event") == "voice_turn_latency_timeline"
+        ]
+        self.assertEqual(len(timeline_records), 1)
+        self.assertIn("listening_resumed_ms", timeline_records[0].voice_event)
 
 
 if __name__ == "__main__":

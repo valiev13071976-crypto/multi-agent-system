@@ -103,10 +103,14 @@ class RealtimeBridgeTestBase(unittest.IsolatedAsyncioTestCase):
 
 
 class VoiceTurnLifecycleTests(RealtimeBridgeTestBase):
-    """Contract A/B/C: partial->final->one committed turn; streaming text;
-    voice+text correspond to the SAME assistant turn."""
+    """Contract A/B/C: one final transcript->one committed turn; streaming
+    text; voice+text correspond to the SAME assistant turn."""
 
-    async def test_a_partial_then_final_then_exactly_one_committed_turn(self):
+    async def test_a_final_transcript_then_exactly_one_committed_turn(self):
+        # Root fix (PR #22 production-acceptance-failed): on_audio_chunk
+        # never calls STT and never emits user.transcript.partial for this
+        # buffer-based provider path -- the ONLY STT call/transcript per
+        # physical utterance is the ONE final call made at audio.commit.
         self.rt.service.ba.conversation_gateway = FakePandaConversationGateway(response="Привет!")
         bridge = self._bridge()
         sink = NullSink()
@@ -121,7 +125,7 @@ class VoiceTurnLifecycleTests(RealtimeBridgeTestBase):
         finals = [e for e in sink.events if e.type == "user.transcript.final"]
         self.assertEqual(len(committed), 1)
         self.assertEqual(len(finals), 1)
-        self.assertGreaterEqual(len(partials), 1)
+        self.assertEqual(partials, [], "no per-chunk partial re-transcription against the paid STT provider")
         self.assertEqual(committed[0].turn_id, turn_id)
         self.assertEqual(len(session.committed_turn_ids), 1)
 

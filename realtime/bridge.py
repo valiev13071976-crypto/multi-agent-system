@@ -19,14 +19,28 @@ SENTENCE of the one canonical reply instead of once for the whole reply, so
 audio for an earlier sentence streams to the client while a later sentence
 is still being synthesized -- genuinely incremental, not fabricated.
 
-DEFECT B root-cause fix: the proven cause of "user stops talking -> long
-silent wait" was NOT assistant/TTS latency -- it was on_audio_chunk calling
-the real STT provider on EVERY ~250ms MediaRecorder chunk, which serializes
-into a backlog on this connection's single WebSocket receive loop
-(realtime/router.py's `while True: await websocket.receive()`) ahead of the
-eventual audio.commit control frame. See _PARTIAL_STT_MIN_INTERVAL_SECONDS
-below. A per-turn latency timeline (speech_start .. listening_resumed,
-recorded via _mark_latency/_latency_timeline_ms and logged as
+DEFECT B / PR #22 production-acceptance-failed root-cause fix: the proven
+cause of "user stops talking -> long silent wait" and "many /audio/
+transcriptions calls per single reply" was on_audio_chunk calling the real,
+paid, buffer-based STT provider (ui_chat.voice.stt.SpeechToTextProvider --
+there is no real streaming STT provider capability in this project) on
+EVERY/periodic MediaRecorder chunk to fake an "incremental partial
+transcript" by re-uploading the whole growing recording. This is not real
+streaming transcription -- it is repeated full network re-transcription,
+and it serializes real network round trips on this connection's single
+WebSocket receive loop (realtime/router.py's `while True: await
+websocket.receive()`) AHEAD of the eventual audio.commit/barge_in/
+session.close control frames, which is what made even those control frames
+slow to be read.
+
+Root fix: on_audio_chunk() below does ONLY cheap, local, non-blocking
+buffering -- it NEVER calls the STT provider. Partial transcript
+(EV_USER_TRANSCRIPT_PARTIAL) is intentionally NOT produced for this
+provider path rather than faked or paid for. The ONLY STT provider call
+per physical utterance is the ONE final call in on_audio_commit(), after
+the client's own VAD has already determined end-of-turn. A per-turn
+latency timeline (speech_start .. listening_resumed, recorded via
+_mark_latency/_latency_timeline_ms and logged as
 "voice_turn_latency_timeline") makes any FUTURE real bottleneck provable
 from production logs alone instead of guessed at.
 """
@@ -87,7 +101,6 @@ from realtime.events import (
     EV_TOOL_STARTED,
     EV_USER_AUDIO_STARTED,
     EV_USER_TRANSCRIPT_FINAL,
-    EV_USER_TRANSCRIPT_PARTIAL,
     EV_USER_TURN_COMMITTED,
     STATUS_ANALYZING_FILE,
     STATUS_GENERATING_IMAGE,
@@ -100,31 +113,6 @@ from realtime.state_machine import SessionEvent, SessionState
 
 _TEXT_CHUNK_CHARS = 48
 _AUDIO_CHUNK_BYTES = 4096
-# DEFECT B (real continuous dialogue, not request/wait/response): a real STT
-# provider call is a real network round trip. Firing one on EVERY ~250ms
-# MediaRecorder chunk (the previous behavior) queues up a serialized backlog
-# on this connection's single WebSocket receive loop, so by the time the
-# user stops talking and the client's audio.commit control frame is sent, the
-# server is often still draining that backlog before it even reads the
-# commit -- this IS the "long wait after speaking" production defect, not
-# assistant/TTS latency. Throttling re-transcription to at most once per
-# this interval keeps partial transcripts genuinely incremental (point 2)
-# while bounding the backlog so audio.commit is read with minimal delay
-# (point 3/4). Not a fixed artificial response-delay timer -- it only caps
-# how often we re-call STT on the still-growing in-progress buffer.
-_PARTIAL_STT_MIN_INTERVAL_SECONDS = 0.7
-# PRODUCTION ACCEPTANCE FAILED follow-up (turn-lifecycle root cause, not
-# another rate throttle): the primary fix for "uncontrolled /audio/
-# transcriptions loop" is the client-side fix (realtime.js's adaptive VAD
-# noise floor + VAD_MAX_TURN_MS forward-progress safety net), which
-# guarantees audio.commit is sent within a bounded time. This is a
-# server-side DEFENSE-IN-DEPTH tied directly to the canonical turn
-# lifecycle invariant ("one physical utterance -> one audio.commit"): if a
-# single capture somehow never gets committed (a client bug, a dropped
-# commit frame, ...) partial re-transcription must still have a hard
-# lifetime ceiling instead of continuing to bill/call the real STT provider
-# for as long as the WebSocket happens to stay open.
-_PARTIAL_STT_MAX_UNCOMMITTED_SECONDS = 20.0
 # DEFECT B point 5 (minimal time-to-first-audio): the TTS provider interface
 # is buffer-based (one synthesize() call -> one complete audio buffer), so a
 # single call for a long, multi-sentence reply blocks first_audio_chunk on
@@ -216,8 +204,8 @@ def _split_for_tts(text: str) -> list[str]:
 
 def _mark_latency(session: RealtimeSession, stage: str) -> None:
     """Records the FIRST occurrence of a named DEFECT B latency stage for
-    the turn currently in flight. Never overwrites (a throttled/repeated
-    stt_partial, for example, must not distort the timeline)."""
+    the turn currently in flight. Never overwrites a later duplicate call
+    for the same stage."""
 
     if stage not in session.turn_latency_marks:
         session.turn_latency_marks[stage] = time.monotonic()
@@ -476,6 +464,26 @@ class RealtimeConversationBridge:
     # --- voice input ---------------------------------------------------
 
     async def on_audio_chunk(self, session: RealtimeSession, chunk: bytes) -> None:
+        """PR #22 production-acceptance-failed ROOT FIX: this is the hot
+        path realtime/router.py's single sequential WebSocket receive loop
+        awaits for EVERY binary frame, ahead of reading the NEXT frame --
+        including the audio.commit/barge_in/session.close control frames a
+        real user is waiting on. It MUST stay cheap, local, and
+        non-blocking: buffer the bytes, update state, done. It must NEVER
+        call the (paid, network, buffer-based) STT provider -- there is no
+        real streaming STT provider capability in this project
+        (ui_chat.voice.stt.SpeechToTextProvider.transcribe() takes the
+        WHOLE audio buffer and returns one complete string), so calling it
+        here on every/periodic chunk would not be real incremental
+        transcription, it would be repeatedly re-uploading the entire
+        growing recording -- exactly the previously reported "many
+        /audio/transcriptions calls per single reply" defect. Partial
+        transcript (user.transcript.partial) is intentionally NOT produced
+        for this provider path rather than faked or paid for; the ONLY STT
+        call per physical utterance is the ONE final call in
+        on_audio_commit(), below, made after the client's own VAD has
+        already decided the turn is over."""
+
         if not chunk:
             return
         if session.state_machine.state in _INTERRUPTIBLE_STATES:
@@ -485,13 +493,10 @@ class RealtimeConversationBridge:
         session.audio_buffer.extend(chunk)
         if first:
             session.turn_started_monotonic = time.monotonic()
-            session.first_transcript_recorded = False
-            session.last_partial_stt_monotonic = None
-            session.partial_stt_capped_logged = False
-            # DEFECT B latency acceptance: a fresh capture is a fresh turn --
-            # reset the per-turn stage timeline so a previous turn's marks
-            # (or a barge-in's aborted turn, guaranteed finished by the
-            # barge_in() await above) never bleed into this one.
+            # A fresh capture is a fresh turn -- reset the per-turn latency
+            # timeline so a previous turn's marks (or a barge-in's aborted
+            # turn, guaranteed finished by the barge_in() await above)
+            # never bleed into this one.
             session.turn_latency_marks = {}
             _mark_latency(session, "speech_start")
             await session.sink.send_event(session.events.build(EV_USER_AUDIO_STARTED))
@@ -499,73 +504,12 @@ class RealtimeConversationBridge:
         if session.state_machine.can(SessionEvent.AUDIO_STARTED):
             session.state_machine.transition(SessionEvent.AUDIO_STARTED)
 
-        # Block 4.7/4.8: incremental partial transcript. The current STT
-        # provider interface (ui_chat.voice.stt.SpeechToTextProvider) is
-        # buffer-based, not natively streaming, so "incremental" here means
-        # re-transcribing the growing buffer on each chunk with the SAME
-        # provider a final commit uses -- correct and deterministic, but a
-        # native streaming STT provider would replace this with true
-        # token-level partials without changing the event contract.
-        #
-        # DEFECT B root cause fix: throttled to at most one real STT call per
-        # _PARTIAL_STT_MIN_INTERVAL_SECONDS (see module docstring above) so a
-        # long utterance's many ~250ms chunks cannot serialize into a
-        # backlog on this connection's single WS receive loop ahead of the
-        # eventual audio.commit control frame.
-        now = time.monotonic()
-        if (
-            session.turn_started_monotonic is not None
-            and (now - session.turn_started_monotonic) > _PARTIAL_STT_MAX_UNCOMMITTED_SECONDS
-        ):
-            # Defense-in-depth ceiling (see module constant docstring): this
-            # capture has been open, uncommitted, for longer than any real
-            # utterance should ever take -- stop calling the (paid) STT
-            # provider entirely until a commit/new turn resets the ceiling,
-            # rather than continuing an unbounded loop of transcription
-            # calls for the lifetime of the WebSocket connection.
-            if not session.partial_stt_capped_logged:
-                session.partial_stt_capped_logged = True
-                REALTIME_METRICS.inc_error("partial_stt_capped")
-                _log_voice_event(
-                    "voice_capture_partial_stt_capped",
-                    session=session,
-                    elapsed_s=round(now - session.turn_started_monotonic, 1),
-                )
-            return
-        due = (
-            session.last_partial_stt_monotonic is None
-            or (now - session.last_partial_stt_monotonic) >= _PARTIAL_STT_MIN_INTERVAL_SECONDS
-        )
-        if not due:
-            return
-        session.last_partial_stt_monotonic = now
-        try:
-            partial = normalize_transcript(
-                self.stt.transcribe(
-                    audio=bytes(session.audio_buffer),
-                    mime_type=session.mime_type,
-                    language=session.language_hint,
-                )
-            )
-        except Exception:
-            partial = ""
-        if partial and partial != session.last_partial_transcript:
-            session.last_partial_transcript = partial
-            _mark_latency(session, "stt_partial")
-            await session.sink.send_event(session.events.build(EV_USER_TRANSCRIPT_PARTIAL, text=partial))
-            if not session.first_transcript_recorded and session.turn_started_monotonic is not None:
-                REALTIME_METRICS.mic_to_first_transcript.observe(
-                    (time.monotonic() - session.turn_started_monotonic) * 1000
-                )
-                session.first_transcript_recorded = True
-
     async def on_audio_commit(self, session: RealtimeSession, *, client_turn_id: str = "") -> str | None:
         if not session.audio_buffer:
             _log_voice_event("voice_capture_completed", session=session, audio_bytes=0, stage="empty_audio")
             raise RealtimeError(RT_AUDIO_EMPTY, http_status=422)
         audio_bytes = bytes(session.audio_buffer)
         session.audio_buffer.clear()
-        session.last_partial_transcript = ""
         # DEFECT B latency acceptance: this is the moment the CLIENT told us
         # it auto-detected end-of-utterance (VAD silence) and stopped
         # capturing -- the "speech_end" stage of the timeline.
@@ -596,6 +540,14 @@ class RealtimeConversationBridge:
             REALTIME_METRICS.inc("stt_call")
             self._record_speech_usage(session, capability="stt")
             _mark_latency(session, "stt_final")
+            if session.turn_started_monotonic is not None:
+                # Root fix: there is no mid-turn partial transcript anymore
+                # (see on_audio_chunk) -- this metric now genuinely measures
+                # mic-start to the ONE real transcript this provider path
+                # ever produces, instead of a fabricated "partial" datapoint.
+                REALTIME_METRICS.mic_to_first_transcript.observe(
+                    (time.monotonic() - session.turn_started_monotonic) * 1000
+                )
             _log_voice_event(
                 "stt_request_completed",
                 session=session,
