@@ -30,6 +30,22 @@
  * during confirmed silence, and additionally guarantees forward progress
  * with VAD_MAX_TURN_MS regardless of how the floor reads in any given
  * real environment.
+ *
+ * PR #24 lifecycle defect closure (safe barge-in ownership, section 3):
+ * detecting SUSTAINED speech energy while Panda is thinking/speaking is
+ * this client's OWN confirmation that the user is deliberately
+ * interrupting -- interruptAndListen() sends the explicit `barge_in`
+ * control frame for that. But sending it does NOT itself transfer turn
+ * ownership: the server is the sole authority that actually cancels the
+ * active presentation, and this client only opens a new authoritative
+ * LISTENING capture (re-arming the mic) once the server's own
+ * "interruption" acknowledgement event actually arrives -- never
+ * optimistically before that (see interruptAndListen() and the
+ * "interruption" case in _onTextFrame() below). getUserMedia also
+ * explicitly requests browser-native echo cancellation/noise suppression
+ * (the standard, zero-new-engine mechanism for exactly this problem) so
+ * Panda's own TTS playback bleeding acoustically into the mic is far less
+ * likely to be misread by the VAD as the user barging in on herself.
  */
 (function (global) {
   const STATE_IDLE = "idle";
@@ -132,6 +148,14 @@
       this.conversationId = null;
       this.voiceId = null;
       this._pendingAudioTurnId = null;
+      // PR #24 section 6: the turn_id this client currently considers
+      // AUTHORITATIVE (set the moment the server commits a NEW turn,
+      // cleared the moment that turn is interrupted) -- independent of
+      // whether that turn has sent any assistant.audio.delta yet, so a
+      // turn whose reply happens to produce zero audio bytes is still
+      // correctly recognized as authoritative when its own
+      // assistant.audio.completed arrives.
+      this._activeTurnId = null;
       this._audioChunks = [];
       this._negotiatedMimeType = "";
       this._muted = false;
@@ -166,7 +190,14 @@
       if (this.state !== STATE_IDLE && this.state !== STATE_ERROR) return;
       this._setState(STATE_CONNECTING);
       try {
-        this.mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        // PR #24 section 3 (echo/self-interruption protection): explicit,
+        // standard browser-native AEC/noise-suppression constraints
+        // instead of relying on undefined/varying `{audio: true}` defaults
+        // -- the minimum existing-architecture-compatible mechanism for
+        // "Panda's own playback bleeding into the mic", no new VAD engine.
+        this.mediaStream = await navigator.mediaDevices.getUserMedia({
+          audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+        });
       } catch (e) {
         this._setState(STATE_ERROR);
         if (this.handlers.onError) {
@@ -226,6 +257,11 @@
           if (h.onPartialTranscript) h.onPartialTranscript(data.text || "");
           break;
         case "user.turn.committed":
+          // PR #24 section 6: THIS turn is now the authoritative
+          // presentation owner for the session -- recorded independently
+          // of audio deltas so the staleness check below works even for a
+          // reply that produces zero audio bytes.
+          this._activeTurnId = turnId;
           this._setState(STATE_THINKING);
           if (h.onUserTurnCommitted) h.onUserTurnCommitted({ turnId, text: data.text || "", modality: data.modality || "voice" });
           break;
@@ -243,6 +279,14 @@
           this._pendingAudioTurnId = turnId;
           break;
         case "assistant.audio.completed":
+          // PR #24 section 6 (stale client completion): a completion
+          // belonging to an OLD/interrupted turn must never return the
+          // browser to LISTENING (or flush its audio) while a NEWER turn
+          // already owns the session -- only the CURRENT authoritative
+          // turn (_activeTurnId, set at user.turn.committed and cleared at
+          // interruption) may drive the normal PLAYBACK -> LISTENING
+          // transition.
+          if (turnId !== this._activeTurnId) break;
           this._finalizeAudio(turnId);
           // Continuous voice mode (ChatGPT-parity defect closure): Panda
           // automatically returns to listening -- the user never presses a
@@ -258,8 +302,25 @@
         case "interruption":
           this._audioChunks = [];
           this._pendingAudioTurnId = null;
+          // The interrupted turn is no longer authoritative -- a stale
+          // assistant.audio.completed for it arriving later must be
+          // ignored (PR #24 section 6), never mistaken for the NEXT turn's
+          // real completion.
+          this._activeTurnId = null;
           if (h.onInterruption) h.onInterruption({ turnId });
+          // PR #24 section 3: ownership transfers to THIS client only HERE
+          // -- the server's explicit acknowledgement that the active
+          // presentation has actually been cancelled -- never
+          // optimistically inside interruptAndListen() before this
+          // arrives. This is what opens the new authoritative LISTENING
+          // capture (re-arming the mic) for barge-in specifically; every
+          // other interruption source (e.g. a future text-message-driven
+          // barge-in) safely gets the same well-defined transition.
+          this._sawSpeechThisTurn = true; // the interrupting utterance is already under way
+          this._vadSilenceSince = null;
+          this._speechStartedAt = Date.now();
           this._setState(STATE_LISTENING);
+          if (!this._muted) this._startRecording();
           break;
         case "error":
           if (h.onError) h.onError({ code: data.code, message: data.message });
@@ -496,18 +557,20 @@
       this._send({ type: "audio.commit", client_turn_id: uuid() });
     }
 
-    /** Stops Panda and starts listening for the next turn immediately
-     * (Block 4.13 barge-in) -- called automatically by VAD once sustained
-     * speech is detected while Panda is thinking/speaking, or manually via
-     * a tap on the voice orb as an explicit fallback. */
+    /** Requests Panda stop and hand back the turn (Block 4.13 barge-in) --
+     * called automatically by VAD once sustained speech is detected while
+     * Panda is thinking/speaking, or manually via a tap on the voice orb
+     * as an explicit fallback. PR #24 section 3 (safe barge-in ownership):
+     * this ONLY sends the explicit `barge_in` control frame -- it does NOT
+     * assume ownership transfers immediately. The server is the sole
+     * cancellation authority; this client opens its new authoritative
+     * LISTENING capture only once the server's "interruption"
+     * acknowledgement actually arrives (see the "interruption" case in
+     * _onTextFrame() above), never optimistically before that. */
     interruptAndListen() {
       if (this.state !== STATE_THINKING && this.state !== STATE_SPEAKING) return;
       this._send({ type: "barge_in" });
       this._vadSpeechSince = null;
-      this._sawSpeechThisTurn = true; // the interrupting utterance is already under way
-      this._speechStartedAt = Date.now();
-      this._setState(STATE_LISTENING);
-      if (!this._muted) this._startRecording();
     }
 
     /** Pauses the user's microphone capture without ending the voice
