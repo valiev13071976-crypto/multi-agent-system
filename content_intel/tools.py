@@ -44,6 +44,44 @@ class ContentIntelToolAdapter:
                 project_id=str(args.get("project_id") or ""),
                 rows=list(args.get("observations") or []),
             )
+        if op == "create":
+            # Block 5.3: single chat-facing entry point composing Search/
+            # Acquisition -> Research -> Content generation -> Review ->
+            # Artifact in one governed tool call (mirrors ``scrape.extract``
+            # for Block 5.2). A ``_read_desc`` operation (see
+            # ``content_create_descriptor``'s docstring) -- content
+            # generation only ever writes to content_intel's own
+            # tenant-scoped store and the canonical ArtifactService, never
+            # an external system of record, so it must not require the
+            # write-execution (autonomy-gate/HITL/idempotency-executor)
+            # pipeline reserved for live-business-mutating actions.
+            objective = str(args.get("objective") or args.get("topic") or "").strip()
+            if not objective:
+                raise ToolArgumentInvalidError("objective_required")
+            urls = tuple(str(u).strip() for u in (args.get("urls") or ()) if str(u or "").strip())
+            try:
+                assert_sync_content_allowed(item_count=1, bulk=bool(args.get("bulk")))
+            except ContentBatchRequired as exc:
+                raise ToolArgumentInvalidError(str(exc.code)) from exc
+            return await self._svc.create_content_from_request(
+                tenant_id=tenant,
+                owner_id=str(getattr(request, "user_id", "") or ""),
+                conversation_id=str(args.get("conversation_id") or ""),
+                request_id=str(getattr(request, "request_id", "") or ""),
+                objective=objective,
+                channel=str(args.get("channel") or "article"),
+                content_type=str(args.get("content_type") or "article"),
+                urls=urls,
+                evidence_rows=list(args.get("evidence") or []),
+            )
+        if op == "export_artifact":
+            return self._svc.export_asset_artifact(
+                tenant_id=tenant,
+                version_id=str(args.get("asset_version_id") or ""),
+                owner_id=str(getattr(request, "user_id", "") or ""),
+                conversation_id=str(args.get("conversation_id") or ""),
+                request_id=str(getattr(request, "request_id", "") or ""),
+            )
         raise ToolNotFoundError("operation_not_supported")
 
     async def execute_write(self, request, context) -> dict:
@@ -54,17 +92,31 @@ class ContentIntelToolAdapter:
         op = request.operation
         if op == "research":
             rows = list(args.get("evidence") or [])
+            urls = tuple(str(u).strip() for u in (args.get("urls") or ()) if str(u or "").strip())
             try:
-                assert_sync_content_allowed(item_count=len(rows), bulk=bool(args.get("bulk")))
+                assert_sync_content_allowed(
+                    item_count=len(rows) + len(urls), bulk=bool(args.get("bulk"))
+                )
             except ContentBatchRequired as exc:
                 raise ToolArgumentInvalidError(str(exc.code)) from exc
-            report = self._svc.research(
-                tenant_id=tenant,
-                project_id=str(args.get("project_id") or ""),
-                objective_id=str(args.get("objective_id") or ""),
-                evidence_rows=rows,
-                bulk=bool(args.get("bulk")),
-            )
+            if urls:
+                # Block 5.3: Search/Acquisition -> Research handoff.
+                report = await self._svc.research_from_web(
+                    tenant_id=tenant,
+                    project_id=str(args.get("project_id") or ""),
+                    objective_id=str(args.get("objective_id") or ""),
+                    urls=urls,
+                    evidence_rows=rows,
+                    bulk=bool(args.get("bulk")),
+                )
+            else:
+                report = self._svc.research(
+                    tenant_id=tenant,
+                    project_id=str(args.get("project_id") or ""),
+                    objective_id=str(args.get("objective_id") or ""),
+                    evidence_rows=rows,
+                    bulk=bool(args.get("bulk")),
+                )
             return {"report_id": report.report_id, "grounding": report.grounding}
         if op == "create_strategy":
             strategy = self._svc.create_strategy(
@@ -88,6 +140,7 @@ class ContentIntelToolAdapter:
                 channel=str(args.get("channel") or "social"),
                 objective=str(args.get("objective") or ""),
                 product_facts=dict(args.get("product_facts") or {}),
+                research_report_id=str(args.get("research_report_id") or "") or None,
             )
             return {"asset_version_id": asset.version_id, "status": asset.status}
         if op == "generate_media":

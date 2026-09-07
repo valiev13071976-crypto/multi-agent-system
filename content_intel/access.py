@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from content_intel.errors import CONTENT_ACCESS_DENIED, ContentIntelError
+from content_intel.errors import CONTENT_CROSS_TENANT, ContentIntelError
 from security.tenant import normalize_tenant_id, tenants_match
 
 

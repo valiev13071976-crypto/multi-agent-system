@@ -32,6 +32,7 @@ def build_content_intelligence_runtime(
     store=None,
     db_path: str | None = None,
     product_media_service=None,
+    artifact_service=None,
 ) -> ContentIntelligenceRuntime | None:
     if not content_intel_enabled(env):
         return None
@@ -44,5 +45,6 @@ def build_content_intelligence_runtime(
         tool_gateway=tool_gateway,
         observability=observability,
         product_media_service=product_media_service,
+        artifact_service=artifact_service,
     )
     return ContentIntelligenceRuntime(service=service, enabled=True)
