@@ -25,6 +25,27 @@ class DataIntelToolAdapter:
     def _tenant(self, request) -> str:
         return str(request.tenant_id or "legacy-default")
 
+    def _spreadsheet_refs(self, args: dict) -> list[dict]:
+        refs = list(args.get("attachment_refs") or [])
+        return [r for r in refs if isinstance(r, dict) and str(r.get("kind") or "") == "spreadsheet"]
+
+    def _ingest_attachment(self, ref: dict, *, tenant: str) -> dict:
+        """Fetch trusted attachment bytes via ArtifactService and ingest them
+        (Block 5.1 artifact integration: attachment -> authorized source
+        artifact -> dataset, never a second/parallel upload path)."""
+
+        artifact_service = getattr(self._svc, "artifact_service", None)
+        if artifact_service is None:
+            raise ToolArgumentInvalidError()
+        rec, blob = artifact_service.get_blob(
+            tenant_id=tenant, artifact_id=str(ref.get("artifact_id") or "")
+        )
+        return self._svc.ingest(
+            blob,
+            filename=rec.safe_filename or str(ref.get("filename") or "data.xlsx"),
+            tenant_id=tenant,
+        )
+
     async def execute_read(self, request, context) -> dict:
         if self._svc is None:
             raise ToolNotFoundError("tool_unavailable")
@@ -150,6 +171,94 @@ class DataIntelToolAdapter:
                     **{k: v for k, v in result.items() if k != "content"},
                     "content_b64": base64.b64encode(content).decode("ascii") if content else "",
                 }
+            if op == "assist":
+                return self._assist(args, request, tenant)
+            if op == "compare_workbooks":
+                return self._compare_workbooks(args, request, tenant)
             raise ToolArgumentInvalidError()
         except DataIntelError as exc:
             raise ToolError(exc.reason) from exc
+
+    def _assist(self, args: dict, request, tenant: str) -> dict:
+        """Block 5.1 chat-facing entry point: ingest a newly attached
+        spreadsheet if present (or continue an existing ``dataset_id``),
+        compile the free-text ``text`` into a bounded operation plan, apply
+        it, and optionally register a generated workbook artifact."""
+
+        text = str(args.get("text") or "")
+        dataset_id = str(args.get("dataset_id") or "")
+        sheets = self._spreadsheet_refs(args)
+        ingest_tables = None
+        if sheets:
+            ingest_result = self._ingest_attachment(sheets[0], tenant=tenant)
+            if ingest_result.get("async"):
+                return {
+                    "status": "BATCH_QUEUED",
+                    "dataset_id": ingest_result["dataset_id"],
+                    "workflow_id": ingest_result.get("workflow_id"),
+                    "summary_text": "Файл большой — обрабатываю в фоне и пришлю результат отдельно.",
+                }
+            dataset_id = ingest_result["dataset_id"]
+            ingest_tables = ingest_result.get("tables")
+        if not dataset_id:
+            raise ToolArgumentInvalidError()
+
+        result = self._svc.execute_nl_request(dataset_id, text, tenant_id=tenant)
+        if result.get("status") == "OK" and result.get("wants_workbook"):
+            reg = self._svc.register_generated_workbook(
+                result["dataset_id"],
+                tenant_id=tenant,
+                owner_id=str(getattr(request, "user_id", "") or ""),
+                conversation_id=str(args.get("conversation_id") or ""),
+                request_id=str(getattr(request, "request_id", "") or ""),
+            )
+            result["workbook"] = reg
+        if ingest_tables is not None:
+            result["ingest_tables"] = ingest_tables
+        return result
+
+    def _compare_workbooks(self, args: dict, request, tenant: str) -> dict:
+        """Block 5.1 Scenario C: ingest two attached spreadsheets and produce
+        a combined price/stock reconciliation report + workbook."""
+
+        sheets = self._spreadsheet_refs(args)
+        if len(sheets) < 2:
+            raise ToolArgumentInvalidError()
+        left = self._ingest_attachment(sheets[0], tenant=tenant)
+        right = self._ingest_attachment(sheets[1], tenant=tenant)
+        if left.get("async") or right.get("async"):
+            return {
+                "status": "BATCH_QUEUED",
+                "summary_text": "Файлы большие — сравнение выполняется в фоне.",
+            }
+        result = self._svc.run_combined_comparison(
+            left["dataset_id"], right["dataset_id"], tenant_id=tenant
+        )
+        if result.get("status") == "OK":
+            content = result.pop("content", b"")
+            artifact_service = getattr(self._svc, "artifact_service", None)
+            if artifact_service is not None and content:
+                try:
+                    rec = artifact_service.register_generated(
+                        tenant_id=tenant,
+                        owner_id=str(getattr(request, "user_id", "") or ""),
+                        filename=str(result.get("filename") or "compare_result.xlsx"),
+                        content=content,
+                        mime_type=(
+                            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+                        ),
+                        conversation_id=str(args.get("conversation_id") or ""),
+                        request_id=str(getattr(request, "request_id", "") or ""),
+                        tool_id="data.compare_workbooks",
+                    )
+                    public = rec.as_public_dict()
+                    result["workbook"] = {
+                        "artifact_id": rec.artifact_id,
+                        "filename": rec.safe_filename,
+                        "mime_type": rec.mime_type,
+                        "view_url": public["view_url"],
+                        "download_url": public["download_url"],
+                    }
+                except Exception:
+                    pass
+        return result

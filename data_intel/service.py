@@ -25,6 +25,7 @@ from data_intel.contracts import (
     ROLE_PURCHASE_PRICE,
     ROLE_SELLING_PRICE,
     ROLE_SKU,
+    ROLE_STOCK,
     DataRow,
     DataTransformation,
     DatasetDescriptor,
@@ -38,6 +39,7 @@ from data_intel.errors import (
     DATASET_ACCESS_DENIED,
     DATASET_BATCH_REQUIRED,
     DATASET_NOT_FOUND,
+    DATASET_PARSE_FAILED,
     DATASET_TOO_LARGE,
     LARGE_DATASET_WORKFLOW_UNAVAILABLE,
     DataIntelError,
@@ -52,13 +54,34 @@ from data_intel.ingest import ingest_bytes
 from data_intel.large import LargeDatasetPolicy, large_dataset_execution_key
 from data_intel.mapping import role_map
 from data_intel.merge import merge_datasets
+from data_intel.nl_ops import (
+    AmbiguousOperationError,
+    UnsupportedOperationError,
+    compile_request,
+)
 from data_intel.product_match import match_products
 from data_intel.quality import build_quality_report
 from data_intel.query import aggregate, pivot_report, search_rows
 from data_intel.reconcile import reconcile_payments, reconcile_vat_amounts
 from data_intel.store import InMemoryDatasetStore
+from data_intel.transform import execute_plan
 from data_intel.workflow_def import register_data_intel_workflows
 from security.tenant import normalize_tenant_id
+
+_PREVIEW_ROW_LIMIT = 5
+_PREVIEW_INTERNAL_PREFIX = "__"
+
+_OP_HUMAN_RU = {
+    "filter_contains": "фильтр по тексту",
+    "filter_compare": "фильтр по цене",
+    "sort": "сортировка",
+    "limit": "ограничение количества строк",
+    "percent_round": "изменение цены на процент с округлением",
+    "add_column_percent": "добавление вычисляемого столбца",
+    "remove_column": "удаление столбца",
+    "rename_column": "переименование столбца",
+    "dedup": "поиск дубликатов",
+}
 
 
 class DataIntelligenceService:
@@ -70,12 +93,17 @@ class DataIntelligenceService:
         workflow_runtime=None,
         document_service=None,
         observability=None,
+        artifact_service=None,
     ):
         self.store = store or InMemoryDatasetStore()
         self.large_policy = large_policy or LargeDatasetPolicy()
         self.workflow_runtime = workflow_runtime
         self.document_service = document_service
         self.observability = observability
+        # Block 5.1 artifact integration: optional, may be wired post-construction
+        # (see main.py) once the canonical ArtifactService is available -- generated
+        # workbooks register through it instead of only the data_intel blob store.
+        self.artifact_service = artifact_service
         if workflow_runtime is not None:
             try:
                 register_data_intel_workflows(
@@ -473,6 +501,279 @@ class DataIntelligenceService:
             kind=kind,
         )
         return {"dataset_id": dataset_id, "filename": name, "size": len(data), "content": data}
+
+    def _numeric_stat(self, rows: list[dict], column: str, op: str) -> str | None:
+        out = aggregate(rows, group_by=[], measures={column: op})
+        if not out:
+            return None
+        key = f"{column}_{op}"
+        return out[0].get(key)
+
+    def _bounded_preview(self, rows: list[dict], columns=(), limit: int = _PREVIEW_ROW_LIMIT) -> list[dict]:
+        names = [c.source_name for c in columns] if columns else None
+        out = []
+        for r in rows[:limit]:
+            if names:
+                out.append({k: r.get(k) for k in names})
+            else:
+                out.append({k: v for k, v in r.items() if not str(k).startswith(_PREVIEW_INTERNAL_PREFIX)})
+        return out
+
+    def _build_summary_text(self, result, table) -> str:
+        lines = [f"Строк было: {result.row_count_before}, стало: {result.row_count_after}."]
+        if result.applied:
+            ops_human = ", ".join(_OP_HUMAN_RU.get(a["op"], a["op"]) for a in result.applied)
+            lines.append(f"Применено: {ops_human}.")
+        if result.duplicate_groups:
+            lines.append(f"Найдено групп потенциальных дублей: {len(result.duplicate_groups)}.")
+        return " ".join(lines)
+
+    def _analyze_only_summary(self, dataset_id: str, desc, rows: list[dict], table, *, tenant_id: str) -> dict:
+        price_cols = [c for c in table.columns if c.semantic_role in (ROLE_PRICE, ROLE_SELLING_PRICE, ROLE_PURCHASE_PRICE)]
+        stats: dict = {}
+        lines = [f"В таблице {len(rows)} строк и {len(table.columns)} столбцов."]
+        if price_cols:
+            col = price_cols[0].source_name
+            lo = self._numeric_stat(rows, col, "min")
+            hi = self._numeric_stat(rows, col, "max")
+            avg = self._numeric_stat(rows, col, "avg")
+            if lo is not None and hi is not None:
+                lines.append(f"Цена ({col}): от {lo} до {hi}, средняя {avg}.")
+                stats = {"price_column": col, "min": lo, "max": hi, "avg": avg}
+        duplicate_groups = find_duplicates(rows)
+        if duplicate_groups:
+            lines.append(f"Найдено групп потенциальных дублей: {len(duplicate_groups)}.")
+        if table.unresolved:
+            lines.append("Часть столбцов не удалось однозначно распознать.")
+        return {
+            "status": "ANALYZED",
+            "dataset_id": dataset_id,
+            "row_count": len(rows),
+            "column_count": len(table.columns),
+            "duplicate_groups_count": len(duplicate_groups),
+            "stats": stats,
+            "summary_text": " ".join(lines),
+            "preview_rows": self._bounded_preview(rows, table.columns),
+        }
+
+    def execute_nl_request(self, dataset_id: str, text: str, *, tenant_id: str) -> dict:
+        """Compile the free-text ``text`` into a bounded deterministic
+        operation plan and apply it to ``dataset_id`` (Block 5.1 section 5/6).
+
+        Never raises for ambiguity/unsupported requests -- returns a typed
+        ``status`` instead so the caller (chat tool adapter) can route to the
+        existing conversational clarification flow rather than guessing.
+        """
+
+        desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
+        if desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        if not desc.tables:
+            raise DataIntelError(DATASET_PARSE_FAILED)
+        table = desc.tables[0]
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id, table_id=table.table_id)
+        assert_sync_data_allowed(row_count=len(rows), operations=("analyze",))
+
+        try:
+            plan = compile_request(text, table)
+        except AmbiguousOperationError as exc:
+            return {
+                "status": "AMBIGUOUS",
+                "dataset_id": dataset_id,
+                "message_safe": exc.message_safe,
+                "candidates": list(exc.candidates),
+            }
+        except UnsupportedOperationError:
+            return self._analyze_only_summary(dataset_id, desc, rows, table, tenant_id=tenant_id)
+
+        result = execute_plan(rows, table.columns, plan)
+        new_dataset_id = new_id("ds-")
+        new_table = replace(table, columns=result.columns, row_count=len(result.rows))
+        new_desc = DatasetDescriptor(
+            dataset_id=new_dataset_id,
+            tenant_id=tenant_id,
+            source_document_id=desc.source_document_id,
+            format=desc.format,
+            sheets=desc.sheets,
+            tables=(new_table,),
+            row_count=len(result.rows),
+            column_count=len(new_table.columns),
+            checksum=desc.checksum,
+            provenance={
+                **{k: v for k, v in dict(desc.provenance).items()},
+                "derived_from": dataset_id,
+                "nl_request_operations": [a["op"] for a in result.applied],
+            },
+        )
+        self.store.save_dataset(new_desc, {table.table_id: result.rows})
+        tx = DataTransformation(
+            operation="nl_request",
+            input_refs=(dataset_id,),
+            output_ref=new_dataset_id,
+            parameters={"operations": result.applied},
+            provenance={"text_len": len(text or "")},
+        )
+        self.store.save_transformation(tenant_id, tx)
+        self._emit(
+            "data.nl_operation_applied",
+            dataset_id=new_dataset_id,
+            source_dataset_id=dataset_id,
+            operations=len(result.applied),
+            rows_before=result.row_count_before,
+            rows_after=result.row_count_after,
+            tenant=tenant_id,
+        )
+
+        out = {
+            "status": "OK",
+            "dataset_id": new_dataset_id,
+            "previous_dataset_id": dataset_id,
+            "row_count_before": result.row_count_before,
+            "row_count_after": result.row_count_after,
+            "operations_applied": result.applied,
+            "duplicate_groups_count": len(result.duplicate_groups),
+            "summary_text": self._build_summary_text(result, new_table),
+            "preview_rows": self._bounded_preview(result.rows, new_table.columns),
+            "wants_workbook": plan.wants_workbook,
+        }
+        return out
+
+    def register_generated_workbook(
+        self,
+        dataset_id: str,
+        *,
+        tenant_id: str,
+        owner_id: str = "",
+        conversation_id: str = "",
+        request_id: str = "",
+        tool_id: str = "data.excel_assistant",
+        kind: str = "data",
+        comparison: dict | None = None,
+    ) -> dict:
+        """Generate the workbook bytes (existing governed path) and, when an
+        ``ArtifactService`` is wired (Block 5.1 artifact integration), register
+        it as a canonical, tenant-owned, conversation-attached artifact
+        instead of only the internal data_intel blob store."""
+
+        wb = self.generate_excel(dataset_id, tenant_id=tenant_id, kind=kind, comparison=comparison)
+        out = {"filename": wb["filename"], "size": wb["size"]}
+        if self.artifact_service is None:
+            return out
+        try:
+            rec = self.artifact_service.register_generated(
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                filename=wb["filename"],
+                content=wb["content"],
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                conversation_id=conversation_id,
+                request_id=request_id,
+                tool_id=tool_id,
+            )
+        except Exception:
+            return out
+        public = rec.as_public_dict()
+        out.update(
+            {
+                "artifact_id": rec.artifact_id,
+                "mime_type": rec.mime_type,
+                "view_url": public["view_url"],
+                "download_url": public["download_url"],
+            }
+        )
+        return out
+
+    def run_combined_comparison(
+        self,
+        left_dataset_id: str,
+        right_dataset_id: str,
+        *,
+        tenant_id: str,
+    ) -> dict:
+        """Block 5.1 Scenario C: compare two workbooks by identifier and
+        report BOTH price and stock changes in one pass (chat-facing
+        superset of ``run_price_compare_process``/``run_stock_reconcile_process``,
+        which each only cover one dimension)."""
+
+        left_desc = self.store.get_dataset(left_dataset_id, tenant_id=tenant_id)
+        right_desc = self.store.get_dataset(right_dataset_id, tenant_id=tenant_id)
+        if left_desc is None or right_desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        left_rows = self.store.get_rows(left_dataset_id, tenant_id=tenant_id)
+        right_rows = self.store.get_rows(right_dataset_id, tenant_id=tenant_id)
+        assert_sync_data_allowed(
+            row_count=len(left_rows) + len(right_rows), operations=("compare", "reconcile", "generate_xlsx")
+        )
+        left_roles = {c.semantic_role for t in left_desc.tables for c in t.columns}
+        right_roles = {c.semantic_role for t in right_desc.tables for c in t.columns}
+        id_roles = {ROLE_SKU, ROLE_ARTICLE, ROLE_EAN}
+        price_roles = {ROLE_PRICE, ROLE_SELLING_PRICE, ROLE_PURCHASE_PRICE}
+        stock_roles = {ROLE_STOCK}
+        if not (left_roles & id_roles and right_roles & id_roles):
+            return {
+                "status": "NEEDS_USER_MAPPING",
+                "message_safe": "Не удалось однозначно определить столбец-идентификатор (артикул/SKU/EAN) в одной из таблиц.",
+            }
+
+        sheets: dict = {}
+        summary: dict = {}
+        price_result = None
+        if left_roles & price_roles and right_roles & price_roles:
+            price_result = price_comparison_changed_only(left_rows, right_rows)
+            headers = [
+                "identifier",
+                "product",
+                "old_price",
+                "new_price",
+                "absolute_difference",
+                "percentage_difference",
+                "match_status",
+            ]
+            sheets["PRICE_CHANGES"] = {
+                "headers": headers,
+                "rows": [[c.get(h) for h in headers] for c in price_result["changed"]],
+                "text_cols": {0},
+            }
+            summary.update({f"price_{k}": v for k, v in price_result["summary"].items()})
+        stock_result = None
+        if left_roles & stock_roles and right_roles & stock_roles:
+            stock_result = stock_reconciliation_report(left_rows, right_rows)
+            headers = ["identifier", "product", "stock_A", "stock_B", "difference", "status"]
+            sheets["STOCK_CHANGES"] = {
+                "headers": headers,
+                "rows": [[r.get(h) for h in headers] for r in stock_result["rows"]],
+                "text_cols": {0},
+            }
+            summary.update({f"stock_{k}": v for k, v in stock_result["summary"].items()})
+        if not sheets:
+            return {
+                "status": "NEEDS_USER_MAPPING",
+                "message_safe": "Не найдены сопоставимые столбцы цены или остатков для сравнения.",
+            }
+        content = generate_workbook(
+            summary=summary,
+            sheets=sheets,
+            provenance={
+                "left_dataset_id": left_dataset_id,
+                "right_dataset_id": right_dataset_id,
+                "original_preserved": True,
+            },
+        )
+        name = "price_stock_compare_result.xlsx"
+        self.store.save_blob(left_dataset_id, name, content, tenant_id=tenant_id)
+        lines = []
+        if price_result is not None:
+            lines.append(f"Изменений цены: {len(price_result['changed'])}.")
+        if stock_result is not None:
+            changed_stock = [r for r in stock_result["rows"] if str(r.get("status") or "") not in {"", "unchanged", "matched"}]
+            lines.append(f"Изменений остатков: {len(changed_stock)}.")
+        return {
+            "status": "OK",
+            "filename": name,
+            "content": content,
+            "summary": summary,
+            "summary_text": " ".join(lines) or "Сравнение выполнено.",
+        }
 
     def quality_report(self, dataset_id: str, *, tenant_id: str) -> dict:
         desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)

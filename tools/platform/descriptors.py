@@ -76,6 +76,8 @@ TOOL_DATA_AGGREGATE = "data.aggregate"
 TOOL_DATA_DUPLICATES = "data.duplicates"
 TOOL_DATA_MERGE = "data.merge"
 TOOL_DATA_GENERATE_EXCEL = "data.generate_excel"
+TOOL_DATA_EXCEL_ASSISTANT = "data.excel_assistant"
+TOOL_DATA_COMPARE_WORKBOOKS = "data.compare_workbooks"
 TOOL_KNOWLEDGE_INGEST = "knowledge.ingest"
 TOOL_KNOWLEDGE_RETRIEVE = "knowledge.retrieve"
 TOOL_KNOWLEDGE_DELETE = "knowledge.delete"
@@ -646,6 +648,44 @@ def data_generate_excel_descriptor(*, enabled: bool = True) -> ToolDescriptor:
         adapter_id="data_intel",
         capabilities=(CAP_FILESYSTEM_WRITE,),
         operations=("generate_excel",),
+        enabled=enabled,
+        timeout=120.0,
+    )
+
+
+def data_excel_assistant_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    """Block 5.1: single chat-facing capability -- ingest-if-new attachment,
+    compile the user's natural-language request into a bounded deterministic
+    operation plan, execute it, and optionally register a generated XLSX
+    artifact. This is what ``business_assistant`` FAMILY_EXCEL turns invoke;
+    the user never selects "Excel mode" explicitly."""
+
+    return _read_desc(
+        tool_id=TOOL_DATA_EXCEL_ASSISTANT,
+        name="Data Excel Assistant",
+        description="Chat-driven Excel/CSV analysis, filter, and transform assistant",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("assist",),
+        enabled=enabled,
+        timeout=120.0,
+    )
+
+
+def data_compare_workbooks_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    """Block 5.1: two-workbook reconciliation (Scenario C) -- ingest both
+    attached spreadsheets, compare by identifier, and generate a combined
+    price/stock reconciliation workbook."""
+
+    return _read_desc(
+        tool_id=TOOL_DATA_COMPARE_WORKBOOKS,
+        name="Data Compare Workbooks",
+        description="Compare two uploaded price/stock workbooks and generate a reconciliation report",
+        category="data",
+        adapter_id="data_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("compare_workbooks",),
         enabled=enabled,
         timeout=120.0,
     )
