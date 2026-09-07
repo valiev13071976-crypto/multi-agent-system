@@ -51,6 +51,11 @@ class RealtimeSession:
     state_machine: RealtimeStateMachine = field(default_factory=RealtimeStateMachine)
     events: RealtimeEventFactory | None = None
     language_hint: str = "ru"
+    # Production voice defect closure Boundary F: the ACTUAL container/codec
+    # mime type MediaRecorder negotiated in the browser (e.g.
+    # "audio/webm;codecs=opus") -- never assume "audio/wav" server-side, a
+    # real STT provider is sensitive to filename/content-type mismatches.
+    mime_type: str = "audio/webm"
     created_at: str = field(default_factory=_utc_iso)
     audio_buffer: bytearray = field(default_factory=bytearray)
     last_partial_transcript: str = ""

@@ -57,12 +57,17 @@
     return "";
   }
 
-  function wsUrl(conversationId, voiceId, sessionId) {
+  function wsUrl(conversationId, voiceId, sessionId, mimeType) {
     const proto = location.protocol === "https:" ? "wss:" : "ws:";
     const params = new URLSearchParams();
     if (conversationId) params.set("conversation_id", conversationId);
     if (voiceId) params.set("voice_id", voiceId);
     if (sessionId) params.set("session_id", sessionId);
+    // Production voice defect closure Boundary F: tell the server the
+    // ACTUAL container/codec MediaRecorder negotiated (pickMimeType()
+    // below) so the STT call server-side never assumes wav for audio that
+    // is really webm/opus.
+    if (mimeType) params.set("mime_type", mimeType);
     // Block 4.38: browsers cannot set custom headers on a WebSocket
     // handshake -- a human session (panda_session cookie) is sent
     // automatically by the browser same-origin, needing no query param at
@@ -93,6 +98,7 @@
       this.voiceId = null;
       this._pendingAudioTurnId = null;
       this._audioChunks = [];
+      this._negotiatedMimeType = "";
       this._muted = false;
       this._audioCtx = null;
       this._analyser = null;
@@ -131,11 +137,12 @@
         return;
       }
       this._startVad();
+      this._negotiatedMimeType = pickMimeType();
       this._connect(options.conversationId, options.voiceId);
     }
 
     _connect(conversationId, voiceId) {
-      const ws = new WebSocket(wsUrl(conversationId, voiceId));
+      const ws = new WebSocket(wsUrl(conversationId, voiceId, null, this._negotiatedMimeType));
       ws.binaryType = "arraybuffer";
       this.ws = ws;
       ws.onmessage = (evt) => {
@@ -287,6 +294,19 @@
     _stopRecording() {
       if (this.recorder && this.recorder.state !== "inactive") {
         try {
+          // Production voice defect closure (duplicate/stray-audio root
+          // cause): MediaRecorder.stop() asynchronously fires one final
+          // "dataavailable" AFTER this call returns. If that trailing
+          // chunk is still sent to the server after we've already sent
+          // audio.commit for THIS turn, it lands in the server's freshly-
+          // cleared audio_buffer for the NEXT turn and (worse) can look
+          // like the user started speaking again while Panda is
+          // thinking/speaking, triggering a spurious barge-in. Detaching
+          // the handler before stop() drops that trailing chunk instead of
+          // transmitting it -- no data loss for the CURRENT turn (its
+          // bytes were already sent via prior ondataavailable calls during
+          // recorder.start(250) slicing).
+          this.recorder.ondataavailable = null;
           this.recorder.stop();
         } catch (e) {
           /* already stopped */
@@ -432,6 +452,19 @@
 
     selectVoice(voiceId) {
       this._send({ type: "voice.select", voice_id: voiceId });
+    }
+
+    /** Playback telemetry ack (section 11/20): app.js calls these from the
+     * <audio> element's real "play"/"ended" DOM events so a production
+     * failure between "server sent TTS audio" and "user actually heard it"
+     * is visible server-side without another Cursor round. Never blocks or
+     * affects local playback if the socket happens to be down. */
+    notifyPlaybackStarted(turnId) {
+      this._send({ type: "playback_event", stage: "started", turn_id: turnId || "" });
+    }
+
+    notifyPlaybackCompleted(turnId) {
+      this._send({ type: "playback_event", stage: "completed", turn_id: turnId || "" });
     }
 
     _send(payload) {

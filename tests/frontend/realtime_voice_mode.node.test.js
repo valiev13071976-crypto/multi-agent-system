@@ -32,8 +32,10 @@ function loadRealtimeModule() {
   global.URLSearchParams = URLSearchParams;
   global.Blob = class Blob {};
   global.URL = { createObjectURL: () => "blob:fake" };
+  defineGlobal("sessionStorage", { getItem: () => null });
   global.WebSocket = class FakeWebSocket {
-    constructor() {
+    constructor(url) {
+      this.url = url;
       this.readyState = 1;
       this.sent = [];
     }
@@ -59,9 +61,19 @@ function loadRealtimeModule() {
     stop() {
       this.state = "inactive";
       FakeMediaRecorder.stopCount += 1;
+      // Real browsers fire one final "dataavailable" ASYNCHRONOUSLY after
+      // stop() -- simulated explicitly by tests via
+      // FakeMediaRecorder.instances[i]._fireTrailingDataAvailable(), never
+      // automatically here, to keep this harness deterministic.
+    }
+    _fireTrailingDataAvailable(data) {
+      if (typeof this.ondataavailable === "function") {
+        this.ondataavailable({ data });
+      }
     }
   }
-  FakeMediaRecorder.isTypeSupported = () => false;
+  FakeMediaRecorder.isTypeSupported = (candidate) => FakeMediaRecorder.supportedMimeType === candidate;
+  FakeMediaRecorder.supportedMimeType = "";
   FakeMediaRecorder.instances = [];
   FakeMediaRecorder.startCount = 0;
   FakeMediaRecorder.stopCount = 0;
@@ -307,4 +319,69 @@ test("a recoverable in-turn error (e.g. empty audio buffer) resumes listening in
 
   assert.equal(controller.state, PandaRealtime.STATE_LISTENING, "never gets stuck in a dead turn");
   assert.ok(FakeMediaRecorder.startCount > startCountBefore, "microphone capture resumes automatically");
+});
+
+test("production voice defect closure: _stopRecording drops the recorder's trailing dataavailable chunk", async () => {
+  const { PandaRealtime, FakeMediaRecorder } = loadRealtimeModule();
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller.mediaStream = { getTracks: () => [], getAudioTracks: () => [{ enabled: true }] };
+  const sent = [];
+  controller.ws = { readyState: 1, send: (payload) => sent.push(payload) };
+  controller._setState(PandaRealtime.STATE_LISTENING);
+  controller._startRecording();
+  const recorder = FakeMediaRecorder.instances[FakeMediaRecorder.instances.length - 1];
+  assert.equal(typeof recorder.ondataavailable, "function");
+
+  // commit() calls _stopRecording(), which must detach ondataavailable
+  // BEFORE calling stop() so the browser's real trailing chunk (fired here
+  // explicitly, since Node's fake stop() does not do it automatically) is
+  // never transmitted -- this is the fix for the production defect where a
+  // stray post-commit chunk was misread as new user speech (spurious
+  // barge-in) or leaked into the NEXT turn's audio buffer.
+  controller.commit();
+  assert.equal(recorder.ondataavailable, null, "handler detached before stop() so late data cannot leak");
+  recorder._fireTrailingDataAvailable({
+    size: 42,
+    arrayBuffer: () => Promise.resolve(new ArrayBuffer(42)),
+  });
+  await Promise.resolve();
+  const binaryChunksSent = sent.filter((v) => v instanceof ArrayBuffer);
+  assert.equal(binaryChunksSent.length, 0, "the trailing chunk after commit is never sent to the server");
+  // exactly one JSON control frame (the audio.commit itself) was sent.
+  assert.equal(sent.filter((v) => typeof v === "string").length, 1);
+});
+
+test("start() negotiates and reports the ACTUAL MediaRecorder mime type to the server (Boundary F)", async () => {
+  const { PandaRealtime, FakeMediaRecorder } = loadRealtimeModule();
+  FakeMediaRecorder.supportedMimeType = "audio/webm;codecs=opus";
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+
+  try {
+    await controller.start({ conversationId: "conv-1" });
+
+    assert.equal(controller._negotiatedMimeType, "audio/webm;codecs=opus");
+    assert.ok(controller.ws, "connected");
+    const match = /[?&]mime_type=([^&]+)/.exec(controller.ws.url);
+    assert.ok(match, `expected a mime_type query param in the WS URL, got: ${controller.ws.url}`);
+    assert.equal(decodeURIComponent(match[1]), "audio/webm;codecs=opus");
+  } finally {
+    // _startVad() started a real setInterval -- must be torn down or the
+    // Node test runner's process hangs waiting for the timer forever.
+    controller.close();
+  }
+});
+
+test("playback ack: notifyPlaybackStarted/Completed send safe telemetry frames referencing the turn", async () => {
+  const { PandaRealtime } = loadRealtimeModule();
+  const sent = [];
+  const controller = new PandaRealtime.RealtimeVoiceController({});
+  controller.ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) };
+
+  controller.notifyPlaybackStarted("turn_abc");
+  controller.notifyPlaybackCompleted("turn_abc");
+
+  assert.deepEqual(sent, [
+    { type: "playback_event", stage: "started", turn_id: "turn_abc" },
+    { type: "playback_event", stage: "completed", turn_id: "turn_abc" },
+  ]);
 });

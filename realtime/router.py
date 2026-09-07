@@ -153,6 +153,12 @@ async def realtime_ws(websocket: WebSocket) -> None:
     conversation_id = websocket.query_params.get("conversation_id") or None
     voice_id = websocket.query_params.get("voice_id") or None
     resume_session_id = websocket.query_params.get("session_id") or None
+    # Boundary F: the browser tells us the ACTUAL MediaRecorder container/
+    # codec it negotiated (see static/panda/js/realtime.js pickMimeType())
+    # so the STT call downstream never assumes wav for what is really
+    # webm/opus -- falls back to the existing default when an older/other
+    # client omits it.
+    mime_type = websocket.query_params.get("mime_type") or "audio/webm"
 
     session: RealtimeSession | None = None
     if resume_session_id:
@@ -166,6 +172,7 @@ async def realtime_ws(websocket: WebSocket) -> None:
             sink=sink,
             conversation_id=conversation_id,
             voice_id=voice_id,
+            mime_type=mime_type,
         )
 
     try:
@@ -215,6 +222,10 @@ async def _handle_control_frame(
             await bridge.barge_in(session)
         elif kind == "voice.select":
             await bridge.select_voice(session, str(payload.get("voice_id") or ""))
+        elif kind == "playback_event":
+            bridge.record_playback_event(
+                session, stage=str(payload.get("stage") or ""), turn_id=str(payload.get("turn_id") or "")
+            )
         elif kind == "session.close":
             await bridge.close_session(session, reason="client_requested")
         else:

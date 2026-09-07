@@ -12,7 +12,7 @@ from integrations.production.adapters.commerce import build_commerce_adapters
 from integrations.production.adapters.email import build_email_provider
 from integrations.production.adapters.media import build_image_provider
 from integrations.production.adapters.seo import build_seo_providers
-from integrations.production.adapters.speech import build_speech_providers
+from integrations.production.adapters.speech import build_speech_providers, speech_provider_diagnostics
 from integrations.production.adapters.telegram import build_telegram_provider
 from integrations.production.config import ProductionIntegrationConfig
 from integrations.production.credentials import inventory_as_dict
@@ -133,12 +133,35 @@ def build_production_integrations(
     stt, tts = build_speech_providers(source)
     speech_configured = _configured(source, "SPEECH_API_KEY", "OPENAI_API_KEY")
     speech_status = VERIFICATION_CONFIG if speech_configured else VERIFICATION_CODE
+    # Production voice defect closure item 5/9: safe (no keys) real-vs-fake
+    # readiness diagnostics, surfaced through the existing admin ops
+    # provider matrix (operations_admin.service.list_production_integrations)
+    # -- no new diagnostics endpoint/architecture.
+    speech_diagnostics = speech_provider_diagnostics(source)
     registry.register(
-        ProviderMetadata(provider_id="speech_stt", provider_type="speech", enabled=True, configured=speech_configured, verification_status=speech_status, capabilities=("stt",), credential_ref="SPEECH_API_KEY"),
+        ProviderMetadata(
+            provider_id="speech_stt",
+            provider_type="speech",
+            enabled=True,
+            configured=speech_configured,
+            verification_status=speech_status,
+            capabilities=("stt",),
+            credential_ref="SPEECH_API_KEY",
+            live_evidence=dict(speech_diagnostics, model=speech_diagnostics["stt_model"]),
+        ),
         stt,
     )
     registry.register(
-        ProviderMetadata(provider_id="speech_tts", provider_type="speech", enabled=True, configured=speech_configured, verification_status=speech_status, capabilities=("tts",), credential_ref="SPEECH_API_KEY"),
+        ProviderMetadata(
+            provider_id="speech_tts",
+            provider_type="speech",
+            enabled=True,
+            configured=speech_configured,
+            verification_status=speech_status,
+            capabilities=("tts",),
+            credential_ref="SPEECH_API_KEY",
+            live_evidence=dict(speech_diagnostics, model=speech_diagnostics["tts_model"]),
+        ),
         tts,
     )
 
