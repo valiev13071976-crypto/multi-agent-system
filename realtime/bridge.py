@@ -22,6 +22,7 @@ fabricate provider-side token/audio streaming that does not exist here.
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -90,6 +91,29 @@ _TERMINAL_FAILURE_STATES = frozenset({ST_BLOCKED, ST_REJECTED, ST_CANCELLED})
 _INTERRUPTIBLE_STATES = frozenset(
     {SessionState.THINKING, SessionState.ASSISTANT_STREAMING_TEXT, SessionState.ASSISTANT_SPEAKING}
 )
+
+# Production voice defect closure section 20: structured, SAFE
+# (no raw audio/keys/full transcript beyond what already streams to the
+# client anyway) per-turn diagnostic events, so a real production failure's
+# exact broken boundary is visible from logs alone without another Cursor
+# round. Reuses the standard `logging` module (same pattern as
+# realtime/router.py's `log = logging.getLogger(__name__)`) instead of
+# inventing a second event-bus architecture.
+_voice_log = logging.getLogger("realtime.voice_diagnostics")
+
+
+def _log_voice_event(event: str, *, session: RealtimeSession, turn_id: str = "", **fields: Any) -> None:
+    try:
+        payload = {
+            "event": event,
+            "conversation_id": session.conversation_id,
+            "session_id": session.session_id,
+            "turn_id": turn_id or session.current_turn_id,
+        }
+        payload.update(fields)
+        _voice_log.info("realtime_voice_event", extra={"voice_event": payload})
+    except Exception:
+        pass
 
 
 def _chunk_text(text: str, size: int = _TEXT_CHUNK_CHARS) -> list[str]:
@@ -178,6 +202,7 @@ class RealtimeConversationBridge:
         conversation_id: str | None = None,
         voice_id: str | None = None,
         language_hint: str = "ru",
+        mime_type: str = "audio/webm",
     ) -> RealtimeSession:
         tenant = require_tenant_id(tenant_id)
         owner = str(owner_id or "").strip()
@@ -211,9 +236,15 @@ class RealtimeConversationBridge:
             voice_id=resolved_voice,
             sink=sink,
             language_hint=language_hint,
+            mime_type=str(mime_type or "audio/webm"),
         )
         self._sessions[session.session_id] = session
         REALTIME_METRICS.inc("session_started")
+        _log_voice_event(
+            "voice_session_started",
+            session=session,
+            mime_type=session.mime_type,
+        )
 
         session.state_machine.transition(SessionEvent.CONNECT)
         await session.sink.send_event(
@@ -251,6 +282,19 @@ class RealtimeConversationBridge:
         REALTIME_METRICS.inc("session_reconnected")
         REALTIME_METRICS.reconnect_duration.observe((time.monotonic() - t0) * 1000)
         return session
+
+    def record_playback_event(self, session: RealtimeSession, *, stage: str, turn_id: str = "") -> None:
+        """Client->server playback telemetry ack (section 11/20): the
+        browser is the only party that actually knows when audible
+        playback started/completed, so realtime.js sends a lightweight
+        `playback_event` control frame (same JSON-control-frame convention
+        as audio.commit/barge_in/voice.select -- no new transport/
+        architecture) at those two DOM audio-element events, logged here so
+        a real production failure between "TTS audio received" and "user
+        actually heard it" is still visible from server-side logs alone."""
+
+        event = "audio_playback_started" if stage == "started" else "audio_playback_completed"
+        _log_voice_event(event, session=session, turn_id=turn_id)
 
     async def select_voice(self, session: RealtimeSession, voice_id: str) -> None:
         """Block 4.29.2: applies immediately to subsequent TTS output in this
@@ -300,6 +344,7 @@ class RealtimeConversationBridge:
             pass
         self._sessions.pop(session.session_id, None)
         REALTIME_METRICS.inc("session_ended")
+        _log_voice_event("voice_session_closed", session=session, reason=reason)
 
     # --- voice input ---------------------------------------------------
 
@@ -315,6 +360,7 @@ class RealtimeConversationBridge:
             session.turn_started_monotonic = time.monotonic()
             session.first_transcript_recorded = False
             await session.sink.send_event(session.events.build(EV_USER_AUDIO_STARTED))
+            _log_voice_event("voice_capture_started", session=session, mime_type=session.mime_type)
         if session.state_machine.can(SessionEvent.AUDIO_STARTED):
             session.state_machine.transition(SessionEvent.AUDIO_STARTED)
 
@@ -329,7 +375,7 @@ class RealtimeConversationBridge:
             partial = normalize_transcript(
                 self.stt.transcribe(
                     audio=bytes(session.audio_buffer),
-                    mime_type="audio/wav",
+                    mime_type=session.mime_type,
                     language=session.language_hint,
                 )
             )
@@ -346,23 +392,54 @@ class RealtimeConversationBridge:
 
     async def on_audio_commit(self, session: RealtimeSession, *, client_turn_id: str = "") -> str | None:
         if not session.audio_buffer:
+            _log_voice_event("voice_capture_completed", session=session, audio_bytes=0, stage="empty_audio")
             raise RealtimeError(RT_AUDIO_EMPTY, http_status=422)
         audio_bytes = bytes(session.audio_buffer)
         session.audio_buffer.clear()
         session.last_partial_transcript = ""
+        _log_voice_event(
+            "voice_capture_completed",
+            session=session,
+            audio_bytes=len(audio_bytes),
+            mime_type=session.mime_type,
+        )
         if session.state_machine.can(SessionEvent.AUDIO_COMMITTED):
             session.state_machine.transition(SessionEvent.AUDIO_COMMITTED)
 
+        stt_started = time.monotonic()
+        _log_voice_event(
+            "stt_request_started",
+            session=session,
+            provider=type(self.stt).__name__,
+            audio_bytes=len(audio_bytes),
+            mime_type=session.mime_type,
+        )
         try:
             text = normalize_transcript(
                 self.stt.transcribe(
-                    audio=audio_bytes, mime_type="audio/wav", language=session.language_hint
+                    audio=audio_bytes, mime_type=session.mime_type, language=session.language_hint
                 )
             )
             REALTIME_METRICS.inc("stt_call")
             self._record_speech_usage(session, capability="stt")
-        except Exception:
+            _log_voice_event(
+                "stt_request_completed",
+                session=session,
+                provider=type(self.stt).__name__,
+                success=True,
+                latency_ms=round((time.monotonic() - stt_started) * 1000, 1),
+                transcript_chars=len(text),
+            )
+        except Exception as exc:
             REALTIME_METRICS.inc_error("stt_failed")
+            _log_voice_event(
+                "stt_request_completed",
+                session=session,
+                provider=type(self.stt).__name__,
+                success=False,
+                latency_ms=round((time.monotonic() - stt_started) * 1000, 1),
+                error_type=type(exc).__name__,
+            )
             await session.sink.send_event(
                 session.events.build(EV_ERROR, code=RT_STT_FAILED, message="stt_failed")
             )
@@ -381,6 +458,7 @@ class RealtimeConversationBridge:
         # Exactly ONE committed user turn per commit (Block 55.A): the final
         # transcript becomes the canonical turn text; no partials were ever
         # persisted as separate turns above.
+        _log_voice_event("stt_transcript_received", session=session, transcript_chars=len(text))
         await session.sink.send_event(session.events.build(EV_USER_TRANSCRIPT_FINAL, text=text))
         if session.state_machine.can(SessionEvent.TRANSCRIPT_FINAL):
             session.state_machine.transition(SessionEvent.TRANSCRIPT_FINAL)
@@ -432,6 +510,17 @@ class RealtimeConversationBridge:
             # in-memory set were ever lost (e.g. process restart).
             return turn_id
         session.committed_turn_ids.add(turn_id)
+        # One canonical ownership rule for committing a voice/text turn
+        # (production voice defect closure section 7): this is the ONLY
+        # place EV_USER_TURN_COMMITTED is ever sent for a NEW turn_id -- the
+        # `turn_id in session.committed_turn_ids` guard above is the single
+        # enforcement point, keyed by the SAME turn_id/idempotency boundary
+        # business_assistant_api.service.submit_async's own dedupe uses
+        # below, so one physical utterance/message can never become more
+        # than one canonical user turn even across retries/reconnects.
+        _log_voice_event(
+            "voice_turn_committed", session=session, turn_id=turn_id, modality="voice" if is_voice else "text"
+        )
 
         await session.sink.send_event(
             session.events.build(
@@ -445,6 +534,7 @@ class RealtimeConversationBridge:
         )
 
         turn_start = time.monotonic()
+        _log_voice_event("assistant_response_started", session=session, turn_id=turn_id)
         task = asyncio.create_task(self._run_turn(session, turn_id=turn_id, text=text, turn_start=turn_start))
         session.current_task = task
         session.current_turn_id = turn_id
@@ -524,18 +614,46 @@ class RealtimeConversationBridge:
             await asyncio.sleep(0)
         await session.sink.send_event(session.events.build(EV_ASSISTANT_TEXT_COMPLETED, turn_id=turn_id, text=text))
 
+        # One canonical Panda response feeds BOTH the visible/streamed text
+        # above AND the TTS call below (production voice defect closure
+        # section 10) -- `text` here is the exact same `reply_text` returned
+        # by the SINGLE _submit()/submit_async() call in _run_turn, never a
+        # second model request or an independently generated spoken answer.
+        tts_started = time.monotonic()
+        _log_voice_event(
+            "tts_request_started", session=session, turn_id=turn_id, provider=type(self.tts).__name__, text_chars=len(text)
+        )
         try:
-            audio_bytes = self.tts.synthesize(text=text, voice=session.voice_id, mime_type="audio/wav")
+            audio_bytes = self.tts.synthesize(text=text, voice=session.voice_id, mime_type="audio/mpeg")
             REALTIME_METRICS.inc("tts_call")
             self._record_speech_usage(session, capability="tts", turn_id=turn_id)
-        except Exception:
+            _log_voice_event(
+                "tts_request_completed",
+                session=session,
+                turn_id=turn_id,
+                provider=type(self.tts).__name__,
+                success=True,
+                latency_ms=round((time.monotonic() - tts_started) * 1000, 1),
+                audio_bytes=len(audio_bytes),
+            )
+        except Exception as exc:
             REALTIME_METRICS.inc_error("tts_failed")
+            _log_voice_event(
+                "tts_request_completed",
+                session=session,
+                turn_id=turn_id,
+                provider=type(self.tts).__name__,
+                success=False,
+                latency_ms=round((time.monotonic() - tts_started) * 1000, 1),
+                error_type=type(exc).__name__,
+            )
             await session.sink.send_event(
                 session.events.build(EV_ERROR, turn_id=turn_id, code=RT_TTS_FAILED, message="tts_failed")
             )
             if session.state_machine.can(SessionEvent.RESPONSE_COMPLETED):
                 session.state_machine.transition(SessionEvent.RESPONSE_COMPLETED)
             return
+        _log_voice_event("tts_audio_received", session=session, turn_id=turn_id, audio_bytes=len(audio_bytes))
 
         first_audio = False
         for idx, chunk in enumerate(_chunk_bytes(audio_bytes)):
@@ -556,6 +674,12 @@ class RealtimeConversationBridge:
         )
         if session.state_machine.can(SessionEvent.RESPONSE_COMPLETED):
             session.state_machine.transition(SessionEvent.RESPONSE_COMPLETED)
+        # Continuous ChatGPT-style loop (section 12): the client
+        # (static/panda/js/realtime.js _resumeListening(), triggered by the
+        # assistant.audio.completed event above) automatically re-arms the
+        # microphone for the next turn without any user action -- logged
+        # here as the server-side half of that contract for diagnosis.
+        _log_voice_event("voice_returned_to_listening", session=session, turn_id=turn_id)
 
     # --- barge-in / interruption --------------------------------------------
 

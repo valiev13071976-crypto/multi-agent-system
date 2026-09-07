@@ -43,6 +43,12 @@
       streamingEl: null,
       streamingText: "",
       preferredVoiceId: "",
+      // Production voice defect closure section 7: ONE canonical
+      // ownership rule for rendering a committed user voice turn client-
+      // side too -- a duplicate/replayed user.turn.committed event (e.g.
+      // reconnect) must never push a second identical message bubble.
+      renderedTurnIds: new Set(),
+      playingTurnId: "",
     },
   };
 
@@ -1151,15 +1157,19 @@
         if (icon) icon.textContent = muted ? "🔇" : "🎤";
       },
       onSessionStarted: ({ conversationId }) => {
+        state.realtime.renderedTurnIds.clear();
         if (conversationId && conversationId !== state.conversationId) {
           state.conversationId = conversationId;
           refreshConversations().catch(() => {});
         }
       },
       onPartialTranscript: (text) => showVoiceCaption(text),
-      onUserTurnCommitted: ({ text }) => {
+      onUserTurnCommitted: ({ turnId, text }) => {
         showVoiceCaption("");
-        if (text) {
+        const rt = state.realtime;
+        const alreadyRendered = turnId && rt.renderedTurnIds.has(turnId);
+        if (text && !alreadyRendered) {
+          if (turnId) rt.renderedTurnIds.add(turnId);
           state.messages.push({
             role: "user",
             content: text,
@@ -1190,8 +1200,9 @@
         finalizeStreamingBubble(turnId, text);
         setStatus("", "");
       },
-      onAssistantAudio: ({ url }) => {
+      onAssistantAudio: ({ turnId, url }) => {
         if (!els.realtimeAudio) return;
+        state.realtime.playingTurnId = turnId || "";
         els.realtimeAudio.src = url;
         els.realtimeAudio.play().catch(() => {});
       },
@@ -1300,6 +1311,21 @@
     if (els.voiceOrb) els.voiceOrb.onclick = onVoiceOrbClick;
     if (els.voiceMuteBtn) els.voiceMuteBtn.onclick = onVoiceMuteClick;
     if (els.voiceExitBtn) els.voiceExitBtn.onclick = onVoiceExitClick;
+    // Production voice defect closure (section 11/20): the real "play"/
+    // "ended" DOM events on the actual <audio> element are the ONLY
+    // trustworthy signal that Panda's response was actually audible --
+    // acked back to the server as safe telemetry (never blocks local
+    // playback if the ack itself fails to send).
+    if (els.realtimeAudio) {
+      els.realtimeAudio.addEventListener("play", () => {
+        const controller = state.realtime.controller;
+        if (controller) controller.notifyPlaybackStarted(state.realtime.playingTurnId);
+      });
+      els.realtimeAudio.addEventListener("ended", () => {
+        const controller = state.realtime.controller;
+        if (controller) controller.notifyPlaybackCompleted(state.realtime.playingTurnId);
+      });
+    }
     if (els.personalizationBtn) els.personalizationBtn.onclick = openPersonalizationSettings;
     els.approveBtn.onclick = onApprove;
     els.rejectBtn.onclick = onReject;
