@@ -100,6 +100,24 @@ TOOL_CONTENT_ANALYZE_PERFORMANCE = "content.analyze_performance"
 TOOL_CONTENT_OPTIMIZE = "content.optimize"
 TOOL_CONTENT_GET = "content.get"
 TOOL_CONTENT_STATUS = "content.status"
+# Block 5.5: canonical Product/Catalog Intelligence operations (see
+# ``product_intel/tools.py``'s ``ProductIntelToolAdapter``). Internal
+# data-processing over Panda's own tenant-scoped product catalog plus the
+# canonical ArtifactService only -- never a vendor-specific write.
+TOOL_PRODUCT_IMPORT = "product.import"
+TOOL_PRODUCT_MATCH = "product.match"
+TOOL_PRODUCT_DUPLICATES = "product.duplicates"
+TOOL_PRODUCT_VALIDATE = "product.validate"
+TOOL_PRODUCT_ENRICH = "product.enrich"
+TOOL_PRODUCT_RECONCILE = "product.reconcile"
+TOOL_PRODUCT_ASSOCIATE_MEDIA = "product.associate_media"
+TOOL_PRODUCT_EXPORT = "product.export"
+TOOL_PRODUCT_GET = "product.get"
+# Block 5.5: single chat-facing entry point (mirrors ``data.excel_assistant``)
+# -- deterministically dispatches an NL instruction to the right governed
+# ``product.*`` operation instead of asking the user to pick a technical
+# mode (spec section 20).
+TOOL_PRODUCT_CATALOG_ASSIST = "product.catalog_assist"
 TOOL_MCP = "mcp.invoke"
 TOOL_CMS = "cms.product"
 TOOL_BITRIX = "bitrix.catalog"
@@ -2201,6 +2219,155 @@ def content_status_descriptor(*, enabled: bool = True) -> ToolDescriptor:
         operations=("status",),
         enabled=enabled,
         timeout=5.0,
+    )
+
+
+# --- Block 5.5: Product / Catalog Intelligence ------------------------------
+# Every operation is internal data-processing over Panda's own tenant-scoped
+# product catalog (plus the canonical ArtifactService for export) -- never a
+# vendor-specific write -- so, like ``data_intel``'s descriptors, each one is
+# a governed *read*-classified tool (``_read_desc``), not the write-execution
+# (autonomy-gate/HITL/idempotency-executor) pipeline reserved for
+# live-business-mutating actions (spec section 23).
+
+
+def product_import_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_IMPORT,
+        name="Product Import",
+        description="Ingest Excel/acquisition/payload rows into the canonical product catalog",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("import",),
+        enabled=enabled,
+        timeout=120.0,
+    )
+
+
+def product_match_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_MATCH,
+        name="Product Match",
+        description="Deterministic-first product/SKU matching against the catalog",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("match",),
+        enabled=enabled,
+        timeout=30.0,
+    )
+
+
+def product_duplicates_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_DUPLICATES,
+        name="Product Duplicates",
+        description="Find duplicate product groups without collapsing legitimate variants",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("duplicates",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def product_validate_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_VALIDATE,
+        name="Product Validate",
+        description="Structured VALID/WARNING/INVALID product validation",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("validate",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def product_enrich_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_ENRICH,
+        name="Product Enrich",
+        description="Grounded product content enrichment via Content Intelligence",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("enrich",),
+        enabled=enabled,
+        timeout=90.0,
+    )
+
+
+def product_reconcile_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_RECONCILE,
+        name="Product Reconcile",
+        description="Reconcile catalog price/stock against a second dataset",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("reconcile",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def product_associate_media_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_ASSOCIATE_MEDIA,
+        name="Product Associate Media",
+        description="Associate existing/generated artifacts as product media references",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("associate_media",),
+        enabled=enabled,
+        timeout=30.0,
+    )
+
+
+def product_export_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_EXPORT,
+        name="Product Export",
+        description="Vendor-neutral canonical product export/handoff, optionally as an artifact",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("export",),
+        enabled=enabled,
+        timeout=60.0,
+    )
+
+
+def product_get_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_GET,
+        name="Product Get",
+        description="Look up one canonical product by ID",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_READ,),
+        operations=("get",),
+        enabled=enabled,
+        timeout=10.0,
+    )
+
+
+def product_catalog_assist_descriptor(*, enabled: bool = True) -> ToolDescriptor:
+    return _read_desc(
+        tool_id=TOOL_PRODUCT_CATALOG_ASSIST,
+        name="Product Catalog Assist",
+        description="Chat-facing NL dispatch over the governed product.* operations",
+        category="product",
+        adapter_id="product_intel",
+        capabilities=(CAP_FILESYSTEM_WRITE,),
+        operations=("assist",),
+        enabled=enabled,
+        timeout=120.0,
     )
 
 
