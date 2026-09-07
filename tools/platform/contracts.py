@@ -266,7 +266,17 @@ class SeoAnalyticsContractAdapter(ContractWriteAdapter):
 
 
 class McpAdapter(ScaffoldAdapter):
-    """MCP bridge — server allowlist, trust, never Agent→MCP direct."""
+    """MCP bridge — server allowlist, trust, never Agent→MCP direct.
+
+    Block 5.4: ``transports`` (keyed by lower-cased server id) is the only
+    thing that turns a given, already-allowlisted server from permanently
+    ``scaffold_only`` into a real ``tools/list`` / ``tools/call`` JSON-RPC
+    invocation (see ``tools.platform.mcp_client.HttpMcpTransport``). Every
+    allowlist/trust/never-direct governance check below runs identically
+    whether or not a transport is wired -- a missing transport for an
+    allowed server just means "governed, but not yet real", exactly the
+    prior behavior, so default (no transports) is unchanged.
+    """
 
     def __init__(
         self,
@@ -275,12 +285,14 @@ class McpAdapter(ScaffoldAdapter):
         allowed_servers: tuple[str, ...] = (),
         allowed_tools: tuple[str, ...] = (),
         server_trust: dict[str, str] | None = None,
+        transports: dict[str, object] | None = None,
     ):
         super().__init__(adapter_id="mcp")
         self._enabled = enabled
         self._allowed_servers = frozenset(s.lower() for s in allowed_servers)
         self._allowed_tools = frozenset(allowed_tools)
         self._server_trust = dict(server_trust or {})
+        self._transports = {str(k).lower(): v for k, v in dict(transports or {}).items()}
         self._normalized: list[dict] = []
 
     def health(self) -> str:
@@ -312,30 +324,78 @@ class McpAdapter(ScaffoldAdapter):
         self._normalized = out
         return out
 
+    def _require_allowed_server(self, server: str) -> str:
+        if not server or server not in self._allowed_servers:
+            raise ToolPolicyDeniedError("untrusted_mcp_server")
+        trust = self._server_trust.get(server, "untrusted")
+        if trust in {"untrusted", "UNTRUSTED"}:
+            raise ToolPolicyDeniedError("untrusted_mcp_server")
+        return trust
+
     async def execute_read(self, request, context) -> dict:
         if not self._enabled:
             raise ToolUnavailableError("mcp_disabled")
         args = dict(request.arguments or {})
         server = str(args.get("server") or "").strip().lower()
+
+        if request.operation == "list_tools":
+            trust = self._require_allowed_server(server)
+            transport = self._transports.get(server)
+            if transport is None:
+                return _scaffold_payload(
+                    "mcp", request, server=server, trust=trust, tools=[], invoked=False, note="scaffold_only"
+                )
+            try:
+                discovered = await transport.list_tools()
+            except Exception as exc:
+                raise ToolUnavailableError(f"mcp_discovery_failed:{type(exc).__name__}") from exc
+            normalized = self.register_normalized_tools(
+                [{**t, "server": server} for t in discovered]
+            )
+            return {
+                "adapter": "mcp",
+                "tool_id": request.tool_id,
+                "operation": request.operation,
+                "server": server,
+                "trust": trust,
+                "tools": normalized,
+                "invoked": True,
+                "provenance": {"adapter": "mcp", "contract": True, "server": server},
+            }
+
         tool_name = str(args.get("mcp_tool") or args.get("tool") or "").strip()
-        if not server or server not in self._allowed_servers:
-            raise ToolPolicyDeniedError("untrusted_mcp_server")
         if not tool_name or tool_name.startswith("_"):
             raise ToolPolicyDeniedError("untrusted_mcp_tool")
+        trust = self._require_allowed_server(server)
         if self._allowed_tools and tool_name not in self._allowed_tools:
             raise ToolPolicyDeniedError("mcp_tool_not_allowlisted")
-        trust = self._server_trust.get(server, "untrusted")
-        if trust in {"untrusted", "UNTRUSTED"}:
-            raise ToolPolicyDeniedError("untrusted_mcp_server")
-        return _scaffold_payload(
-            "mcp",
-            request,
-            server=server,
-            mcp_tool=tool_name,
-            trust=trust,
-            invoked=False,
-            note="scaffold_only",
-        )
+        transport = self._transports.get(server)
+        if transport is None:
+            return _scaffold_payload(
+                "mcp",
+                request,
+                server=server,
+                mcp_tool=tool_name,
+                trust=trust,
+                invoked=False,
+                note="scaffold_only",
+            )
+        call_arguments = dict(args.get("arguments") or {})
+        try:
+            result = await transport.call_tool(tool_name, call_arguments)
+        except Exception as exc:
+            raise ToolUnavailableError(f"mcp_call_failed:{type(exc).__name__}") from exc
+        return {
+            "adapter": "mcp",
+            "tool_id": request.tool_id,
+            "operation": request.operation,
+            "server": server,
+            "mcp_tool": tool_name,
+            "trust": trust,
+            "invoked": True,
+            "result": result,
+            "provenance": {"adapter": "mcp", "contract": True, "server": server},
+        }
 
     async def execute_write(self, request, context) -> dict:
         raise ToolPolicyDeniedError("mcp_write_via_side_effect_only")
