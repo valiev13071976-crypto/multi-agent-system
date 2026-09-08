@@ -76,11 +76,22 @@ class BoundedHttpClient:
             )
         if resp.status_code >= 400:
             cat = classify_http_status(resp.status_code)
+            # Production defect closure: previously the raw response body was
+            # discarded here entirely -- every 4xx/5xx from every provider
+            # collapsed into just the category name (e.g. "BAD_REQUEST"),
+            # with the provider's own actual error/error_description (which
+            # is exactly what explains *why* a request was rejected) thrown
+            # away before any caller ever got a chance to look at it. Bounded
+            # and best-effort only -- never raises if the body can't be
+            # decoded, and callers remain responsible for any further
+            # sanitization before surfacing this to a user.
+            body_preview = resp.content[: self.max_response_bytes].decode("utf-8", errors="replace")
             raise ProductionProviderError(
                 cat,
                 message=f"http_{resp.status_code}",
                 provider_id=self.provider_id,
                 retryable=cat in {ProviderErrorCategory.RATE_LIMITED, ProviderErrorCategory.TIMEOUT, ProviderErrorCategory.PROVIDER_UNAVAILABLE},
+                metadata={"status_code": resp.status_code, "response_body": body_preview},
             )
         if len(resp.content) > self.max_response_bytes:
             raise ProductionProviderError(

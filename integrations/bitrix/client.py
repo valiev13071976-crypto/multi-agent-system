@@ -12,6 +12,35 @@ from integrations.production.errors import ProductionProviderError, ProviderErro
 from integrations.production.http import BoundedHttpClient
 
 
+def _describe_provider_error(exc: ProductionProviderError) -> str:
+    """Best-effort, bounded, sanitized description of a failed Bitrix REST
+    call. Production defect closure: a bare HTTP status category (e.g.
+    "BAD_REQUEST") never says *why* Bitrix rejected a request -- Bitrix's
+    own REST error envelope (``{"error": "<code>", "error_description":
+    "<text>"}``) carries that reason. Prefers it when the transport
+    captured a response body (see ``BoundedHttpClient.request``'s
+    ``metadata["response_body"]``); falls back to the bare category if the
+    body is missing/unparseable/not the expected shape -- never fabricates
+    a reason the response didn't actually contain, and never echoes an
+    unbounded body verbatim."""
+    category = str(exc.category.value)
+    body = exc.metadata.get("response_body") if isinstance(exc.metadata, dict) else None
+    if not body:
+        return category
+    try:
+        parsed = json.loads(body)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return category
+    if not isinstance(parsed, dict):
+        return category
+    code = parsed.get("error")
+    description = parsed.get("error_description")
+    if code is None and description is None:
+        return category
+    detail = " — ".join(str(part) for part in (code, description) if part not in (None, ""))[:300]
+    return f"{category}: {detail}" if detail else category
+
+
 class BitrixHttpClient:
     """Production-capable Bitrix webhook client — no network unless explicitly configured."""
 
@@ -64,7 +93,7 @@ class BitrixHttpClient:
                 from integrations.activation.errors import IntegrationAuthFailedError
 
                 raise IntegrationAuthFailedError() from exc
-            raise BitrixIntegrationError(str(exc.category.value)) from exc
+            raise BitrixIntegrationError(_describe_provider_error(exc)) from exc
 
         body_text = resp.content[: self._http.max_response_bytes].decode("utf-8", errors="replace")
         try:
