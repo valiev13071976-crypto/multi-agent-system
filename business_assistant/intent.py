@@ -149,7 +149,7 @@ def requires_business_integration(text: str) -> bool:
     return False
 
 
-def is_conversational(text: str) -> bool:
+def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     """General knowledge / reasoning / chat — not business data/action integration."""
     raw = (text or "").strip()
     if not raw:
@@ -173,6 +173,26 @@ def is_conversational(text: str) -> bool:
     if "что ты умеешь" in tl or "what can you do" in tl:
         return True
 
+    # Production defect closure (XLSX attachment -> failed response): a
+    # request that carries a file attachment (spreadsheet/document) must
+    # reach the conversational Panda AI core -- the ONLY pipeline that
+    # actually resolves attachments and reads their content (see
+    # WorkflowPandaConversationGateway.respond()'s spreadsheet_attachment_count
+    # / detect_family(has_spreadsheet_attachment=...) in
+    # business_assistant/action_continuation.py). The older fixture-only
+    # business-workflow/recipe engine below (BusinessAssistantService.execute)
+    # never consumes artifact_refs at all, so previously any attachment
+    # turn whose wording also matched a business/domain term (e.g.
+    # mentioning "Bitrix" while asking Panda to analyze an uploaded price
+    # list) got misrouted there and silently never read the file. An
+    # explicit immediate-write/publish verb (already gating
+    # requires_business_integration below) still overrides this and stays
+    # on the governed business-workflow path unchanged.
+    if has_attachments and not any(
+        w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all")
+    ):
+        return True
+
     if requires_business_integration(raw):
         return False
 
@@ -189,8 +209,8 @@ def is_conversational(text: str) -> bool:
     return False
 
 
-def classify_intent(text: str) -> str:
-    if is_conversational(text):
+def classify_intent(text: str, *, has_attachments: bool = False) -> str:
+    if is_conversational(text, has_attachments=has_attachments):
         return INTENT_CONVERSATIONAL
     t = (text or "").casefold()
     if any(w in t for w in ("только анализ", "только проанализируй", "analyze only", "read only", "ничего не меняй")):

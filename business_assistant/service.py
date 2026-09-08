@@ -180,6 +180,7 @@ class BusinessAssistantService:
         read_only: bool = False,
         budget_limit: Decimal | None = None,
         source_is_untrusted: bool = False,
+        attachments_prefer_conversational: bool = True,
     ) -> BusinessRequest:
         tenant = require_tenant_id(tenant_id)
         # Injection in untrusted external content must not escalate
@@ -189,7 +190,19 @@ class BusinessAssistantService:
         elif detect_injection(text) and source_is_untrusted is False:
             # User text with injection-like phrases still cannot override policy; continue but flag
             pass
-        intent = classify_intent(text)
+        # Production defect closure (XLSX attachment -> failed response):
+        # ``attachments_prefer_conversational`` lets the caller (the API
+        # layer, which already runs its own large-batch heuristic --
+        # BusinessAssistantApiService._is_batch_request) opt a request OUT
+        # of the attachment->conversational preference below when it has
+        # already decided this attachment is a large supplier dataset meant
+        # for the scale-safe batch workflow pipeline (never the interactive
+        # LLM/conversational path) -- see WORKLOAD_BATCH routing. Defaults to
+        # True so every other existing caller (tests, direct
+        # BusinessAssistantService use) keeps the new, correct behavior.
+        intent = classify_intent(
+            text, has_attachments=bool(artifact_refs) and attachments_prefer_conversational
+        )
         constraints = extract_constraints(text)
         if read_only:
             constraints = BusinessConstraint(
@@ -1872,9 +1885,22 @@ class BusinessAssistantService:
                 ex.status = STATUS_COMPLETED_WITH_WARNINGS
             else:
                 ex.status = STATUS_PARTIALLY_COMPLETED
-            return
-        if all(s in {"COMPLETED", "SKIPPED"} for s in statuses):
+        elif all(s in {"COMPLETED", "SKIPPED"} for s in statuses):
             ex.status = STATUS_COMPLETED
+        # Production defect closure: every terminal outcome reaching this
+        # point (COMPLETED / COMPLETED_WITH_WARNINGS / PARTIALLY_COMPLETED /
+        # BLOCKED-but-not-required-write) must carry a non-empty ex.summary.
+        # Callers (business_assistant_api's _safe_summary/get_result) surface
+        # this string as the user-facing final_answer, and an empty summary
+        # is indistinguishable on the frontend from "Panda produced no
+        # answer" (static/shared/presentation.js: isInternalMetadata("") ->
+        # true), even though the backend genuinely finished with real
+        # findings/artifacts to report. Previously only the "all
+        # COMPLETED/SKIPPED" branch above composed a summary; the BLOCKED
+        # branch (e.g. one mid-plan step hitting an unconfigured capability)
+        # returned early with ex.summary left at its default "" -- silently
+        # masking a real, reportable result behind the generic "no answer"
+        # UI message despite HTTP 200 end-to-end.
         req = self._requests.get(ex.request_id)
         if req:
             published = any(
