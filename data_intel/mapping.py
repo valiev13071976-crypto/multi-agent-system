@@ -158,11 +158,36 @@ def _norm_header(name: str) -> str:
     return text.strip("_")
 
 
+# Supplier/procurement context tokens. A price-like token co-occurring with
+# one of these (in any order, regardless of surrounding punctuation/newlines
+# once normalized) identifies a *purchase* price column. Neither list alone
+# is sufficient: a bare "цена"/"price" token stays ambiguous (ROLE_PRICE),
+# and these context tokens never fire without an accompanying price token —
+# this keeps a generic "Цена с НДС" header from being misclassified as a
+# purchase price when no procurement signal is present.
+_PURCHASE_CONTEXT_TOKENS = {
+    "закупка",
+    "закупки",
+    "закупочная",
+    "закупочный",
+    "предоплата",
+    "поставщик",
+    "поставщику",
+    "supplier",
+    "purchase",
+    "cost",
+}
+_PRICE_CONTEXT_TOKENS = {"цена", "price", "стоимость"}
+
+
 def map_header_role(header: str) -> tuple[str, str]:
     """Return (role, confidence)."""
     key = _norm_header(header)
     if key in _ALIAS:
         return _ALIAS[key], CONF_EXACT
+    tokens = set(key.split("_"))
+    if tokens & _PURCHASE_CONTEXT_TOKENS and tokens & _PRICE_CONTEXT_TOKENS:
+        return ROLE_PURCHASE_PRICE, CONF_HIGH
     for alias, role in _ALIAS.items():
         if alias in key or key in alias:
             return role, CONF_HIGH
