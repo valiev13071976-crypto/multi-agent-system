@@ -161,6 +161,32 @@ second connector/architecture:
   `limitations` list for anything the current REST scope/surface cannot
   prove (never silently fabricated).
 
+## Standalone Production Verification (Block 5.6 final defect closure)
+
+`BitrixProductBridge.verify_schema_binding(...)` always routes through
+`IntegrationActivationService.execute_via_gateway`, which requires an
+existing, active `IntegrationConnection` record — a bare
+`IntegrationActivationService()` has none by default, even when
+`LiveBitrixAdapter`/`BitrixIntegrationConfig` are already correctly
+configured from protected env. `integrations/bitrix/production_verification.py`
+adds the one missing seam, reusing the exact same governed
+`configure_connection` → `verify_connection` → `activate_connection`
+lifecycle every other provider already uses (no new connector):
+
+- `ensure_live_bitrix_connection(activation, tenant_id=...)` — idempotently
+  registers/activates a LIVE Bitrix connection from existing env config.
+  Fails closed if LIVE isn't actually configured; never fabricates
+  activation. The connection's `credential_ref` is a fixed, non-secret
+  reference name — the real webhook URL is still resolved exclusively by
+  `LiveBitrixAdapter` from protected environment configuration.
+- `run_production_schema_verification(bitrix_product_id="477")` — the
+  single supported standalone entry point: bootstraps (or reuses) the LIVE
+  connection, then runs the bounded READ-only schema-binding verification.
+
+This does not change `execute_via_gateway`/`resolve_connection` or any
+other provider's behavior — see
+`tests/test_bitrix_production_verification_bootstrap.py`.
+
 ## Product Intelligence Bridge (Block 5.6)
 
 `integrations/bitrix/product_bridge.py`'s `BitrixProductBridge` is the one
