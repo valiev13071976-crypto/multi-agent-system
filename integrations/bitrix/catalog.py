@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import re
 import uuid
 from decimal import Decimal
 from typing import Any
@@ -253,6 +254,55 @@ class BitrixCatalogStore:
             prod.setdefault("stock", {})["total"] = quantity
             prod["stock"]["warehouses"] = {"main": quantity}
         return normalize_product(prod), old
+
+    def list_sections(self, *, tenant_id: str) -> dict:
+        """Bounded section/category read (spec section 10) -- derived from the
+        catalog's own ``section`` name, never a second source of truth. IDs
+        are deterministic external slugs; they must never replace a Panda
+        canonical category id (callers only use them as external references).
+        """
+        cat = self.catalog(tenant_id)
+        seen: dict[str, dict] = {}
+        for prod in cat.values():
+            name = str(prod.get("section") or "Uncategorized")
+            slug = re.sub(r"[^a-z0-9]+", "-", name.strip().lower()).strip("-") or "uncategorized"
+            section_id = f"sec-{slug}"
+            entry = seen.setdefault(
+                section_id,
+                {"section_id": section_id, "name": name, "parent_id": "", "active": False},
+            )
+            if prod.get("active"):
+                entry["active"] = True
+        return {
+            "items": list(seen.values()),
+            "bounded": True,
+            "mode": "FIXTURE",
+            "live": False,
+        }
+
+    def attach_media(self, *, tenant_id: str, bitrix_id: str, media_refs: list[str]) -> tuple[dict, list[str]]:
+        """Idempotent media association -- never re-adds an already-attached ref."""
+        cat = self.catalog(tenant_id)
+        if bitrix_id not in cat:
+            return {}, []
+        prod = cat[bitrix_id]
+        props = prod.setdefault("properties", {})
+        existing = list(props.get("media_refs") or [])
+        added = [m for m in media_refs if m and m not in existing]
+        existing.extend(added)
+        props["media_refs"] = existing
+        return normalize_product(prod), added
+
+    def set_seo(self, *, tenant_id: str, bitrix_id: str, seo_title: str, seo_description: str) -> tuple[dict, dict]:
+        cat = self.catalog(tenant_id)
+        if bitrix_id not in cat:
+            return {}, {}
+        prod = cat[bitrix_id]
+        props = prod.setdefault("properties", {})
+        before = {"seo_title": props.get("seo_title", ""), "seo_description": props.get("seo_description", "")}
+        props["seo_title"] = seo_title
+        props["seo_description"] = seo_description
+        return normalize_product(prod), before
 
     def publish(self, *, tenant_id: str, bitrix_id: str) -> dict:
         cat = self.catalog(tenant_id)

@@ -45,6 +45,7 @@ Rules:
 | `BITRIX_INTEGRATION_MODE` | `FIXTURE` / `SANDBOX` / `LIVE` |
 | `BITRIX_BASE_URL` | Site base URL |
 | `BITRIX_AUTH_MODE` | `webhook` or `oauth` |
+| `BITRIX_ACCOUNT_LOGIN` | **Non-secret** account/login identifier (e.g. the Bitrix account owner's login) — identifies *which* account is connected, never *how* to authenticate. Safe in metadata/logs/UI. |
 | `BITRIX_WEBHOOK_URL` | Webhook URL (secret — env/secret store only) |
 | `BITRIX_CLIENT_ID` | OAuth client ID reference |
 | `BITRIX_CLIENT_SECRET` | OAuth secret reference |
@@ -56,6 +57,12 @@ Rules:
 | `ASPRO_PREMIER_FIELD_MAPPINGS` | Optional mapping config reference |
 
 Never hardcode URLs, tokens, or license keys in code or SQLite business records.
+`BITRIX_ACCOUNT_LOGIN` is the one exception documented above: it is a
+plain identifier, not a secret, so it may be set directly as configuration
+(surfaced via `BitrixIntegrationConfig.safe_metadata()`'s `account_login`
+field). Setting it alone does **not** satisfy `live_configured` — a
+webhook URL or OAuth client id/secret must still be supplied through
+protected environment/secrets before any LIVE call is attempted.
 
 ## Secret Policy
 
@@ -67,6 +74,7 @@ Never hardcode URLs, tokens, or license keys in code or SQLite business records.
 
 ### READ
 - Catalog/product list (paginated)
+- Section/category list (external IDs — never replace Panda canonical category IDs)
 - Product lookup by Bitrix ID, XML ID, article/SKU, Panda mapping
 - Price read (with price type/currency)
 - Stock read
@@ -76,6 +84,8 @@ Never hardcode URLs, tokens, or license keys in code or SQLite business records.
 - Product create/update
 - Price update with verify-after-write
 - Stock update with verify-after-write
+- Media attach (idempotent — never re-attaches an already-associated ref)
+- SEO title/description update
 - Publish/activate
 - Selective export (Excel → subset only)
 
@@ -111,6 +121,41 @@ Duplicate approval, workflow resume, and HTTP retry return cached idempotent res
 - No secret-bearing URL logging
 - LIVE dormant without configuration
 
+## Product Intelligence Bridge (Block 5.6)
+
+`integrations/bitrix/product_bridge.py`'s `BitrixProductBridge` is the one
+explicit seam between Block 5.5 Product Intelligence (`product_intel/`, kept
+vendor-neutral) and this Bitrix connector. It never bypasses
+`IntegrationActivationService.execute_via_gateway` (no raw HTTP client
+access) and provides:
+
+- `import_catalog(...)` — bounded/paginated Bitrix → canonical Product
+  Intelligence import; each Bitrix offer becomes its own canonical
+  `Product` row (variants never collapse), external Bitrix
+  product/offer IDs are preserved via the existing
+  `BitrixCatalogStore.bind_mapping`/`get_mapping` persistence (no new
+  database technology).
+- `plan_sync(...)` — sync diff before any mutation: `CREATE` / `UPDATE` /
+  `UNCHANGED` / `AMBIGUOUS` / `INVALID`. `UNCHANGED` never triggers a remote
+  write.
+- `sync_product(...)` / `sync_price(...)` / `sync_stock(...)` /
+  `associate_media(...)` / `sync_seo(...)` — governed writes from canonical
+  Product Intelligence fields, each going through the same
+  capability/approval/idempotency path as every other Bitrix write. Unknown
+  stock is never written as zero.
+- `bulk_sync(...)` — large catalogs must pass `bulk=True` or raise
+  `product_intel.errors.ProductBatchRequired`, reusing Block 5.5's existing
+  batch-admission gate (`product_intel.planner.assert_sync_product_allowed`)
+  instead of a second job queue/worker.
+
+Business Assistant chat surfaces two representative bounded flows through
+the existing recipe/action-continuation path (`business_assistant/service.py`,
+gated the same way as every other governed external write —
+`req.constraints.show_before_publication` + HITL approval before any Bitrix
+mutation): catalog import (read-only, no Bitrix mutation) and a
+sync-preview → approve → apply flow for a single product, mirroring the
+pre-existing `onec_price_preview`/`onec_price_apply` pattern.
+
 ## Tenant Isolation
 
 All catalog state, mappings, and connections are tenant-scoped. Cross-tenant connection access raises `INTEGRATION_CROSS_TENANT`.
@@ -137,6 +182,8 @@ Without production credentials: `BITRIX_LIVE_ACTIVE=false` and `ASPRO_PREMIER_LI
 
 ## Activation Procedure (no credentials in repo)
 
+0. (Optional, non-secret) Set `BITRIX_ACCOUNT_LOGIN` to identify which
+   Bitrix account is connected -- informational only, never a credential
 1. Set `BITRIX_INTEGRATION_MODE=LIVE`
 2. Configure `BITRIX_WEBHOOK_URL` via secret infrastructure
 3. Configure tenant connection with `secret:` credential ref
@@ -146,7 +193,8 @@ Without production credentials: `BITRIX_LIVE_ACTIVE=false` and `ASPRO_PREMIER_LI
 
 ## Key Files
 
-- `integrations/bitrix/` — adapter, catalog, client, config, mapping, webhooks
+- `integrations/bitrix/` — adapter, catalog, client, config, mapping, webhooks, `product_bridge.py` (Block 5.6 Product Intelligence bridge)
 - `integrations/activation/service.py` — gateway wiring
 - `commerce/product_platform/aspro.py` — Aspro profile mapping
 - `tests/test_bitrix_aspro_premier_closure.py` — closure E2E
+- `tests/test_block5_6_bitrix_aspro_integration.py` — Block 5.6 bridge closure E2E (Acceptance A–U)
