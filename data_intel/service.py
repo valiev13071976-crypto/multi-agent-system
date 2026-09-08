@@ -137,6 +137,14 @@ def _extract_user_supplied_price(text: str) -> str | None:
         return None
     return normalize_decimal_string(match.group(2))
 
+
+def _role_value(row: dict, table, role: str) -> str:
+    col = next((c for c in table.columns if c.semantic_role == role), None)
+    if col is None:
+        return ""
+    value = row.get(col.source_name)
+    return str(value) if value not in (None, "") else ""
+
 _OP_HUMAN_RU = {
     "filter_contains": "фильтр по тексту",
     "filter_compare": "фильтр по цене",
@@ -690,6 +698,23 @@ class DataIntelligenceService:
             "Статус: подготовлено для предпросмотра Bitrix/Aspro. "
             "Публикация/запись не выполнена — жду вашего подтверждения перед записью."
         )
+        # Conversational glue for the governed single-product Bitrix write
+        # (business_assistant.controlled_bitrix_write): a flat, already
+        # role-resolved field dict so a later explicit approval turn
+        # ("Подтверждаю: создай этот товар в Bitrix...") can build a
+        # SingleProductWriteRequest from THIS SAME previewed row without
+        # re-parsing the workbook or guessing which column is which --
+        # persisted onto the conversation's ActiveTask by the caller
+        # (WorkflowPandaConversationGateway._invoke_tool). Absent roles are
+        # simply empty strings, never invented.
+        product_fields = {
+            "title": _role_value(row, table, ROLE_PRODUCT_NAME),
+            "sku": _role_value(row, table, ROLE_SKU) or _role_value(row, table, ROLE_ARTICLE),
+            "ean": _role_value(row, table, ROLE_EAN),
+            "category": _role_value(row, table, ROLE_CATEGORY),
+            "brand": _role_value(row, table, ROLE_BRAND),
+            "purchase_price": str(purchase_price) if purchase_price not in (None, "") else "",
+        }
         return {
             "status": "ROW_FOUND",
             "dataset_id": dataset_id,
@@ -698,6 +723,8 @@ class DataIntelligenceService:
             "row": {k: v for k, v in row.items() if not str(k).startswith(_PREVIEW_INTERNAL_PREFIX)},
             "row_prices": row_prices,
             "user_supplied_price": user_price,
+            "product_fields": product_fields,
+            "retail_price_preview": str(retail_price) if retail_price not in (None, "") else "",
             "summary_text": "\n".join(lines),
         }
 

@@ -46,7 +46,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Sequence
+from typing import Mapping, Sequence
 
 from data_intel.cleaning import clean_text, normalize_decimal_string
 from data_intel.contracts import (
@@ -166,6 +166,35 @@ def build_write_request_from_row(
         category_source=_first_column_value(row, columns, ROLE_CATEGORY),
         brand=_first_column_value(row, columns, ROLE_BRAND),
         purchase_price=_first_column_value(row, columns, ROLE_PURCHASE_PRICE),
+        product_id=product_id,
+    )
+
+
+def build_write_request_from_fields(
+    fields: Mapping[str, str],
+    *,
+    tenant_id: str,
+    retail_price: str,
+    currency: str = "RUB",
+    product_id: str = "",
+) -> SingleProductWriteRequest:
+    """Build a canonical single-product write request from an already
+    role-resolved flat field dict (``data_intel``'s row-lookup preview's
+    ``product_fields`` -- see ``data_intel.service._row_lookup_result``)
+    plus the retail price the OWNER supplied/confirmed in their approval
+    message. Mirrors ``build_write_request_from_row`` for the conversational
+    approval path, which only has the persisted flat fields (from the
+    ActiveTask), not the raw row + column schema objects."""
+    return SingleProductWriteRequest(
+        tenant_id=tenant_id,
+        title=str(fields.get("title") or ""),
+        sku=str(fields.get("sku") or ""),
+        retail_price=str(retail_price or ""),
+        currency=currency,
+        ean=str(fields.get("ean") or ""),
+        category_source=str(fields.get("category") or ""),
+        brand=str(fields.get("brand") or ""),
+        purchase_price=str(fields.get("purchase_price") or ""),
         product_id=product_id,
     )
 
@@ -397,3 +426,59 @@ def _read_back_and_compare(
         "expected": expected,
         "mismatched_fields": mismatched,
     }
+
+
+def format_bitrix_write_result_text(result: Mapping) -> str:
+    """Render the real ``execute_single_product_write`` outcome for the
+    Panda UI -- the exact same status/read-back this module already
+    produces, never a canned "done" message. Used by the conversational
+    approval path (WorkflowPandaConversationGateway) so the user always
+    sees the real Bitrix id, retail price, unwritten fields and read-back
+    verification result of the write that was just attempted."""
+    status = str(result.get("status") or "")
+
+    if status == STATUS_WRITE_VERIFIED or status == STATUS_WRITE_VERIFICATION_MISMATCH:
+        retail = result.get("retail_price") or {}
+        lines = [
+            "Товар создан в Bitrix (неактивен — публикация требует отдельного решения)."
+            if status == STATUS_WRITE_VERIFIED
+            else "Товар создан в Bitrix, но проверка после записи (read-back) не совпала с ожидаемым.",
+            f"Bitrix ID: {result.get('bitrix_product_id')}",
+            f"Название: {result.get('name')}",
+            f"Артикул/SKU: {result.get('sku')}",
+            f"Розничная цена: {retail.get('amount')} {retail.get('currency')}",
+        ]
+        if result.get("brand"):
+            lines.append(f"Бренд: {result.get('brand')}")
+        not_written = result.get("not_written") or []
+        if not_written:
+            fields = ", ".join(str(item.get("field")) for item in not_written)
+            lines.append(f"Не записано (нет проверенного назначения в Bitrix): {fields}.")
+        read_back = result.get("read_back") or {}
+        lines.append(
+            "Проверка после записи: подтверждена."
+            if read_back.get("matches")
+            else f"Проверка после записи: НЕ подтверждена ({read_back.get('reason', 'mismatch')})."
+        )
+        return "\n".join(lines)
+
+    if status == STATUS_EXISTING_PRODUCT_FOUND:
+        return (
+            "Товар с этим артикулом/SKU уже существует в Bitrix. "
+            "Эта операция не обновляет существующие товары автоматически — "
+            "нужно отдельное явное решение перед обновлением."
+        )
+    if status == STATUS_AMBIGUOUS:
+        return (
+            "Не удалось однозначно определить, существует ли этот товар в Bitrix "
+            "(найдено несколько похожих записей). Запись не выполнена."
+        )
+    if status == STATUS_UNRESOLVED:
+        return f"Не удалось подготовить запись в Bitrix: {result.get('reason', 'unresolved')}."
+    if status == STATUS_WRITE_FAILED:
+        return f"Запись в Bitrix не удалась: {result.get('error', 'write_failed')}. Товар не создан."
+    if status == STATUS_WRITE_NOT_PERFORMED:
+        return "Запись в Bitrix не выполнена."
+    if status == STATUS_APPROVAL_REQUIRED:
+        return "Это действие требует явного подтверждения перед записью в Bitrix."
+    return "Не удалось выполнить запись в Bitrix."

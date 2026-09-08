@@ -271,6 +271,7 @@ class WorkflowPandaConversationGateway:
         action_store=None,
         tool_capabilities=None,
         artifact_service=None,
+        bitrix_product_bridge=None,
     ):
         self._workflow_engine = workflow_engine
         self._run_router = run_router
@@ -278,6 +279,13 @@ class WorkflowPandaConversationGateway:
         self._mode = mode
         self._role = role
         self._tool_gateway = tool_gateway
+        # PANDA -- first controlled production Bitrix product write (PR #43
+        # conversational glue): the SAME BitrixProductBridge instance
+        # BusinessAssistantService already uses for every other governed
+        # Bitrix operation (Block 5.6) -- not a second connector. None is
+        # safe (feature is additive; CALL_CONTROLLED_BITRIX_WRITE reports
+        # capability-unavailable rather than raising).
+        self._bitrix_bridge = bitrix_product_bridge
         # Block 3.5.4/3.5.5: optional canonical artifact layer -- trusted
         # attachment resolution for tool calls, and registration of
         # generated image artifacts. None is safe (feature is additive).
@@ -496,8 +504,27 @@ class WorkflowPandaConversationGateway:
             # mark_executed() below re-reads the task from the store, so the
             # next turn can resolve "them"/"it" without re-upload.
             new_dataset_id = str(data.get("dataset_id") or "")
+            changed = False
             if new_dataset_id:
                 task.parameters["dataset_id"] = new_dataset_id
+                changed = True
+            # PANDA -- first controlled production Bitrix product write
+            # (PR #43 conversational glue): a ROW_FOUND preview identifies
+            # the SAME single product a later explicit "Подтверждаю: создай
+            # этот товар в Bitrix..." confirmation must resolve -- persist
+            # its already role-resolved fields (never the raw row) so that
+            # later turn never has to re-parse the workbook or guess which
+            # column is which (see resolve_bitrix_write_confirmation).
+            if str(data.get("status") or "") == "ROW_FOUND":
+                product_fields = data.get("product_fields")
+                if isinstance(product_fields, dict) and product_fields:
+                    task.parameters["bitrix_product_fields"] = dict(product_fields)
+                    changed = True
+                retail_preview = str(data.get("retail_price_preview") or "")
+                if retail_preview:
+                    task.parameters["bitrix_retail_price_preview"] = retail_preview
+                    changed = True
+            if changed:
                 self._action_store.put(task)
         if family == FAMILY_ACQUISITION and success and task is not None:
             # Block 5.2 multi-turn continuation (spec section 22): once
@@ -546,6 +573,78 @@ class WorkflowPandaConversationGateway:
                 "action_decision": CALL_TOOL,
                 "artifacts": artifacts,
                 "follow_up_kind": None,
+            },
+        )
+
+    async def _invoke_controlled_bitrix_write(
+        self, request: ConversationRequest, action
+    ) -> ConversationResult:
+        """PANDA -- first controlled production Bitrix product write (PR #43
+        conversational glue). Dispatches ``action.decision ==
+        CALL_CONTROLLED_BITRIX_WRITE`` straight to
+        ``business_assistant.controlled_bitrix_write.execute_single_product_write``
+        -- NOT through ``self._tool_gateway`` (this is not a ToolGateway-
+        registered tool) -- so PR #43's own gateway/HITL/idempotency
+        protections (``IntegrationActivationService.execute_via_gateway``)
+        remain the single, unduplicated approval/write boundary."""
+        from business_assistant.action_continuation import (
+            CALL_CONTROLLED_BITRIX_WRITE,
+            mark_executed,
+        )
+        from business_assistant.controlled_bitrix_write import (
+            build_write_request_from_fields,
+            execute_single_product_write,
+            format_bitrix_write_result_text,
+        )
+
+        task = action.task
+        idem = str(action.idempotency_key or request.request_id or "")
+        if idem and idem in self._executed_keys:
+            return ConversationResult(
+                text=(
+                    "Этот товар уже был создан по этому подтверждению — "
+                    "повторная запись не выполняется."
+                ),
+                task_id=getattr(task, "task_id", None),
+                metadata={
+                    "action_decision": CALL_CONTROLLED_BITRIX_WRITE,
+                    "duplicate": True,
+                    "artifacts": [],
+                },
+            )
+        if self._bitrix_bridge is None:
+            if task is not None:
+                mark_executed(self._action_store, task, failed=True)
+            return ConversationResult(
+                text="Запись в Bitrix сейчас недоступна — интеграция не настроена.",
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CALL_CONTROLLED_BITRIX_WRITE, "artifacts": []},
+            )
+
+        args = dict(action.arguments or {})
+        write_request = build_write_request_from_fields(
+            dict(args.get("product_fields") or {}),
+            tenant_id=str(request.tenant_id or ""),
+            retail_price=str(args.get("retail_price") or ""),
+        )
+        result = execute_single_product_write(
+            self._bitrix_bridge,
+            tenant_id=str(request.tenant_id or ""),
+            request=write_request,
+            approved=True,
+            idempotency_key=idem,
+        )
+        if idem and result.get("mutated"):
+            self._executed_keys.add(idem)
+        if task is not None:
+            mark_executed(self._action_store, task, failed=not result.get("mutated"))
+        return ConversationResult(
+            text=format_bitrix_write_result_text(result),
+            task_id=getattr(task, "task_id", None),
+            metadata={
+                "action_decision": CALL_CONTROLLED_BITRIX_WRITE,
+                "artifacts": [],
+                "bitrix_write_result": result,
             },
         )
 
@@ -628,6 +727,7 @@ class WorkflowPandaConversationGateway:
         from business_assistant.action_continuation import (
             ANSWER_TEXT,
             ASK_CLARIFICATION,
+            CALL_CONTROLLED_BITRIX_WRITE,
             CALL_TOOL,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
@@ -683,6 +783,19 @@ class WorkflowPandaConversationGateway:
             spreadsheet_attachment_count=spreadsheet_attachment_count,
         )
         self.last_action_decision = action
+
+        if action.decision == CALL_CONTROLLED_BITRIX_WRITE:
+            result = await self._invoke_controlled_bitrix_write(request, action)
+            self._record_latency(t0, follow_up_ms)
+            meta = dict(result.metadata or {})
+            meta["follow_up_kind"] = resolution.kind
+            meta["follow_up_target"] = resolution.target
+            return ConversationResult(
+                text=result.text,
+                workflow_id=result.workflow_id,
+                task_id=result.task_id or task_id,
+                metadata=meta,
+            )
 
         if action.decision == CALL_TOOL and self._tool_gateway is not None:
             result = await self._invoke_tool(request, action)

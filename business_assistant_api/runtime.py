@@ -82,6 +82,7 @@ def wire_panda_conversation_gateway(
     logger: logging.Logger | None = None,
     tool_gateway=None,
     artifact_service=None,
+    bitrix_product_bridge=None,
 ) -> bool:
     """Attach Panda conversational gateway; return False when engine unavailable."""
     log = logger or logging.getLogger(__name__)
@@ -99,11 +100,19 @@ def wire_panda_conversation_gateway(
     if gateway is None:
         router_obj = getattr(run_router, "__self__", None)
         gateway = getattr(router_obj, "tool_gateway", None)
+    # PANDA -- first controlled production Bitrix product write (PR #43
+    # conversational glue): reuse the SAME BitrixProductBridge instance
+    # already attached to ``ba_service`` (Block 5.6, wired in main.py before
+    # this function runs) -- never a second connector.
+    bridge = bitrix_product_bridge
+    if bridge is None:
+        bridge = getattr(ba_service, "bitrix_product_bridge", None)
     ba_service.conversation_gateway = WorkflowPandaConversationGateway(
         workflow_engine=workflow_engine,
         run_router=run_router,
         context_manager=context_manager,
         tool_gateway=gateway,
         artifact_service=artifact_service,
+        bitrix_product_bridge=bridge,
     )
     return True

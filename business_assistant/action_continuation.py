@@ -26,6 +26,7 @@ from business_assistant.follow_up import (
     FollowUpResolution,
 )
 from business_assistant.intent import requires_business_integration
+from data_intel.cleaning import normalize_decimal_string
 from security.tenant import require_tenant_id
 
 # Block 5.1: FAMILY_EXCEL now routes to the real, active data_intel capability
@@ -73,6 +74,16 @@ CALL_TOOL = "CALL_TOOL"
 ASK_CLARIFICATION = "ASK_CLARIFICATION"
 REQUEST_APPROVAL = "REQUEST_APPROVAL"
 FAIL_UNAVAILABLE = "FAIL_UNAVAILABLE"
+# PANDA -- first controlled production Bitrix product write (PR #43):
+# an explicit, already-confirmed instruction to create a specific,
+# previously-previewed product in Bitrix. Deliberately NOT ``CALL_TOOL``:
+# ``business_assistant.controlled_bitrix_write.execute_single_product_write``
+# is not a ToolGateway-registered tool -- it is invoked directly (still
+# through its own unchanged IntegrationActivationService approval/
+# idempotency gate), so the caller (WorkflowPandaConversationGateway) must
+# dispatch it through a dedicated, unambiguous decision instead of the
+# generic tool-invocation path.
+CALL_CONTROLLED_BITRIX_WRITE = "CALL_CONTROLLED_BITRIX_WRITE"
 
 STATUS_DRAFT = "DRAFT"
 STATUS_WAITING_FOR_INPUT = "WAITING_FOR_INPUT"
@@ -107,6 +118,15 @@ FAMILY_CONTENT = "content"
 # domain model) -- a plain "attach a spreadsheet" turn still routes to
 # FAMILY_EXCEL; only an explicit product-catalog verb routes here.
 FAMILY_PRODUCT = "product"
+# PANDA -- first controlled production Bitrix product write (PR #43): an
+# explicit, single-turn confirmation of a Bitrix product create -- e.g.
+# "Подтверждаю: создай этот товар в Bitrix. Розничная цена 29990 ₽." Never
+# entered via generic continuation heuristics: only ``detect_family``'s
+# ``is_explicit_bitrix_write_confirmation`` check below routes here, and it
+# requires an explicit confirmation marker + an explicit Bitrix target +
+# an explicit create/write verb all in the SAME message (spec requirement:
+# never infer approval from vague continuation phrases).
+FAMILY_BITRIX_PRODUCT_WRITE = "bitrix_product_write"
 
 RISK_GENERATE = "generate"
 RISK_READ = "read"
@@ -419,6 +439,25 @@ _WRITE_STEMS = (
     "send email",
 )
 
+# PANDA -- first controlled production Bitrix product write (PR #43): three
+# independent signals, ALL required in the SAME message, so an explicit
+# Bitrix create can never be confused with a vague continuation
+# ("продолжай", "давай", "ок", "делай дальше" match none of these).
+_BITRIX_APPROVAL_MARKER_STEMS = ("подтвержда", "подтверд", "confirm", "i confirm")
+_BITRIX_TARGET_MARKER_STEMS = ("bitrix", "битрикс", "аспро", "aspro")
+_BITRIX_CREATE_VERB_STEMS = (
+    "созда",
+    "запиши",
+    "добавь",
+    "опубликуй",
+    "create",
+    "publish",
+    "write it",
+)
+_CONFIRMED_RETAIL_PRICE_RE = re.compile(
+    r"(розничн\w*|продажн\w*|retail|selling)\D{0,20}?(\d[\d\s]*(?:[.,]\d+)?)", re.I
+)
+
 # Block 5.2: a bare http(s) URL in the message is the strongest, fully
 # deterministic acquisition signal -- mirrors how a spreadsheet attachment is
 # the strongest Excel signal (spec section 20: "no technical mode picker").
@@ -557,6 +596,31 @@ def _is_yes(text: str) -> bool:
     return blob in {"да", "yes", "ок", "ok", "угу", "ага"}
 
 
+def is_explicit_bitrix_write_confirmation(text: str) -> bool:
+    """True only for an explicit, unambiguous, single-message instruction to
+    create a specific product in Bitrix that ALSO explicitly confirms/
+    approves it -- e.g. 'Подтверждаю: создай этот товар в Bitrix. Розничная
+    цена 29990 ₽.'. Requires all three signals (confirmation marker +
+    Bitrix target + create/write verb); a bare 'да'/'ок'/'давай'/'продолжай'/
+    'делай дальше' -- with or without an active task -- can never satisfy
+    this, so approval is never inferred from a vague continuation phrase."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if not _has_stem(blob, _BITRIX_APPROVAL_MARKER_STEMS):
+        return False
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+        return False
+    return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS)
+
+
+def _extract_confirmed_retail_price(text: str) -> str:
+    match = _CONFIRMED_RETAIL_PRICE_RE.search(text or "")
+    if not match:
+        return ""
+    return normalize_decimal_string(match.group(2)) or ""
+
+
 def _is_unrelated_new_task(text: str) -> bool:
     if requires_business_integration(text):
         return True
@@ -676,6 +740,13 @@ def detect_family(
     text: str, active: ActiveTask | None, *, has_spreadsheet_attachment: bool = False
 ) -> str | None:
     raw = text or ""
+    # PANDA -- first controlled production Bitrix product write (PR #43):
+    # checked before every other signal (including the generic FAMILY_WRITE
+    # stems below) -- an explicit, self-confirming Bitrix create instruction
+    # must always win, never be reclassified as an unrelated write stub or
+    # folded into an active FAMILY_EXCEL continuation.
+    if is_explicit_bitrix_write_confirmation(raw):
+        return FAMILY_BITRIX_PRODUCT_WRITE
     if _has_stem(raw, _WRITE_STEMS):
         return FAMILY_WRITE
     # Block 5.5: an explicit "build a product catalog" verb wins over the
@@ -941,6 +1012,79 @@ def inspect_capability(gateway, tool_id: str) -> str:
     return CAPABILITY_AVAILABLE_AND_AUTHORIZED
 
 
+def _bitrix_missing_context_decision(active: ActiveTask | None) -> ActionDecision:
+    return ActionDecision(
+        decision=ANSWER_TEXT,
+        readiness=NOT_EXECUTABLE,
+        continuation=NEW_TASK,
+        task=active,
+        user_message=(
+            "Не вижу подготовленной карточки товара для записи в Bitrix. "
+            "Сначала приложите файл и попросите подготовить карточку конкретного "
+            "товара, а затем подтвердите его создание."
+        ),
+        extra_llm=False,
+    )
+
+
+def resolve_bitrix_write_confirmation(
+    text: str,
+    *,
+    active: ActiveTask | None,
+    store: ActiveTaskStore,
+    request_id: str = "",
+) -> ActionDecision:
+    """Deterministic routing for an already-confirmed Bitrix product create
+    (PANDA -- first controlled production Bitrix product write, PR #43).
+
+    Resolves the SAME previously-previewed product from the active
+    FAMILY_EXCEL task's ``parameters['bitrix_product_fields']`` -- persisted
+    by ``WorkflowPandaConversationGateway._invoke_tool`` right after a
+    ``data.excel_assistant`` ROW_FOUND preview -- never from the confirmation
+    text alone. If that context is missing, this NEVER writes; it asks the
+    user to prepare/select the product first (spec requirement 8)."""
+    if active is None or active.family != FAMILY_EXCEL:
+        return _bitrix_missing_context_decision(active)
+
+    fields = dict(active.parameters.get("bitrix_product_fields") or {})
+    if not fields.get("title") or not fields.get("sku"):
+        return _bitrix_missing_context_decision(active)
+
+    retail_price = _extract_confirmed_retail_price(text) or str(
+        active.parameters.get("bitrix_retail_price_preview") or ""
+    )
+    if not retail_price:
+        return ActionDecision(
+            decision=ANSWER_TEXT,
+            readiness=NEEDS_REQUIRED_INPUT,
+            continuation=CONTINUE_ACTIVE_TASK,
+            task=active,
+            user_message="Укажите розничную цену для подтверждения записи в Bitrix.",
+            extra_llm=False,
+        )
+
+    args = {
+        "product_fields": fields,
+        "retail_price": retail_price,
+        "dataset_id": str(active.parameters.get("dataset_id") or ""),
+    }
+    idem = _idempotency_key(request_id, "bitrix.controlled_product_write", args)
+    active.status = STATUS_READY
+    store.put(active)
+    return ActionDecision(
+        decision=CALL_CONTROLLED_BITRIX_WRITE,
+        readiness=READY_TO_EXECUTE,
+        continuation=CONTINUE_ACTIVE_TASK,
+        task=active,
+        arguments=args,
+        tool_id="bitrix.controlled_product_write",
+        operation="execute_single_product_write",
+        extra_llm=False,
+        capability_status=CAPABILITY_AVAILABLE_REQUIRES_APPROVAL,
+        idempotency_key=idem,
+    )
+
+
 def resolve_action_turn(
     text: str,
     *,
@@ -964,6 +1108,21 @@ def resolve_action_turn(
     conv = str(conversation_id or "")
     active = store.get(tenant_id=tenant, owner_id=owner, conversation_id=conv)
     has_spreadsheet_attachment = spreadsheet_attachment_count > 0
+
+    # PANDA -- first controlled production Bitrix product write (PR #43):
+    # checked unconditionally, before follow-up/continuation heuristics --
+    # an explicit, self-confirming Bitrix create instruction must never be
+    # reclassified by e.g. a REFERENT/TRANSFORM follow-up guess. This ONLY
+    # matches when the message itself carries all three explicit signals
+    # (see ``is_explicit_bitrix_write_confirmation``); it never fires for a
+    # bare "да"/"ок"/"давай"/"продолжай"/"делай дальше".
+    if is_explicit_bitrix_write_confirmation(current):
+        return resolve_bitrix_write_confirmation(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
 
     if follow_up is not None and follow_up.kind in {KIND_TRANSFORM, KIND_REFERENT}:
         resolved_family = (
