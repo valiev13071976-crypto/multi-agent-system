@@ -133,6 +133,25 @@ class BitrixProductBridge:
         )
         return out["result"]
 
+    def read_product(self, *, tenant_id: str, bitrix_id: str, connection_id: str | None = None) -> dict:
+        """Explicit, independent read-back of one product by its Bitrix id.
+
+        Deliberately a fresh governed READ (never the write call's own
+        embedded ``result["product"]`` echo) so a caller can verify what is
+        actually persisted, not merely what the write request believed it
+        sent -- used by controlled/first-write flows that must confirm the
+        real post-write state (spec: read-back verification).
+        """
+        out = self._activation.execute_via_gateway(
+            tenant_id=tenant_id,
+            capability=READ_CAPABILITY,
+            environment=self._environment,
+            operation_class=OP_READ,
+            payload={"operation": "product_lookup", "bitrix_id": bitrix_id},
+            connection_id=connection_id,
+        )
+        return out["result"].get("product") or {}
+
     # --- production schema binding verification (Block 5.6 final binding) --
 
     def verify_schema_binding(
@@ -327,6 +346,7 @@ class BitrixProductBridge:
         idempotency_key: str,
         approved_write: bool = True,
         connection_id: str | None = None,
+        active: bool = True,
     ) -> dict:
         plan = self.plan_sync(tenant_id=tenant_id, canonical_product=canonical_product)
         action = plan["action"]
@@ -342,7 +362,13 @@ class BitrixProductBridge:
                 "panda_product_id": canonical_product.get("product_id"),
                 "product": canonical_product,
                 "aspro_premier_enabled": self._aspro_enabled,
-                "active": True,
+                # Callers requiring a cautious first write (e.g. a
+                # controlled single-product test create) may pass
+                # ``active=False`` so the new product is NOT published on
+                # the live storefront until a separate, explicit publish
+                # decision is made. Default preserved for all existing
+                # callers.
+                "active": active,
             }
         else:
             payload = {
