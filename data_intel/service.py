@@ -21,6 +21,10 @@ from data_intel.cleaning import clean_row, normalize_decimal_string
 from data_intel.compare import compare_price_lists, reconcile_stock
 from data_intel.contracts import (
     ROLE_ARTICLE,
+    ROLE_AVAILABLE_STOCK,
+    ROLE_BARCODE,
+    ROLE_BRAND,
+    ROLE_CATEGORY,
     ROLE_EAN,
     ROLE_PRICE,
     ROLE_PRODUCT_NAME,
@@ -84,6 +88,21 @@ _PREVIEW_INTERNAL_PREFIX = "__"
 # text is actually about and surfaces its real values instead.
 _PRODUCT_ID_ROLES = (ROLE_SKU, ROLE_ARTICLE, ROLE_EAN, ROLE_PRODUCT_NAME)
 _PRICE_LOOKUP_ROLES = (ROLE_PURCHASE_PRICE, ROLE_SELLING_PRICE, ROLE_PRICE)
+_STOCK_LOOKUP_ROLES = (ROLE_STOCK, ROLE_AVAILABLE_STOCK)
+# Product-preview card fields (production hotfix: the row-lookup result was
+# a vague "prepared a card and an action plan" sentence that never actually
+# showed the card -- this renders the real, present-in-schema fields only;
+# a role with no matching column in THIS workbook is simply omitted, never
+# invented. Order here is the card's display order.
+_CARD_FIELD_ROLES = (
+    (ROLE_PRODUCT_NAME, "Наименование"),
+    (ROLE_SKU, "Артикул/SKU"),
+    (ROLE_ARTICLE, "Артикул"),
+    (ROLE_EAN, "EAN"),
+    (ROLE_BARCODE, "Штрихкод"),
+    (ROLE_CATEGORY, "Категория"),
+    (ROLE_BRAND, "Бренд"),
+)
 _MIN_IDENTIFIER_MATCH_LEN = 4
 _USER_SUPPLIED_PRICE_RE = re.compile(
     r"(розничн\w*|продажн\w*|retail|selling)\D{0,20}?(\d[\d\s]*(?:[.,]\d+)?)", re.I
@@ -607,25 +626,69 @@ class DataIntelligenceService:
         self, dataset_id: str, row_hit: tuple[dict, str, str], text: str, table
     ) -> dict:
         row, matched_column, matched_value = row_hit
-        price_lines = []
+
+        # Identifying/descriptive fields -- only ones actually present in
+        # THIS workbook's schema, one line per role, never invented.
+        card_lines: list[str] = []
+        seen_roles: set[str] = set()
+        for role, label in _CARD_FIELD_ROLES:
+            if role in seen_roles:
+                continue
+            col = next((c for c in table.columns if c.semantic_role == role), None)
+            if col is None:
+                continue
+            value = row.get(col.source_name)
+            if value in (None, ""):
+                continue
+            card_lines.append(f"{label}: {value}")
+            seen_roles.add(role)
+
         row_prices: dict = {}
+        purchase_price = None
+        selling_price_from_file = None
         for col in table.columns:
             if col.semantic_role not in _PRICE_LOOKUP_ROLES:
                 continue
             value = row.get(col.source_name)
             if value in (None, ""):
                 continue
-            price_lines.append(f"{col.source_name}: {value}")
             row_prices[col.source_name] = value
+            if col.semantic_role == ROLE_PURCHASE_PRICE and purchase_price is None:
+                purchase_price = value
+            elif col.semantic_role == ROLE_SELLING_PRICE and selling_price_from_file is None:
+                selling_price_from_file = value
+        if purchase_price is not None:
+            card_lines.append(f"Закупочная цена (из файла): {purchase_price}")
+
+        # A retail price the USER supplied in this (or the merged prior)
+        # turn always wins over one already in the file -- it is the value
+        # the user explicitly asked Panda to use.
         user_price = _extract_user_supplied_price(text)
-        lines = [f"Нашла товар «{matched_value}» в загруженной таблице (столбец «{matched_column}»)."]
-        if price_lines:
-            lines.append("Цены из файла: " + "; ".join(price_lines) + ".")
-        if user_price:
-            lines.append(f"Цена из запроса: {user_price}.")
+        retail_price = user_price if user_price is not None else selling_price_from_file
+        if retail_price is not None:
+            source = "из запроса" if user_price is not None else "из файла"
+            card_lines.append(f"Розничная цена ({source}): {retail_price}")
+
+        stock_value = None
+        for role in _STOCK_LOOKUP_ROLES:
+            col = next((c for c in table.columns if c.semantic_role == role), None)
+            if col is None:
+                continue
+            value = row.get(col.source_name)
+            if value not in (None, ""):
+                stock_value = value
+                break
+        if stock_value is not None:
+            card_lines.append(f"Остаток: {stock_value}")
+
+        if not card_lines:
+            card_lines.append(f"{matched_column}: {matched_value}")
+
+        lines = ["Карточка товара (предпросмотр):"]
+        lines.extend(f"- {ln}" for ln in card_lines)
         lines.append(
-            "Подготовила карточку товара и план действий для предпросмотра. "
-            "Публикация/запись не выполнена — жду вашего подтверждения."
+            "Статус: подготовлено для предпросмотра Bitrix/Aspro. "
+            "Публикация/запись не выполнена — жду вашего подтверждения перед записью."
         )
         return {
             "status": "ROW_FOUND",
@@ -635,7 +698,7 @@ class DataIntelligenceService:
             "row": {k: v for k, v in row.items() if not str(k).startswith(_PREVIEW_INTERNAL_PREFIX)},
             "row_prices": row_prices,
             "user_supplied_price": user_price,
-            "summary_text": " ".join(lines),
+            "summary_text": "\n".join(lines),
         }
 
     def execute_nl_request(self, dataset_id: str, text: str, *, tenant_id: str) -> dict:
