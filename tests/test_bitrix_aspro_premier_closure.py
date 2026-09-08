@@ -21,6 +21,7 @@ from integrations.activation.errors import (
 from integrations.activation.models import ENV_FIXTURE, ENV_LIVE
 from integrations.activation.service import IntegrationActivationService
 from integrations.bitrix.catalog import BitrixCatalogStore, GLOBAL_BITRIX_CATALOG
+from integrations.bitrix.config import load_bitrix_config
 from integrations.bitrix.errors import (
     BitrixAmbiguousTargetError,
     BitrixNotFoundError,
@@ -281,6 +282,32 @@ class BitrixSecretSafetyTests(unittest.TestCase):
         status = svc.connection_status_safe(tenant_id="tenant-a", connection_id=conn.connection_id)
         self.assertNotIn(secret, str(status))
 
+    def test_account_login_is_non_secret_metadata_not_a_credential(self):
+        """Production account login (e.g. a Bitrix account's own login/email)
+        identifies *which* account is connected, never *how* to authenticate
+        to it -- it must be safe to surface in metadata/logs/UI, and must
+        never substitute for, or satisfy, the real webhook/OAuth secret."""
+
+        prior = os.environ.pop("BITRIX_WEBHOOK_URL", None)
+        try:
+            cfg = load_bitrix_config(
+                {"BITRIX_ACCOUNT_LOGIN": "valiev-panda@yandex.ru", "BITRIX_INTEGRATION_MODE": "LIVE"}
+            )
+            self.assertEqual(cfg.account_login, "valiev-panda@yandex.ru")
+            meta = cfg.safe_metadata()
+            self.assertEqual(meta["account_login"], "valiev-panda@yandex.ru")
+            # Account login alone (no webhook URL / OAuth secret) must NOT
+            # satisfy live_configured -- it carries no authentication power.
+            self.assertFalse(cfg.live_configured)
+        finally:
+            if prior is not None:
+                os.environ["BITRIX_WEBHOOK_URL"] = prior
+
+    def test_account_login_defaults_empty_and_is_env_driven_not_hardcoded(self):
+        cfg = load_bitrix_config({})
+        self.assertEqual(cfg.account_login, "")
+        self.assertNotIn("valiev-panda@yandex.ru", repr(cfg))
+
 
 class BitrixLiveSafetyTests(unittest.TestCase):
     def test_live_without_config_fails_closed(self):
@@ -314,6 +341,32 @@ class BitrixLiveSafetyTests(unittest.TestCase):
                 payload={"operation": "price_update"},
                 idempotency_key="x",
             )
+
+    def test_account_login_alone_does_not_unblock_live_calls(self):
+        """Knowing which production account is connected must never be
+        treated as knowing how to authenticate to it: providing only
+        BITRIX_ACCOUNT_LOGIN (no webhook URL) must still fail closed on
+        both read and write."""
+
+        prior = os.environ.pop("BITRIX_WEBHOOK_URL", None)
+        try:
+            cfg = load_bitrix_config(
+                {"BITRIX_ACCOUNT_LOGIN": "valiev-panda@yandex.ru", "BITRIX_INTEGRATION_MODE": "LIVE"}
+            )
+            adapter = LiveBitrixAdapter(config=cfg)
+            verification = adapter.verify(credential_ref="")
+            self.assertFalse(verification["ok"])
+            with self.assertRaises(IntegrationNotConfiguredError):
+                adapter.read(capability="cms.bitrix.catalog.read", params={})
+            with self.assertRaises(IntegrationNotConfiguredError):
+                adapter.write(
+                    capability="cms.bitrix.catalog.write",
+                    payload={"operation": "price_update"},
+                    idempotency_key="x",
+                )
+        finally:
+            if prior is not None:
+                os.environ["BITRIX_WEBHOOK_URL"] = prior
 
 
 class BitrixRateLimitTests(unittest.TestCase):

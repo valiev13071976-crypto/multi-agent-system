@@ -45,6 +45,7 @@ Rules:
 | `BITRIX_INTEGRATION_MODE` | `FIXTURE` / `SANDBOX` / `LIVE` |
 | `BITRIX_BASE_URL` | Site base URL |
 | `BITRIX_AUTH_MODE` | `webhook` or `oauth` |
+| `BITRIX_ACCOUNT_LOGIN` | **Non-secret** account/login identifier (e.g. the Bitrix account owner's login) — identifies *which* account is connected, never *how* to authenticate. Safe in metadata/logs/UI. |
 | `BITRIX_WEBHOOK_URL` | Webhook URL (secret — env/secret store only) |
 | `BITRIX_CLIENT_ID` | OAuth client ID reference |
 | `BITRIX_CLIENT_SECRET` | OAuth secret reference |
@@ -56,6 +57,12 @@ Rules:
 | `ASPRO_PREMIER_FIELD_MAPPINGS` | Optional mapping config reference |
 
 Never hardcode URLs, tokens, or license keys in code or SQLite business records.
+`BITRIX_ACCOUNT_LOGIN` is the one exception documented above: it is a
+plain identifier, not a secret, so it may be set directly as configuration
+(surfaced via `BitrixIntegrationConfig.safe_metadata()`'s `account_login`
+field). Setting it alone does **not** satisfy `live_configured` — a
+webhook URL or OAuth client id/secret must still be supplied through
+protected environment/secrets before any LIVE call is attempted.
 
 ## Secret Policy
 
@@ -137,6 +144,8 @@ Without production credentials: `BITRIX_LIVE_ACTIVE=false` and `ASPRO_PREMIER_LI
 
 ## Activation Procedure (no credentials in repo)
 
+0. (Optional, non-secret) Set `BITRIX_ACCOUNT_LOGIN` to identify which
+   Bitrix account is connected -- informational only, never a credential
 1. Set `BITRIX_INTEGRATION_MODE=LIVE`
 2. Configure `BITRIX_WEBHOOK_URL` via secret infrastructure
 3. Configure tenant connection with `secret:` credential ref

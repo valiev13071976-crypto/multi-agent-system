@@ -20,6 +20,14 @@ class BitrixIntegrationConfig:
     site_id: str
     aspro_premier_enabled: bool
     aspro_field_mappings_ref: str
+    # Account/login identifier for the connected Bitrix account -- explicitly
+    # NON-SECRET per spec (it identifies *which* account, not how to
+    # authenticate to it). Safe to surface in metadata/logs/UI. Never used
+    # as, or substituted for, a webhook URL/OAuth secret/API token; those
+    # remain sourced exclusively from protected env/secrets (see
+    # ``_resolved_webhook_url``/``client_secret_ref`` and
+    # ``docs/bitrix-aspro-premier-integration.md``'s Secret Policy).
+    account_login: str = ""
 
     @property
     def is_live(self) -> bool:
@@ -49,6 +57,9 @@ class BitrixIntegrationConfig:
             "live_configured": self.live_configured,
             "verify_tls": self.verify_tls,
             "timeout_seconds": self.timeout_seconds,
+            # Non-secret account identity only -- never a credential. Safe
+            # to include alongside the rest of this already-redacted view.
+            "account_login": self.account_login or "",
         }
 
 
@@ -68,4 +79,5 @@ def load_bitrix_config(env: dict | None = None) -> BitrixIntegrationConfig:
         site_id=str(e.get("BITRIX_SITE_ID") or "").strip(),
         aspro_premier_enabled=str(e.get("ASPRO_PREMIER_ENABLED", "")).lower() in {"1", "true", "yes"},
         aspro_field_mappings_ref=str(e.get("ASPRO_PREMIER_FIELD_MAPPINGS") or "").strip(),
+        account_login=str(e.get("BITRIX_ACCOUNT_LOGIN") or "").strip(),
     )
