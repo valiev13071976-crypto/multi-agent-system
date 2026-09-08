@@ -33,20 +33,25 @@ called for the *real* tenant right before the real write.
 live-configured (previously hardcoded to the shared, always-FIXTURE
 ``BusinessAssistantService.integration_environment``).
 
-No real network calls anywhere in this file; HTTP would only be reached
-through ``LiveBitrixAdapter``, whose ``write()`` deliberately still raises
-``IntegrationNotConfiguredError("bitrix_live_write_blocked_engineering")``
-(a separate, pre-existing, documented placeholder --
-``docs/bitrix-aspro-premier-integration.md``'s "Deferred / Unsupported:
-LIVE mutating writes during engineering closure (structurally blocked)"
--- unrelated to and unchanged by this fix). Zero live Bitrix mutation is
-possible from any test in this file, or from Cursor, at any point.
+No real network calls anywhere in this file. ``LiveBitrixAdapter.write()``
+for ``product_create`` is now really implemented (a later PR closed the
+``bitrix_live_write_blocked_engineering`` placeholder that operation used
+to hit -- see ``tests/test_bitrix_live_product_create_write.py`` for that
+implementation's full coverage); the two tests below that exercise
+``execute_single_product_write`` all the way through therefore mock
+``BoundedHttpClient.request`` with a deterministic, controlled failure so
+they still make ZERO real network calls while proving the connection-
+resolution fix (getting PAST ``resolve_connection`` into the real adapter)
+independently of whatever ``product_create`` itself does next.
 """
 
 from __future__ import annotations
 
 import os
 import unittest
+from unittest.mock import patch
+
+import httpx
 
 from business_assistant.controlled_bitrix_write import (
     STATUS_WRITE_FAILED,
@@ -59,6 +64,15 @@ from integrations.activation.models import ENV_FIXTURE, ENV_LIVE, OP_WRITE
 from integrations.activation.service import IntegrationActivationService
 from integrations.bitrix.product_bridge import BitrixProductBridge
 from integrations.bitrix.production_verification import LIVE_CREDENTIAL_REF
+from integrations.production.http import BoundedHttpClient
+
+
+def _always_service_unavailable(method: str, url: str, **kwargs) -> httpx.Response:
+    """Deterministic, controlled HTTP failure -- proves the write path
+    reaches the real adapter/transport without ever making (or needing) a
+    real network call, and without depending on product_create's own
+    downstream behavior."""
+    return httpx.Response(503)
 
 REAL_TENANT_ID = "tenant-real-customer"
 
@@ -174,12 +188,11 @@ class ProductionDefectReproductionAndFixTests(unittest.TestCase):
     def test_execute_single_product_write_no_longer_fails_at_connection_resolution(self):
         """The fixed flow: with no pre-existing connection, the controlled
         write path now bootstraps one automatically and gets PAST
-        resolve_connection. It still cannot actually mutate the real
-        Bitrix installation here (LiveBitrixAdapter.write() is a
-        pre-existing, documented, unrelated placeholder -- see module
-        docstring) -- proving zero live mutation occurs while proving the
-        reported defect is fixed."""
-        with _LiveEnv():
+        resolve_connection, into the real adapter/transport (mocked here
+        with a deterministic 503 so this makes zero real network calls,
+        independent of whatever product_create itself does downstream --
+        see tests/test_bitrix_live_product_create_write.py for that)."""
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=_always_service_unavailable):
             activation = IntegrationActivationService()
             bridge = BitrixProductBridge(integration_activation=activation, environment=ENV_LIVE)
             result = execute_single_product_write(
@@ -188,23 +201,19 @@ class ProductionDefectReproductionAndFixTests(unittest.TestCase):
             self.assertEqual(result["status"], STATUS_WRITE_FAILED)
             # Must NOT be the old opaque capability-string failure anymore.
             self.assertNotEqual(result["error"], "cms.bitrix.catalog.write")
-            # Must be the distinct, pre-existing, documented LIVE-write
-            # placeholder -- proving connection resolution now succeeds.
-            self.assertEqual(result["error"], "bitrix_live_write_blocked_engineering")
             # A connection now exists for the real tenant (bootstrap ran).
             conns = activation.list_connections(tenant_id=REAL_TENANT_ID, provider_id="bitrix")
             self.assertEqual(len(conns), 1)
             self.assertEqual(conns[0].environment, ENV_LIVE)
 
     def test_user_facing_diagnostic_no_longer_shows_bare_capability_string(self):
-        with _LiveEnv():
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=_always_service_unavailable):
             activation = IntegrationActivationService()
             bridge = BitrixProductBridge(integration_activation=activation, environment=ENV_LIVE)
             result = execute_single_product_write(
                 bridge, tenant_id=REAL_TENANT_ID, request=_write_request(), approved=True
             )
             text = format_bitrix_write_result_text(result)
-            self.assertIn("bitrix_live_write_blocked_engineering", text)
             # The old, unhelpful collapse-to-just-the-capability message.
             self.assertNotIn("Запись в Bitrix не удалась: cms.bitrix.catalog.write.", text)
 
