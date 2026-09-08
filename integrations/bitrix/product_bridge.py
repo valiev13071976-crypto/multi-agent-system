@@ -28,7 +28,7 @@ from __future__ import annotations
 import hashlib
 
 from integrations.activation.errors import IntegrationNotConfiguredError
-from integrations.activation.models import ENV_FIXTURE, OP_READ, OP_WRITE
+from integrations.activation.models import ENV_FIXTURE, ENV_LIVE, OP_READ, OP_WRITE
 from integrations.bitrix import schema
 from integrations.bitrix.catalog import GLOBAL_BITRIX_CATALOG, BitrixCatalogStore
 from integrations.bitrix.mapping import canonical_to_bitrix_payload
@@ -108,6 +108,51 @@ class BitrixProductBridge:
         self._environment = environment
         self._aspro_enabled = aspro_enabled
         self._store = store or GLOBAL_BITRIX_CATALOG
+
+    @property
+    def environment(self) -> str:
+        return self._environment
+
+    def ensure_live_connection_ready(self, *, tenant_id: str) -> None:
+        """Explicit, caller-invoked, idempotent bootstrap of this bridge's
+        LIVE Bitrix connection for ``tenant_id``. A no-op for FIXTURE/
+        SANDBOX -- existing behavior for every such caller/test is
+        completely unchanged.
+
+        Production defect this closes: every governed read/write above
+        routes exclusively through ``IntegrationActivationService.
+        execute_via_gateway`` -> ``resolve_connection``, which requires an
+        existing ACTIVE ``IntegrationConnection`` record for the *calling*
+        tenant. That bootstrap previously only existed as a standalone,
+        manually-invoked verification entry point
+        (``integrations.bitrix.production_verification.
+        ensure_live_bitrix_connection``, using its own throwaway
+        activation service and a fixed ``tenant_id="production"``) -- it
+        was never called for the real per-request tenant on the actual
+        activation service instance the live conversational write path
+        uses, so the very first real production write failed at
+        ``resolve_connection`` with ``IntegrationNotConfiguredError``
+        before ever reaching the adapter, despite LIVE Bitrix credentials
+        being correctly configured via protected env.
+
+        Deliberately NOT auto-invoked by any read/write method above (see
+        ``tests/test_bitrix_production_verification_bootstrap.py``'s
+        ``test_standalone_service_cannot_resolve_live_bitrix_without_bootstrap``,
+        which proves normal gateway/write-safety semantics are unchanged
+        for callers that do not opt in). Real single-product write flows
+        (``business_assistant.controlled_bitrix_write``) call this once,
+        before their first governed operation for the tenant -- reusing,
+        never duplicating, the exact same bootstrap
+        ``run_production_schema_verification`` already uses.
+        """
+        if self._environment != ENV_LIVE:
+            return
+        # Lazy import: integrations.bitrix.production_verification imports
+        # this module at module scope (BitrixProductBridge), so a
+        # module-level import here would be circular.
+        from integrations.bitrix.production_verification import ensure_live_bitrix_connection
+
+        ensure_live_bitrix_connection(self._activation, tenant_id=tenant_id)
 
     # --- health (spec section 8) --------------------------------------
 

@@ -96,6 +96,55 @@ _NO_CATEGORY_MAPPING = (
     "guessing)"
 )
 
+# Human-readable hints for the raw error codes a failed write can surface,
+# keyed on ``result["error"]`` (production defect closure: this write path
+# used to collapse every real failure into just the raw capability string,
+# e.g. "cms.bitrix.catalog.write", which tells an operator nothing about
+# *why* the write was rejected). Never guesses/fabricates a reason not
+# actually implied by the error code -- unmapped codes fall back to showing
+# the raw code plus the exception class name (see
+# ``_describe_write_failure`` below), never silently hidden.
+_WRITE_FAILURE_HINTS: dict[str, str] = {
+    "bitrix_live_not_configured": (
+        "интеграция Bitrix не настроена в LIVE-режиме на этом сервере "
+        "(переменные окружения BITRIX_INTEGRATION_MODE=LIVE и "
+        "BITRIX_WEBHOOK_URL не заданы или заданы неверно)"
+    ),
+    "cms.bitrix.catalog.write": (
+        "нет активного подключения к Bitrix с правом записи для этого "
+        "запроса (LIVE-подключение не настроено/не активировано, либо "
+        "явно не разрешает эту операцию записи)"
+    ),
+    "cms.bitrix.catalog.read": (
+        "нет активного подключения к Bitrix с правом чтения для этого "
+        "запроса (LIVE-подключение не настроено/не активировано)"
+    ),
+    "INTEGRATION_NOT_CONFIGURED": "подключение к Bitrix не настроено для этого тенанта",
+    "INTEGRATION_NOT_ACTIVE": "подключение к Bitrix существует, но не активно",
+    "INTEGRATION_WRITE_DENIED": "этому подключению к Bitrix не разрешена запись",
+    "INTEGRATION_AUTH_FAILED": "ошибка авторизации в Bitrix (неверные учётные данные/webhook)",
+    "INTEGRATION_PROVIDER_UNAVAILABLE": "Bitrix временно недоступен (сбой на стороне провайдера)",
+    "INTEGRATION_TIMEOUT": "превышено время ожидания ответа от Bitrix",
+    "INTEGRATION_RATE_LIMITED": "Bitrix временно ограничивает частоту запросов",
+    "INTEGRATION_LIVE_FALLBACK_FORBIDDEN": (
+        "LIVE-подключение недоступно, а автоматический откат на тестовый "
+        "режим запрещён"
+    ),
+    "INTEGRATION_ENVIRONMENT_MISMATCH": "несоответствие окружения (LIVE/FIXTURE) для этого подключения",
+    "INTEGRATION_CROSS_TENANT": "подключение принадлежит другому тенанту",
+}
+
+
+def _describe_write_failure(result: Mapping) -> str:
+    code = str(result.get("error") or "write_failed")
+    exc_type = str(result.get("error_type") or "")
+    hint = _WRITE_FAILURE_HINTS.get(code)
+    if hint:
+        return f"{code} — {hint}"
+    if exc_type and exc_type != code:
+        return f"{code} ({exc_type})"
+    return code
+
 
 class ControlledWriteBatchNotAllowedError(Exception):
     """Raised when more (or fewer) than exactly one row/product is supplied
@@ -349,6 +398,15 @@ def execute_single_product_write(
     canonical = preview["canonical_payload"]
 
     try:
+        # Production defect closure: ensure this tenant has an
+        # ACTIVE LIVE Bitrix connection registered on this bridge's own
+        # activation service before the actual write (no-op for
+        # FIXTURE/SANDBOX). Without this, the first-ever real write for a
+        # tenant fails at IntegrationActivationService.resolve_connection
+        # with IntegrationNotConfiguredError even though LIVE Bitrix
+        # credentials are correctly configured -- see
+        # BitrixProductBridge.ensure_live_connection_ready.
+        bridge.ensure_live_connection_ready(tenant_id=tenant_id)
         result = bridge.sync_product(
             tenant_id=tenant_id,
             canonical_product=canonical,
@@ -362,6 +420,7 @@ def execute_single_product_write(
             "status": STATUS_WRITE_FAILED,
             "mutated": False,
             "error": getattr(exc, "code", type(exc).__name__),
+            "error_type": type(exc).__name__,
             "idempotency_key": key,
         }
 
@@ -476,7 +535,7 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
     if status == STATUS_UNRESOLVED:
         return f"Не удалось подготовить запись в Bitrix: {result.get('reason', 'unresolved')}."
     if status == STATUS_WRITE_FAILED:
-        return f"Запись в Bitrix не удалась: {result.get('error', 'write_failed')}. Товар не создан."
+        return f"Запись в Bitrix не удалась: {_describe_write_failure(result)}. Товар не создан."
     if status == STATUS_WRITE_NOT_PERFORMED:
         return "Запись в Bitrix не выполнена."
     if status == STATUS_APPROVAL_REQUIRED:
