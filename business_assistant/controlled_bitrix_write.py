@@ -75,6 +75,7 @@ STATUS_APPROVAL_REQUIRED = "APPROVAL_REQUIRED"
 STATUS_WRITE_VERIFIED = "WRITE_VERIFIED"
 STATUS_WRITE_VERIFICATION_MISMATCH = "WRITE_VERIFICATION_MISMATCH"
 STATUS_WRITE_FAILED = "WRITE_FAILED"
+STATUS_WRITE_PARTIAL_FAILURE = "WRITE_PARTIAL_FAILURE"
 STATUS_WRITE_NOT_PERFORMED = "WRITE_NOT_PERFORMED"
 
 # Reasons reported to the user for fields that are sourced from the file but
@@ -433,6 +434,24 @@ def execute_single_product_write(
         "bitrix_id"
     )
 
+    if write_result.get("status") == "PARTIAL_FAILURE":
+        # LiveBitrixAdapter's multi-step CREATE (product -> offer/SKU ->
+        # retail price) already got PAST the base product create but a
+        # later required step failed -- never claim SUCCESS, and never
+        # lose the product id a retry needs to resume from (same
+        # idempotency_key: LiveBitrixAdapter itself never repeats an
+        # already-succeeded step; see its own idempotency-key cache).
+        return {
+            "status": STATUS_WRITE_PARTIAL_FAILURE,
+            "mutated": True,
+            "bitrix_product_id": bitrix_id,
+            "name": preview["target_product"]["title"],
+            "sku": request.sku,
+            "failed_step": write_result.get("failed_step"),
+            "error": write_result.get("error"),
+            "idempotency_key": key,
+        }
+
     expected = {"name": preview["target_product"]["title"], "active": False}
     read_back = _read_back_and_compare(
         bridge, tenant_id=tenant_id, bitrix_id=bitrix_id, connection_id=connection_id, expected=expected
@@ -534,6 +553,21 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
         )
     if status == STATUS_UNRESOLVED:
         return f"Не удалось подготовить запись в Bitrix: {result.get('reason', 'unresolved')}."
+    if status == STATUS_WRITE_PARTIAL_FAILURE:
+        step_labels = {
+            "offer_create": "создание торгового предложения/артикула (SKU)",
+            "price_create": "запись розничной цены",
+        }
+        step = step_labels.get(str(result.get("failed_step") or ""), str(result.get("failed_step") or "неизвестный шаг"))
+        return (
+            "ЧАСТИЧНАЯ ОШИБКА: товар создан в Bitrix (неактивен), но следующий "
+            f"обязательный шаг не выполнен — {step}. "
+            f"Bitrix ID: {result.get('bitrix_product_id')}. "
+            f"Причина: {_describe_write_failure(result)}. "
+            "Товар НЕ считается полностью записанным; повторное подтверждение "
+            "с тем же запросом продолжит запись с этого шага, не создавая "
+            "второй товар."
+        )
     if status == STATUS_WRITE_FAILED:
         return f"Запись в Bitrix не удалась: {_describe_write_failure(result)}. Товар не создан."
     if status == STATUS_WRITE_NOT_PERFORMED:

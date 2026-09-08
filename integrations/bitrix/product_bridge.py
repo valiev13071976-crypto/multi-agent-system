@@ -195,7 +195,32 @@ class BitrixProductBridge:
             payload={"operation": "product_lookup", "bitrix_id": bitrix_id},
             connection_id=connection_id,
         )
-        return out["result"].get("product") or {}
+        result = out["result"]
+        # FIXTURE's product_lookup returns a single {"product": {...}} --
+        # LIVE's (LiveBitrixAdapter.read) returns the generic bounded-read
+        # envelope {"items": [...]} instead (same shape every other LIVE
+        # read/catalog list uses -- see verify_schema_binding's own ``_read``
+        # helper, which already reads "items"). Prefer an explicit
+        # "product" key when present (FIXTURE); otherwise pick the matching
+        # item out of "items" (LIVE) -- never silently return {} for a
+        # product that was actually found, which previously made LIVE
+        # read-back verification always report a mismatch.
+        if "product" in result:
+            return result.get("product") or {}
+        items = result.get("items") or []
+        match = next((item for item in items if str(item.get("id")) == str(bitrix_id)), None)
+        if match is None:
+            match = items[0] if items else None
+        if match is None:
+            return {}
+        normalized = dict(match)
+        if "active" in normalized:
+            # Bitrix's REST surface has historically represented boolean
+            # flags as either a real JSON boolean or the classic "Y"/"N"
+            # string; normalize once here so read-back comparisons never
+            # false-mismatch on encoding alone.
+            normalized["active"] = normalized["active"] in (True, "Y", "y", 1, "1")
+        return normalized
 
     # --- production schema binding verification (Block 5.6 final binding) --
 
