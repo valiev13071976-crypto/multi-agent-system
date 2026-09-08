@@ -392,7 +392,18 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         return f"panda-controlled-write:{idempotency_key}"[:255]
 
     def _find_product_by_xml_id(self, xml_id: str, *, credential_ref: str) -> dict | None:
-        select = ["id", "name", "active", "xmlId"]
+        # Production defect closure: Bitrix's documented REST contract for
+        # catalog.product.list requires BOTH "id" AND "iblockId" to be
+        # present in ``select`` (not just usable in ``filter``) --
+        # omitting either returns HTTP 400 / error 200040300010 ("Fields
+        # id, iblockId are not specified in the selection fields"). This
+        # select list previously omitted "iblockId", which is exactly the
+        # real production 400 on this call (request_id
+        # d5fda7ca-4915-4d75-bf61-f22ef4693f64). The proven, already-working
+        # product_lookup read (this same method) always used
+        # schema.catalog_select_fields(), whose base list already includes
+        # both -- reused here instead of a second, narrower convention.
+        select = ["id", "iblockId", "name", "active", "xmlId"]
         if _BRAND_PROPERTY is not None:
             select.append(_BRAND_PROPERTY.select_key)
         data = self.client.call(
@@ -405,6 +416,9 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         return items[0] if items else None
 
     def _find_offer_by_parent(self, parent_id, *, credential_ref: str) -> dict | None:
+        # Same documented Bitrix requirement as catalog.product.list above
+        # applies to catalog.product.offer.list -- "id" and "iblockId" are
+        # both required in ``select``.
         data = self.client.call(
             "catalog.product.offer.list",
             credential_ref=credential_ref,
@@ -413,7 +427,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     "iblockId": self._require_offers_iblock_id(),
                     schema.CML2_LINK_REST_FIELD: self._as_bitrix_id(parent_id),
                 },
-                "select": ["id", schema.CML2_LINK_REST_FIELD],
+                "select": ["id", "iblockId", schema.CML2_LINK_REST_FIELD],
             },
         )
         result = data.get("result")

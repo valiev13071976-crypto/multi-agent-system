@@ -256,6 +256,33 @@ retry.
 See `tests/test_bitrix_live_product_create_write.py` for full deterministic
 coverage (mocked HTTP transport only — zero real network calls).
 
+### Production defect closure — `catalog.product.list` HTTP 400 on the idempotency lookup
+
+The first real LIVE controlled write hit a real Bitrix `400 Bad Request`
+on the very first step above (`catalog.product.list` filtered by
+`xmlId`), so `catalog.product.add` was never reached and nothing was
+created. Root cause: Bitrix's documented REST contract for
+`catalog.product.list` **and** `catalog.product.offer.list` requires both
+`"id"` and `"iblockId"` to be present in the `select` array (not merely
+usable in `filter`) — omitting either returns error `200040300010`
+("Fields id, iblockId are not specified in the selection fields") over
+HTTP 400. The idempotency-lookup `select` lists for both methods omitted
+`"iblockId"`. Fixed by adding it to both; no other request shape,
+filter field, or JSON encoding was wrong. Separately, `BoundedHttpClient`
+(the shared transport every production provider adapter uses) discarded
+the response body entirely on any 4xx/5xx before raising, so the actual
+Bitrix `error`/`error_description` could never reach the caller — every
+such failure collapsed into a bare category name (e.g. `BAD_REQUEST`).
+Fixed generically (not Bitrix-specific) by attaching a bounded response
+body to `ProductionProviderError.metadata`; `BitrixHttpClient.call` now
+parses it and surfaces the real, bounded `error`/`error_description` in
+`BitrixIntegrationError` messages instead of only the category name.
+Regression coverage: `tests/test_bitrix_live_product_create_write.py`'s
+`ProductionRegression400Tests` (mocked transport that enforces the real
+Bitrix required-`select`-field contract, plus a diagnostics assertion
+that a genuine 400 now surfaces `error_description`/error code instead of
+bare `BAD_REQUEST`).
+
 ## Product Intelligence Bridge (Block 5.6)
 
 `integrations/bitrix/product_bridge.py`'s `BitrixProductBridge` is the one

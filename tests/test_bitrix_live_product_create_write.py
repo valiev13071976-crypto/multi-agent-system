@@ -122,11 +122,38 @@ class _RecordingTransport:
         self._prices: set[tuple[int, int]] = set()
         self._next_id = CREATED_PRODUCT_ID
 
+    # Real Bitrix REST contract (apidocs.bitrix24.com): catalog.product.list
+    # and catalog.product.offer.list both REQUIRE "id" AND "iblockId" in
+    # ``select`` -- omitting either is documented error 200040300010
+    # ("Fields id, iblockId are not specified in the selection fields"),
+    # surfaced over HTTP as a 400. This is the exact real production defect
+    # (request_id d5fda7ca-4915-4d75-bf61-f22ef4693f64): the idempotency
+    # lookup's ``select`` omitted "iblockId". Enforcing it here means any
+    # regression that drops "iblockId" from a list ``select`` again fails
+    # every test in this file with the real Bitrix error shape, instead of
+    # silently passing against an overly-permissive mock.
+    _REQUIRED_LIST_SELECT = {
+        "catalog.product.list": {"id", "iblockId"},
+        "catalog.product.offer.list": {"id", "iblockId"},
+    }
+
     def __call__(self, method: str, url: str, **kwargs) -> httpx.Response:
         body = json.loads(json.dumps(kwargs.get("json_body") or {}))
         rest_method = url.rsplit("/", 1)[-1].removesuffix(".json")
         self.calls.append((rest_method, body))
         filt = body.get("filter") or {}
+
+        required_select = self._REQUIRED_LIST_SELECT.get(rest_method)
+        if required_select:
+            missing = required_select - set(body.get("select") or [])
+            if missing:
+                return httpx.Response(
+                    400,
+                    json={
+                        "error": 200040300010,
+                        "error_description": f"Fields {', '.join(sorted(missing))} are not specified in the selection fields",
+                    },
+                )
 
         if rest_method == "catalog.product.list":
             if "xmlId" in filt:
@@ -446,6 +473,76 @@ class FailClosedWithoutRetailPriceTypeTests(unittest.TestCase):
         self.assertEqual(result["failed_step"], "price_create")
         self.assertEqual(result["error"], "bitrix_retail_price_type_id_not_configured")
         self.assertEqual(transport.price_add_count, 0)
+
+
+class ProductionRegression400Tests(unittest.TestCase):
+    """Direct reproduction + closure of the real production defect
+    (request_id d5fda7ca-4915-4d75-bf61-f22ef4693f64): the very first
+    idempotency lookup, ``catalog.product.list`` filtered by ``xmlId``,
+    got HTTP 400 from real Bitrix because its ``select`` omitted the
+    REQUIRED ``iblockId`` field (Bitrix error 200040300010 -- "Fields id,
+    iblockId are not specified in the selection fields"). ``catalog.add``
+    was therefore never reached and nothing was created."""
+
+    def test_full_write_no_longer_400s_on_the_idempotency_lookup(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        # Before the fix, this failed at the first call with
+        # "BAD_REQUEST (BitrixIntegrationError)" and catalog.product.add
+        # was never reached.
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        methods_called = [m for m, _ in transport.calls]
+        self.assertIn("catalog.product.add", methods_called)
+
+        # The exact corrected request shape: "iblockId" (and "id") are now
+        # present in ``select`` for both list lookups that require them.
+        list_call_body = next(b for m, b in transport.calls if m == "catalog.product.list")
+        self.assertIn("iblockId", list_call_body["select"])
+        self.assertIn("id", list_call_body["select"])
+        offer_list_body = next(b for m, b in transport.calls if m == "catalog.product.offer.list")
+        self.assertIn("iblockId", offer_list_body["select"])
+        self.assertIn("id", offer_list_body["select"])
+
+    def test_a_genuine_bitrix_400_now_surfaces_the_real_error_description_not_bare_bad_request(self):
+        """Diagnostics closure (requirement 7). Patches at the same layer
+        real production traffic actually flows through (the underlying
+        ``httpx.Client.request``, NOT ``BoundedHttpClient.request`` --
+        every other test in this file mocks the latter, which bypasses
+        ``BoundedHttpClient``'s own status-code handling entirely and so
+        could never have caught this diagnostics regression). Reproduces
+        the exact malformed request production sent: filtering
+        catalog.product.list by "xmlId" with a ``select`` that omits the
+        required "iblockId" field -- must no longer collapse into just
+        "BAD_REQUEST"; the sanitized, bounded error/error_description
+        Bitrix actually sent back must be visible in the final
+        diagnostic."""
+        from integrations.bitrix.client import BitrixHttpClient
+        from integrations.bitrix.config import load_bitrix_config
+        from integrations.bitrix.errors import BitrixIntegrationError
+
+        def _fake_httpx_request(self, method, url, **kwargs):
+            return httpx.Response(
+                400,
+                json={"error": 200040300010, "error_description": "Fields iblockId are not specified in the selection fields"},
+            )
+
+        with _LiveEnv(), patch.object(httpx.Client, "request", _fake_httpx_request):
+            client = BitrixHttpClient(config=load_bitrix_config())
+            # Deliberately reproduce the exact malformed request production
+            # sent: filtering catalog.product.list by "xmlId" with a
+            # ``select`` that omits the required "iblockId" field.
+            with self.assertRaises(BitrixIntegrationError) as ctx:
+                client.call(
+                    "catalog.product.list",
+                    params={"filter": {"iblockId": 14, "xmlId": "does-not-matter"}, "select": ["id", "name", "active", "xmlId"]},
+                )
+        message = str(ctx.exception)
+        self.assertNotEqual(message, "BAD_REQUEST")
+        self.assertIn("iblockId", message)
+        self.assertIn("200040300010", message)
 
 
 class DirectAdapterLevelTests(unittest.TestCase):
