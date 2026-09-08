@@ -282,8 +282,16 @@ class WildberriesFixtureAdapter(FixtureProviderAdapter):
     def _write_card_create(self, *, tenant: str, capability: str, payload: dict, idempotency_key: str) -> dict:
         product = dict(payload.get("product") or payload)
         cat_id = str(product.get("category_id") or product.get("canonical_category_id") or "")
+        external_category_override = str(product.get("external_category_id") or "").strip()
         if cat_id:
-            product["subject_id"] = map_category(canonical_category_id=cat_id)
+            # Block 5.7A: when the caller (MarketplacePlatform) has already
+            # resolved an explicit tenant/provider category mapping, that
+            # mapping is authoritative for publication and must override this
+            # adapter's own internal default category table. Existing callers
+            # that omit `external_category_id` keep exactly the prior
+            # behavior (internal default lookup via `map_category`).
+            override_map = {cat_id: external_category_override} if external_category_override else None
+            product["subject_id"] = map_category(canonical_category_id=cat_id, category_map=override_map)
         if not product.get("seller_article") and not product.get("sku"):
             raise WildberriesNotFoundError("seller_article_required")
         preview = payload.get("preview") or build_preview(
