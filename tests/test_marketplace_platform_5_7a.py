@@ -271,6 +271,74 @@ class _ProviderContractMixin:
         # explicit provider difference (spec section 4/25), not collapsed.
         self.assertIn(out["status"], {"WRITE_ACCEPTED", "SUBMITTED"})
 
+    def test_publish_listing_uses_explicit_external_category_override_not_panda_category(self):
+        """Block 5.7A defect closure regression: the resolved tenant/
+        provider ``MarketplaceCategoryMap.external_category_id`` must be
+        the *effective* provider publication category. It must not be
+        silently substituted by the Panda canonical category, and it must
+        not require a parallel mapping system to take effect."""
+        override_external_id = f"ext-{self.provider_id}-DELIBERATELY-DIFFERENT"
+        mapped = self.platform.category_maps.upsert(
+            tenant_id="tenant-a", provider=self.provider_const, panda_category="phones",
+            external_category_id=override_external_id,
+        )
+
+        ready_product = {
+            "product_id": "p-cat-override", "sku": f"{self.sku}-CATOVR", "title": "Category override item",
+            "price": {"selling_price": "500"}, "stock": {"quantity": 3},
+        }
+        readiness = validate_listing_readiness(canonical_product=ready_product, provider=self.provider_const, category_map=mapped)
+        self.assertTrue(readiness.ready)
+
+        out = self.platform.publish_listing(
+            tenant_id="tenant-a", canonical_product=ready_product, category_map=mapped,
+            idempotency_key="pub-cat-override", approved_write=True, connection_id=self.conn.connection_id,
+        )
+        effective_category = self._effective_publication_category(out)
+        self.assertEqual(effective_category, override_external_id)
+        # must NOT silently substitute the Panda canonical category for the
+        # provider's own external category identifier.
+        self.assertNotEqual(effective_category, "phones")
+        self.assertNotEqual(effective_category, mapped.panda_category)
+
+        # governed write / idempotency remains intact: a replay with the
+        # same idempotency key does not perform a second external action.
+        replay = self.platform.publish_listing(
+            tenant_id="tenant-a", canonical_product=ready_product, category_map=mapped,
+            idempotency_key="pub-cat-override", approved_write=True, connection_id=self.conn.connection_id,
+        )
+        self.assertTrue(replay.get("idempotent"))
+
+        # tenant/provider category isolation remains intact: a different
+        # tenant's mapping for the *same* panda_category + provider is
+        # independent of, and unaffected by, this upsert.
+        other_tenant_map = self.platform.category_maps.lookup(
+            tenant_id="tenant-b", provider=self.provider_const, panda_category="phones",
+        )
+        self.assertNotEqual(other_tenant_map.external_category_id, override_external_id)
+        self.assertEqual(other_tenant_map.status, CATEGORY_UNMAPPED)
+
+    def test_publish_listing_without_explicit_override_keeps_prior_default_behavior(self):
+        """Backward compatibility: a caller that goes straight to the
+        adapter's write operation without supplying ``external_category_id``
+        (i.e. the shape used before this fix, and still used by any other
+        direct caller of the adapter) keeps resolving through the
+        adapter's own internal default category table exactly as before."""
+        out = self.platform._write(  # noqa: SLF001 -- exercising the raw adapter contract intentionally, bypassing MarketplacePlatform.publish_listing
+            tenant_id="tenant-a", environment=ENV_FIXTURE,
+            payload={
+                "operation": self.platform._profile.create_operation,  # noqa: SLF001
+                "product": {
+                    "seller_article": f"{self.sku}-LEGACY", "sku": f"{self.sku}-LEGACY",
+                    "title": "Legacy caller item", "category_id": "phones",
+                },
+                "panda_product_id": "p-legacy",
+            },
+            idempotency_key="pub-legacy-default", approved_write=True, connection_id=self.conn.connection_id,
+        )
+        effective_category = self._effective_publication_category(out)
+        self.assertEqual(effective_category, self.legacy_default_category_id)
+
     def test_unsupported_operation_never_fakes_success(self):
         with self.assertRaises(MarketplaceError) as ctx:
             self.platform._write(
@@ -286,6 +354,10 @@ class WildberriesAdapterTests(_ProviderContractMixin, unittest.TestCase):
     provider_const = PROVIDER_WILDBERRIES
     sku = "WB-SKU-100"
     warehouse = "main"
+    legacy_default_category_id = "wb-cat-phones"
+
+    def _effective_publication_category(self, write_result: dict) -> str:
+        return str(write_result["card"]["subject_id"])
 
 
 class OzonAdapterTests(_ProviderContractMixin, unittest.TestCase):
@@ -293,6 +365,10 @@ class OzonAdapterTests(_ProviderContractMixin, unittest.TestCase):
     provider_const = PROVIDER_OZON
     sku = "OZ-SKU-100"
     warehouse = "fbs_main"
+    legacy_default_category_id = "oz-cat-phones"
+
+    def _effective_publication_category(self, write_result: dict) -> str:
+        return str(write_result["resolved_category_id"])
 
 
 class YandexMarketAdapterTests(_ProviderContractMixin, unittest.TestCase):
@@ -300,6 +376,10 @@ class YandexMarketAdapterTests(_ProviderContractMixin, unittest.TestCase):
     provider_const = PROVIDER_YANDEX_MARKET
     sku = "YM-SKU-100"
     warehouse = "dbs_main"
+    legacy_default_category_id = "ym-cat-phones"
+
+    def _effective_publication_category(self, write_result: dict) -> str:
+        return str(write_result["resolved_category_id"])
 
 
 # =====================================================================

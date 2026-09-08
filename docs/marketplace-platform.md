@@ -141,15 +141,20 @@ mapped category, title, price, stock, required attributes); `publish_listing`
 re-validates and fails closed (`MARKETPLACE_NOT_READY`) rather than trusting
 the caller.
 
-**Known provider limitation**: the underlying FIXTURE adapters' own
-`card_create`/`card_import`/`offer_submission` resolve `category_id` via
-their *own* internal `map_category(canonical_category_id=...)` helper
-(`integrations.{provider}.mapping`), which has no hook for a caller-supplied
-override map. `publish_listing` therefore passes the Panda canonical
-category through (not our `external_category_id`) so that internal lookup
-still resolves; our own category-map store remains the source of truth for
-readiness/diff. Wiring such an override into those adapters is out of scope for
-5.7A (they are part of the existing CLOSED marketplace-adapter surface).
+The resolved `MarketplaceCategoryMap.external_category_id` is the
+*effective, authoritative* publication category — it reaches the provider
+publication payload, not just readiness/diff. The underlying FIXTURE
+adapters' own `card_create`/`card_import`/`offer_submission` resolve
+`category_id` via their *own* internal
+`map_category(canonical_category_id=..., category_map=...)` helper
+(`integrations.{provider}.mapping`); `publish_listing` forwards the
+category-map's `external_category_id` as an explicit override map
+(`{panda_category: external_category_id}`) into that call, so the mapped
+external category — never the Panda canonical category — is what actually
+reaches the provider. Callers that go straight to an adapter's write
+operation without supplying `external_category_id` are unaffected and keep
+resolving through the adapter's own internal default category table exactly
+as before this override was added.
 
 ### Price / stock / orders
 

@@ -345,8 +345,15 @@ class YandexMarketFixtureAdapter(FixtureProviderAdapter):
     def _write_offer_submission(self, *, tenant: str, capability: str, payload: dict, idempotency_key: str) -> dict:
         product = dict(payload.get("product") or payload)
         cat_id = str(product.get("category_id") or product.get("canonical_category_id") or "")
+        external_category_override = str(product.get("external_category_id") or "").strip()
         if cat_id:
-            product["category_id"] = map_category(canonical_category_id=cat_id)
+            # Block 5.7A: an explicit tenant/provider category mapping
+            # resolved by MarketplacePlatform is authoritative for
+            # publication and overrides this adapter's own internal default
+            # category table. Callers that omit `external_category_id` keep
+            # exactly the prior behavior (internal default lookup).
+            override_map = {cat_id: external_category_override} if external_category_override else None
+            product["category_id"] = map_category(canonical_category_id=cat_id, category_map=override_map)
         if not product.get("shop_sku") and not product.get("sku") and not product.get("offer_id"):
             raise YandexMarketNotFoundError("shop_sku_required")
         preview = payload.get("preview") or build_preview(
@@ -380,6 +387,7 @@ class YandexMarketFixtureAdapter(FixtureProviderAdapter):
             "idempotent": False,
             "preview": preview,
             "terminal_success": False,
+            "resolved_category_id": product.get("category_id", ""),
             "external_write_count": self._store.record_write(idempotency_key),
         }
 

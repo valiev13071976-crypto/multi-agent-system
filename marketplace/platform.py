@@ -576,16 +576,21 @@ class MarketplacePlatform:
         if not readiness.ready:
             raise MarketplaceError("MARKETPLACE_NOT_READY", ",".join(i.code for i in readiness.issues))
 
-        # NOTE (provider limitation, spec section 25): the underlying
-        # FIXTURE adapters' own card_create/card_import/offer_submission
-        # resolve ``category_id`` via their *own* internal
-        # ``map_category(canonical_category_id=...)`` helper, which has no
-        # hook for a caller-supplied override -- so the Panda *canonical*
-        # category (not our external_category_id) must be passed through
-        # under the ``category_id`` key for that internal lookup to work.
-        # Our own ``MarketplaceCategoryMapStore``/``external_category_id``
-        # remains the source of truth for readiness/diff; it is not yet
-        # wired as an override into these adapters' internal mapping.
+        # The resolved tenant/provider ``MarketplaceCategoryMap`` is the
+        # effective, authoritative publication category: ``category_id`` /
+        # ``canonical_category_id`` carry the Panda canonical category (the
+        # lookup key), and ``external_category_id`` carries the explicit
+        # provider-side override. Each FIXTURE adapter's own
+        # card_create/card_import/offer_submission handler resolves the
+        # publication category via its internal ``map_category(...)``
+        # helper, but now forwards ``external_category_id`` as an explicit
+        # override map so the *mapped* external category -- not the
+        # adapter's own internal default table -- is what actually reaches
+        # the provider publication payload. Readiness already guarantees
+        # ``external_category_id`` is non-empty here (see
+        # ``validate_listing_readiness``), so this path never falls back to
+        # the adapter's internal default; that fallback only serves other,
+        # non-``MarketplacePlatform`` callers that omit the override.
         product = {
             "seller_article": canonical_product.get("sku") or canonical_product.get("article"),
             "sku": canonical_product.get("sku") or canonical_product.get("article"),
