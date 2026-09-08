@@ -365,6 +365,24 @@ if getattr(side_effect_runtime, "product_intelligence_runtime", None) is not Non
     side_effect_runtime.product_intelligence_runtime.service.artifact_service = (
         ba_api_runtime.artifact_service
     )
+# Block 5.6: BitrixProductBridge is the governed Bitrix Connector between
+# Product Intelligence (5.5) and the existing Real Integration Activation
+# boundary (5.4) -- constructed post-wiring the same way as the above so it
+# shares the SAME ``integration_activation`` instance BusinessAssistantService
+# already uses for every other governed external write (no second connector).
+if (
+    getattr(side_effect_runtime, "product_intelligence_runtime", None) is not None
+    and getattr(ba_api_runtime.service.ba, "integration_activation", None) is not None
+):
+    from integrations.bitrix.product_bridge import BitrixProductBridge
+
+    ba_api_runtime.service.ba.bitrix_product_bridge = BitrixProductBridge(
+        integration_activation=ba_api_runtime.service.ba.integration_activation,
+        environment=ba_api_runtime.service.ba.integration_environment,
+    )
+    ba_api_runtime.service.ba.product_intelligence_service = (
+        side_effect_runtime.product_intelligence_runtime.service
+    )
 realtime_runtime = None
 if realtime_enabled():
     # Block 4: realtime session bridge reuses ba_api_runtime.service directly
@@ -385,7 +403,13 @@ ops_admin_runtime = build_operations_admin_runtime(
     saas_store=saas_runtime.store,
 )
 analytics_runtime = build_analytics_dashboard_runtime(
-    integration_activation=getattr(ba_api_runtime.service, "integration_activation", None),
+    # ``integration_activation`` lives on ``ba_api_runtime.service.ba``
+    # (BusinessAssistantService), not on BusinessAssistantApiService itself --
+    # the previous lookup here always resolved to None via getattr's default,
+    # silently leaving the analytics dashboard without the real activation
+    # service in production wiring. Fixed as part of Block 5.6 (discovered
+    # while wiring BitrixProductBridge through this same path).
+    integration_activation=getattr(ba_api_runtime.service.ba, "integration_activation", None),
 )
 scheduled_automation_runtime = build_scheduled_automation_runtime(
     workflow_runtime=getattr(side_effect_runtime, "workflow_runtime", None),

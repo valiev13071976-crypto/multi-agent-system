@@ -27,7 +27,7 @@ def fixture_aspro_premier_profile() -> AsproPremierProfile:
 def map_product_to_bitrix_payload(*, product: dict, profile: AsproPremierProfile) -> dict:
     """Translate canonical product fields via Aspro profile → Bitrix-shaped payload."""
     fm = profile.field_mappings
-    return {
+    out = {
         fm.get("name", "NAME"): product.get("title") or product.get("name") or "",
         fm.get("article", "PROPERTY_ARTNUMBER"): product.get("sku") or "",
         fm.get("brand", "PROPERTY_BRAND"): product.get("brand") or "",
@@ -37,3 +37,18 @@ def map_product_to_bitrix_payload(*, product: dict, profile: AsproPremierProfile
         "integration": "bitrix",
         "storefront": "aspro_premier",
     }
+    # Aspro-specific field names stay isolated in ``profile.seo_mapping`` /
+    # ``profile.media_mapping`` (spec section 22) -- additive only, populated
+    # exclusively from fields the canonical product actually carries.
+    seo_title = product.get("seo_title") or ""
+    seo_description = product.get("seo_description") or ""
+    if seo_title:
+        out[profile.seo_mapping.get("title", "SEO_TITLE")] = seo_title
+    if seo_description:
+        out[profile.seo_mapping.get("description", "SEO_DESCRIPTION")] = seo_description
+    media_refs = tuple(product.get("media_refs") or ())
+    if media_refs:
+        out[profile.media_mapping.get("primary", "DETAIL_PICTURE")] = media_refs[0]
+        if len(media_refs) > 1:
+            out[profile.media_mapping.get("gallery", "MORE_PHOTO")] = list(media_refs[1:])
+    return out

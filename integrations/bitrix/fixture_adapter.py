@@ -79,6 +79,8 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
         if operation == "order_read":
             page = int(params.get("page") or 1)
             return self._store.orders_page(tenant_id=tenant, page=page)
+        if operation in {"section_read", "category_read"}:
+            return self._store.list_sections(tenant_id=tenant)
 
         # Default catalog list — backward compatible pagination
         page = int(params.get("page") or 1)
@@ -136,6 +138,8 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
             "price_update": self._write_price_update,
             "stock_update": self._write_stock_update,
             "publish": self._write_publish,
+            "media_attach": self._write_media_attach,
+            "seo_update": self._write_seo_update,
             "selective_export": self._write_selective_export,
         }.get(operation)
 
@@ -171,16 +175,38 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
             after={"name": mapped.get("NAME"), "article": mapped.get("PROPERTY_ARTNUMBER")},
         )
         panda_id = str(payload.get("panda_product_id") or product_in.get("product_id") or "")
+        # ``price`` may be a flat scalar (legacy/direct write payloads, still
+        # supported for backward compatibility) or the nested
+        # ``{"currency", "purchase_price", "selling_price"}`` shape Block 5.5
+        # Product Intelligence's canonical export always uses -- extract
+        # explicitly rather than ``str()``-ing a dict into a garbled price.
+        price_field = product_in.get("price")
+        if isinstance(price_field, dict):
+            price_value = price_field.get("selling_price")
+            if price_value in (None, ""):
+                price_value = price_field.get("purchase_price")
+            currency_value = price_field.get("currency") or product_in.get("currency") or "RUB"
+        else:
+            price_value = price_field or product_in.get("amount")
+            currency_value = product_in.get("currency") or "RUB"
+        # Persist ``description`` (and any SEO/media keys ``canonical_to_bitrix_payload``
+        # produced) into ``properties`` too -- otherwise a subsequent sync-diff
+        # read-back (``BitrixCatalogStore.lookup`` -> ``plan_sync``) would
+        # never see the description that was just written, and would treat
+        # every already-synced product as perpetually needing an UPDATE.
+        properties = dict(product_in.get("properties") or {})
+        if mapped.get("DETAIL_TEXT") and "description" not in properties:
+            properties["description"] = mapped.get("DETAIL_TEXT")
         created = self._store.create_product(
             tenant_id=tenant,
             payload={
                 "name": mapped.get("NAME"),
                 "article": mapped.get("PROPERTY_ARTNUMBER"),
                 "description": mapped.get("DETAIL_TEXT"),
-                "price": product_in.get("price") or product_in.get("amount"),
-                "currency": product_in.get("currency") or "RUB",
+                "price": price_value,
+                "currency": currency_value,
                 "active": bool(payload.get("active", False)),
-                "properties": product_in.get("properties") or {},
+                "properties": properties,
             },
             panda_product_id=panda_id,
         )
@@ -338,6 +364,75 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
             "idempotent": False,
             "preview": preview,
             "product": published,
+            "external_write_count": self._store.record_write(idempotency_key),
+        }
+
+    def _write_media_attach(self, *, tenant: str, capability: str, payload: dict, idempotency_key: str) -> dict:
+        target = resolve_product_target(
+            self._store,
+            tenant_id=tenant,
+            bitrix_id=str(payload.get("bitrix_id") or ""),
+            article=str(payload.get("article") or payload.get("sku") or ""),
+            panda_product_id=str(payload.get("panda_product_id") or ""),
+        )
+        media_refs = [str(m) for m in (payload.get("media_refs") or []) if m]
+        updated, added = self._store.attach_media(
+            tenant_id=tenant, bitrix_id=target["external_product_id"], media_refs=media_refs
+        )
+        current = list((updated.get("properties") or {}).get("media_refs") or [])
+        preview = payload.get("preview") or build_preview(
+            operation="media_attach",
+            before={"media_refs": [m for m in current if m not in added]},
+            after={"media_refs": current},
+        )
+        return {
+            "status": "WRITE_ACCEPTED",
+            "write_id": str(uuid.uuid4()),
+            "capability": capability,
+            "operation": "media_attach",
+            "mode": "FIXTURE",
+            "live": False,
+            "verified": "VERIFIED",
+            "idempotent": False,
+            "preview": preview,
+            "added": added,
+            "duplicate_skipped": len(media_refs) - len(added),
+            "product": updated,
+            "external_write_count": self._store.record_write(idempotency_key),
+        }
+
+    def _write_seo_update(self, *, tenant: str, capability: str, payload: dict, idempotency_key: str) -> dict:
+        target = resolve_product_target(
+            self._store,
+            tenant_id=tenant,
+            bitrix_id=str(payload.get("bitrix_id") or ""),
+            article=str(payload.get("article") or payload.get("sku") or ""),
+            panda_product_id=str(payload.get("panda_product_id") or ""),
+        )
+        seo_title = str(payload.get("seo_title") or "")
+        seo_description = str(payload.get("seo_description") or "")
+        updated, before = self._store.set_seo(
+            tenant_id=tenant,
+            bitrix_id=target["external_product_id"],
+            seo_title=seo_title,
+            seo_description=seo_description,
+        )
+        preview = payload.get("preview") or build_preview(
+            operation="seo_update",
+            before=before,
+            after={"seo_title": seo_title, "seo_description": seo_description},
+        )
+        return {
+            "status": "WRITE_ACCEPTED",
+            "write_id": str(uuid.uuid4()),
+            "capability": capability,
+            "operation": "seo_update",
+            "mode": "FIXTURE",
+            "live": False,
+            "verified": "VERIFIED",
+            "idempotent": False,
+            "preview": preview,
+            "product": updated,
             "external_write_count": self._store.record_write(idempotency_key),
         }
 

@@ -94,6 +94,11 @@ class BusinessAssistantService:
         scheduled_automation=None,
         controlled_automation=None,
         conversation_gateway: PandaConversationGateway | None = None,
+        # Block 5.6: governed Bitrix Connector (integrations.bitrix.product_bridge)
+        # bridging canonical Product Intelligence <-> Bitrix. Optional so
+        # existing callers/tests that never wire it keep working unchanged.
+        bitrix_product_bridge=None,
+        product_intelligence_service=None,
     ):
         self.commerce = commerce
         self.marketplace = marketplace
@@ -101,6 +106,8 @@ class BusinessAssistantService:
         self.integration_activation = integration_activation
         self.integration_environment = integration_environment
         self.analytics_dashboard = analytics_dashboard
+        self.bitrix_product_bridge = bitrix_product_bridge
+        self.product_intelligence_service = product_intelligence_service
         self.scheduled_automation = scheduled_automation
         self.controlled_automation = controlled_automation
         self.conversation_gateway = conversation_gateway
@@ -865,6 +872,70 @@ class BusinessAssistantService:
                 )
             )
             return {"orders": out["result"], "integration": resolved, "mutation": False}
+
+        # Block 5.6: Bitrix -> Panda catalog import (bounded/paginated read;
+        # no Bitrix mutation, so this stays on the READ/no-approval path even
+        # though it results in local canonical writes -- spec section 26).
+        if (
+            self.bitrix_product_bridge is not None
+            and self.product_intelligence_service is not None
+            and ("bitrix" in req.text.casefold() or "битрикс" in req.text.casefold())
+            and any(w in req.text.casefold() for w in ("импорт", "import"))
+            and name in {"read_listings", "match_products", "prepare_content"}
+        ):
+            cap = "cms.bitrix.catalog.read"
+            resolved = self.resolve_integration(tenant_id=ex.tenant_id, capability=cap, operation_class="READ")
+            if resolved.get("status") == "BLOCKED":
+                raise BusinessAssistantError(BA_CAPABILITY_UNAVAILABLE, resolved.get("code", "integration_blocked"))
+            result = self.bitrix_product_bridge.import_catalog(
+                tenant_id=ex.tenant_id,
+                product_intelligence_service=self.product_intelligence_service,
+            )
+            ex.artifacts.append({"type": "bitrix_import", "result": result})
+            ex.findings.append(
+                BusinessFinding(
+                    finding_id=str(uuid.uuid4()),
+                    kind=KIND_FINDING,
+                    summary=f"Bitrix catalog import: {result.get('created', 0)} created, {result.get('updated', 0)} updated",
+                    evidence_refs=("integration:bitrix", "product_intelligence:import"),
+                )
+            )
+            return {"import": result, "integration": resolved, "mutation": False}
+
+        # Block 5.6: Bitrix product sync preview (sync-diff before mutation --
+        # spec section 23). Requires approval before any Bitrix write.
+        if (
+            self.bitrix_product_bridge is not None
+            and self.product_intelligence_service is not None
+            and ("bitrix" in req.text.casefold() or "битрикс" in req.text.casefold())
+            and any(w in req.text.casefold() for w in ("синхрониз", "sync"))
+            and name in {"read_listings", "match_products", "prepare_content"}
+        ):
+            import re as _re
+
+            article_match = _re.search(r"(?:артикул[уом]?|sku)\s+([A-Za-z0-9\-]+)", req.text, _re.I)
+            article = article_match.group(1) if article_match else ""
+            product = None
+            if article:
+                product = self.product_intelligence_service.store.get_by_sku(article, tenant_id=ex.tenant_id)
+            if product is None:
+                return {
+                    "sync_preview": {"action": "INVALID", "reason": "product_not_found"},
+                    "requires_approval": False,
+                }
+            canonical = self.product_intelligence_service._to_canonical_export(product)
+            plan = self.bitrix_product_bridge.plan_sync(tenant_id=ex.tenant_id, canonical_product=canonical)
+            ex.artifacts.append({"type": "bitrix_sync_preview", "plan": plan})
+            if plan.get("action") in ("CREATE", "UPDATE"):
+                ex._bitrix_sync_payload = {
+                    "operation": "product_create" if plan["action"] == "CREATE" else "product_update",
+                    "panda_product_id": canonical.get("product_id"),
+                    "product": canonical,
+                    "bitrix_id": (plan.get("target") or {}).get("external_product_id", ""),
+                    "changes": plan.get("changes", {}),
+                }
+                return {"sync_preview": plan, "requires_approval": True}
+            return {"sync_preview": plan, "requires_approval": False, "no_op": plan.get("action") == "UNCHANGED"}
 
         # Real Integration Activation: Bitrix product read by article
         if self.integration_activation is not None and (
@@ -1677,7 +1748,15 @@ class BusinessAssistantService:
             ):
                 if step.capability == "cms.bitrix":
                     cap = "cms.bitrix.catalog.write"
-                    write_payload = {"step": step.name, "execution_id": ex.execution_id}
+                    # Block 5.6: a preceding sync-preview turn (see
+                    # ``bitrix_sync_preview`` above) sets a real product
+                    # create/update payload derived from canonical Product
+                    # Intelligence; fall back to the pre-existing generic
+                    # placeholder for callers/recipes that never preview.
+                    write_payload = getattr(ex, "_bitrix_sync_payload", None) or {
+                        "step": step.name,
+                        "execution_id": ex.execution_id,
+                    }
                 elif step.capability == "email":
                     cap = "email.send"
                     write_payload = getattr(ex, "_email_send_payload", None) or {"operation": "send", "to": ["supplier@example.com"], "subject": "Reply", "body": "Hello"}

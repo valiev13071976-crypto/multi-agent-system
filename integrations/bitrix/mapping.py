@@ -47,12 +47,27 @@ def canonical_to_bitrix_payload(*, product: dict, aspro_enabled: bool = False) -
     if aspro_enabled:
         profile = fixture_aspro_premier_profile()
         return map_product_to_bitrix_payload(product=product, profile=profile)
-    return {
+    payload = {
         "NAME": product.get("title") or product.get("name") or "",
         "PROPERTY_ARTNUMBER": product.get("sku") or product.get("article") or "",
         "DETAIL_TEXT": product.get("description") or "",
         "integration": "bitrix",
     }
+    # Additive-only (spec sections 14/21): existing keys/behavior above are
+    # preserved verbatim -- these are only populated when the canonical
+    # product actually carries the field, never invented.
+    seo_title = product.get("seo_title") or ""
+    seo_description = product.get("seo_description") or ""
+    if seo_title:
+        payload["SEO_TITLE"] = seo_title
+    if seo_description:
+        payload["SEO_DESCRIPTION"] = seo_description
+    media_refs = tuple(product.get("media_refs") or ())
+    if media_refs:
+        payload["DETAIL_PICTURE"] = media_refs[0]
+        if len(media_refs) > 1:
+            payload["MORE_PHOTO"] = list(media_refs[1:])
+    return payload
 
 
 def validate_create_payload(payload: dict) -> None:
