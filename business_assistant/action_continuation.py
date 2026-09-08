@@ -1383,16 +1383,27 @@ def resolve_action_turn(
             if task.status in {STATUS_COMPLETED, STATUS_FAILED_RETRYABLE}:
                 task.status = STATUS_DRAFT
         # Production defect closure (XLSX attachment -> failed response,
-        # follow-up phase): a pure continuation turn ("Продолжай и выполни
-        # мой предыдущий запрос полностью") carries no identifying content
-        # of its own. ``resolve_follow_up`` already determined it needs
-        # prior context (``inject_context=True``) and already resolved the
-        # earlier substantive user instruction from real conversation
-        # history -- reuse THAT text for the NL compiler instead of losing
-        # the original request to the near-empty "continue" phrasing (never
-        # invented/guessed, taken verbatim from history).
+        # follow-up phase): a continuation turn ("Продолжай и выполни мой
+        # предыдущий запрос полностью", "Покажи подготовленную карточку
+        # полностью, включая закупочную цену...") often carries no
+        # identifying content of its own. The gate here is deliberately just
+        # "this turn is already an established FAMILY_EXCEL continuation
+        # (``not is_new``) AND a real prior user turn exists in history" --
+        # NOT ``follow_up.kind``/``inject_context``, which only recognizes a
+        # narrow, hand-picked set of continuation phrasings (deictic /
+        # "продолжай" / short "главное" follow-ups) and silently excluded
+        # every other legitimate rephrasing, losing the original instruction
+        # to the current turn's near-empty text. ``prior_turns()`` always
+        # populates ``previous_user`` (see business_assistant/follow_up.py)
+        # regardless of ``kind``, so this is safe and never invents/guesses
+        # text -- taken verbatim from real conversation history. Existing
+        # short deterministic data continuations ("Оставь Samsung", "Минус
+        # 12%") are unaffected: their own trigger phrase is still present
+        # in the merged text (nl_ops matches via unanchored ``.search()``),
+        # and callers that never pass ``history=`` (previous_user == "")
+        # keep the exact prior behaviour.
         effective_text = current
-        if not is_new and follow_up is not None and follow_up.inject_context and follow_up.previous_user:
+        if not is_new and follow_up is not None and follow_up.previous_user:
             effective_text = f"{follow_up.previous_user} {current}".strip()
         task.goal = effective_text
 
