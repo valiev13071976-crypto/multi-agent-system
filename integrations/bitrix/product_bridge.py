@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import hashlib
 
+from integrations.activation.errors import IntegrationNotConfiguredError
 from integrations.activation.models import ENV_FIXTURE, OP_READ, OP_WRITE
+from integrations.bitrix import schema
 from integrations.bitrix.catalog import GLOBAL_BITRIX_CATALOG, BitrixCatalogStore
 from integrations.bitrix.mapping import canonical_to_bitrix_payload
 from product_intel.planner import assert_sync_product_allowed
@@ -130,6 +132,83 @@ class BitrixProductBridge:
             connection_id=connection_id,
         )
         return out["result"]
+
+    # --- production schema binding verification (Block 5.6 final binding) --
+
+    def verify_schema_binding(
+        self, *, tenant_id: str, bitrix_product_id: str, connection_id: str | None = None
+    ) -> dict:
+        """Bounded, READ-ONLY proof that the real installed panda.msk.ru
+        schema (catalog IBLOCK 14, offers IBLOCK 15, CML2_LINK 279, known
+        properties -- see ``integrations.bitrix.schema``) is correctly bound,
+        using one known product as the verification target. Every call goes
+        through the existing governed gateway (capability + environment +
+        audit) -- no raw HTTP, no write, no mutation.
+
+        Returns a report with an explicit ``limitations`` list for any datum
+        this REST surface/scope genuinely cannot prove (e.g. inherited SEO,
+        warehouse-specific stock) instead of fabricating it.
+        """
+        tenant = require_tenant_id(tenant_id)
+        limitations: list[str] = []
+
+        def _read(operation: str, **extra) -> list:
+            out = self._activation.execute_via_gateway(
+                tenant_id=tenant,
+                capability=READ_CAPABILITY,
+                environment=self._environment,
+                operation_class=OP_READ,
+                payload={"operation": operation, **extra},
+                connection_id=connection_id,
+            )
+            return out["result"].get("items") or []
+
+        products = _read("product_lookup", bitrix_id=bitrix_product_id)
+        if not products:
+            return {"product_id": bitrix_product_id, "found": False, "limitations": ["product_not_found"]}
+        product = schema.map_catalog_product(products[0])
+
+        section_id = product["category"]["section_id"]
+        ancestors: list[dict] = []
+        if section_id:
+            sections = _read("section_read")
+            sections_by_id = {s.get("id"): s for s in sections if s.get("id") is not None}
+            ancestors = schema.resolve_section_ancestors(section_id, sections_by_id)
+        else:
+            limitations.append("product_has_no_section_id")
+
+        offers_raw = []
+        try:
+            offers_raw = _read("offer_read", parent_product_id=bitrix_product_id)
+        except IntegrationNotConfiguredError:
+            limitations.append("offers_iblock_id_not_configured")
+        offers = [schema.map_offer(o, parent_product_id=bitrix_product_id) for o in offers_raw]
+
+        prices_raw = _read("price_read", bitrix_id=bitrix_product_id)
+        prices = schema.map_prices(prices_raw)
+
+        seo = schema.seo_effective_status(products[0])
+        limitations.append(seo["effective_seo_unavailable_reason"])
+        limitations.append(
+            "warehouse_stock_unavailable: no active stores/warehouses configured on this "
+            "installation -- total_quantity is the only verifiable stock figure"
+        )
+
+        return {
+            "product_id": bitrix_product_id,
+            "found": True,
+            "identity": product["identity"],
+            "category": {"section_id": section_id, "ancestors": ancestors},
+            "content": product["content"],
+            "brand": product["brand"],
+            "characteristics": product["characteristics"],
+            "aspro": product["aspro"],
+            "stock": product["stock"],
+            "offers": offers,
+            "prices": prices,
+            "seo": seo,
+            "limitations": limitations,
+        }
 
     # --- Bitrix -> Panda import (spec section 13) -----------------------
 
