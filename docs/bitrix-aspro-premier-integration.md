@@ -52,7 +52,8 @@ Rules:
 | `BITRIX_TIMEOUT_SECONDS` | HTTP timeout |
 | `BITRIX_VERIFY_TLS` | TLS verification (default true) |
 | `BITRIX_CATALOG_ID` | Products IBLOCK ID (this installation: `14`) |
-| `BITRIX_OFFERS_IBLOCK_ID` | Offers/SKU IBLOCK ID (this installation: `15`) — required for `offer_read` |
+| `BITRIX_OFFERS_IBLOCK_ID` | Offers/SKU IBLOCK ID (this installation: `15`) — required for `offer_read` and any offer/SKU CREATE |
+| `BITRIX_RETAIL_PRICE_TYPE_ID` | `catalogGroupId` for this installation's RETAIL selling price (see `catalog.priceType.list`) — required for any real retail-price CREATE/write; fails closed (never guesses e.g. `1`) if unset |
 | `BITRIX_SITE_ID` | Site identifier |
 | `ASPRO_PREMIER_ENABLED` | Enable Aspro field mapping |
 | `ASPRO_PREMIER_FIELD_MAPPINGS` | Optional mapping config reference |
@@ -91,7 +92,13 @@ protected environment/secrets before any LIVE call is attempted.
 - Selective export (Excel → subset only)
 
 ### Deferred / Unsupported
-- LIVE mutating writes during engineering closure (structurally blocked)
+- LIVE mutating writes for every operation OTHER than the one governed,
+  single-product `product_create` used by
+  `business_assistant.controlled_bitrix_write` (product/offer
+  update, price update, stock update, media attach, SEO update, publish
+  all still raise the pre-existing `bitrix_live_write_blocked_engineering`
+  placeholder in LIVE — see "First Controlled Production Write" below for
+  what IS implemented)
 - Broad order mutations
 - Production media upload (reuse Image/Product Media Pipeline when activated)
 - Autonomous price/product changes from conversational requests
@@ -186,6 +193,68 @@ lifecycle every other provider already uses (no new connector):
 This does not change `execute_via_gateway`/`resolve_connection` or any
 other provider's behavior — see
 `tests/test_bitrix_production_verification_bootstrap.py`.
+
+## First Controlled Production Write — real LIVE `product_create`
+
+`LiveBitrixAdapter.write()` implements exactly one real LIVE operation,
+`product_create` — the only one `business_assistant.controlled_bitrix_write.
+execute_single_product_write` ever calls for its governed, single-product,
+approval-gated flow. Every other write operation is unchanged (see
+"Deferred / Unsupported" above).
+
+**REST methods used** (same `catalog` scope, same `BitrixHttpClient`
+transport, every other LIVE read already uses — no second HTTP
+client/architecture):
+
+| Step | REST method | Purpose |
+|------|-------------|---------|
+| idempotency check | `catalog.product.list` (filter `xmlId`) | has this idempotency key already created a product? |
+| product create | `catalog.product.add` | base product: `name`, `active`, BRAND (`property100`) |
+| idempotency check | `catalog.product.offer.list` (filter `parentId`) | does this product already have an offer? |
+| offer create | `catalog.product.offer.add` | SKU/article (`property283`) linked via `parentId` |
+| idempotency check | `catalog.price.list` (filter `productId`+`catalogGroupId`) | is the retail price already recorded? |
+| price create | `catalog.price.add` | retail selling price only |
+| read-back | `catalog.product.list` (filter `id`) | independent, governed verification (unchanged, pre-existing) |
+
+**Fields written** (only fields with a schema-verified destination —
+never a guessed property ID/code):
+- `name` → base product name (IBLOCK 14)
+- SKU/article → offer property 283 (`ARTICLE`, IBLOCK 15) — this
+  installation's schema binding (`integrations/bitrix/schema.py`) verifies
+  ARTICLE only on the OFFERS IBLOCK, not the base product, so a real SKU
+  requires creating one offer per product here
+- brand → catalog property 100 (`BRAND`, IBLOCK 14)
+- retail selling price → `catalog.price.add` against `BITRIX_RETAIL_PRICE_TYPE_ID`
+
+**Never written**: EAN, purchase price, category/section — no verified
+destination exists for these on this installation; `controlled_bitrix_write`
+never includes them in the payload this adapter reads, so there is nothing
+to guess.
+
+**Product visibility**: created `active="N"` unless the caller explicitly
+passes `active=True` — `controlled_bitrix_write` always passes `active=False`
+for this first controlled write.
+
+**Idempotency/duplicate protection**: a fresh `LiveBitrixAdapter` instance
+is constructed on every `execute_via_gateway` call (see
+`IntegrationActivationService._adapter_for`), so nothing here relies on
+in-process adapter memory surviving a retry. Instead each step checks
+Bitrix itself (via the idempotency-check reads above) before creating —
+the product is tagged with a deterministic `xmlId` derived from the
+caller's idempotency key, and the offer/price steps are matched by
+parent/product id. A retry with the same idempotency key never creates a
+second product, offer, or price row; if an earlier attempt partially
+failed (e.g. product created but offer/price failed), the retry only
+performs the remaining step(s).
+
+**Partial failure**: if product creation succeeds but a later required
+step (offer or price) fails, the result reports `PARTIAL_FAILURE` with the
+already-created Bitrix product ID and the specific `failed_step` — never
+silently reported as success, and the product is never recreated on
+retry.
+
+See `tests/test_bitrix_live_product_create_write.py` for full deterministic
+coverage (mocked HTTP transport only — zero real network calls).
 
 ## Product Intelligence Bridge (Block 5.6)
 
