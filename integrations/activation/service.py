@@ -11,8 +11,21 @@ from security.tenant import require_tenant_id
 
 from integrations.activation.adapters import FixtureAdapterState, FixtureProviderAdapter
 from integrations.activation.composio import ComposioFixtureAdapter
-from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtureAdapter
-from integrations.bitrix.live_adapter import LiveBitrixAdapter
+
+# NOTE: integrations.bitrix.{fixture_adapter,live_adapter} are intentionally
+# NOT imported at module scope here. integrations/bitrix/__init__.py imports
+# integrations.bitrix.fixture_adapter, which imports
+# integrations.activation.adapters -- forcing this integrations.activation
+# package (and therefore this module) to finish loading *before*
+# integrations.bitrix.fixture_adapter itself has finished. A module-level
+# `from integrations.bitrix.fixture_adapter import ...` here would reach back
+# into that still-partially-initialized module and raise
+# "ImportError: cannot import name ... (most likely due to a circular
+# import)" for any entrypoint that touches integrations.bitrix first (e.g.
+# `from integrations.bitrix.config import load_bitrix_config`). These
+# classes are only ever needed at call time (see __init__ / _adapter_for
+# below), so they are imported lazily there instead, which fully breaks the
+# cycle without changing any public import surface.
 from integrations.onec.fixture_adapter import OneCFixtureAdapter
 from integrations.onec.live_adapter import LiveOneCAdapter
 from integrations.crm.fixture_adapter import CrmFixtureAdapter
@@ -109,6 +122,9 @@ class IntegrationActivationService:
         self._usage: list[dict] = []
         self._composio = ComposioFixtureAdapter()
         self._adapters["composio"] = self._composio
+        # Lazy import -- see note above the module-level import block.
+        from integrations.bitrix.fixture_adapter import AsproFixtureAdapter, BitrixFixtureAdapter
+
         self._bitrix_fixture = BitrixFixtureAdapter()
         self._aspro_fixture = AsproFixtureAdapter()
         self._adapters["bitrix"] = self._bitrix_fixture
@@ -711,6 +727,9 @@ class IntegrationActivationService:
 
     def _adapter_for(self, conn: IntegrationConnection) -> FixtureProviderAdapter:
         if conn.environment == ENV_LIVE and conn.provider_id in {"bitrix", "aspro"}:
+            # Lazy import -- see note above the module-level import block.
+            from integrations.bitrix.live_adapter import LiveBitrixAdapter
+
             return LiveBitrixAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
         if conn.environment == ENV_LIVE and conn.provider_id == "onec":
             return LiveOneCAdapter(secret_resolver=lambda ref: self._resolve_secret(conn.tenant_id, ref))
