@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import uuid
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -95,6 +97,34 @@ from security.tenant import require_tenant_id
 
 def _utc_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+# Production defect closure (XLSX attachment -> failed response): HTTP 200
+# end-to-end told us nothing about the internal outcome -- the request/
+# status/result endpoints all returned 200 while Panda produced no usable
+# answer. Same pattern already established for the analogous voice-mode
+# observability defect (realtime.bridge._log_voice_event / PR #24): reuse
+# the standard `logging` module (no new event-bus/telemetry platform), and
+# fold the structured payload into the message text itself so it survives
+# through whatever log format string is configured in production, not only
+# through `extra=`. Never logs secrets/credentials/full attachment content
+# -- only bounded, already-non-sensitive correlation identifiers/counters.
+_diag_log = logging.getLogger("business_assistant_api.diagnostics")
+
+
+def _log_ba_event(event: str, *, request_id: str, tenant_id: str = "", **fields) -> None:
+    try:
+        payload = {"event": event, "request_id": request_id}
+        if tenant_id:
+            payload["tenant_id"] = tenant_id
+        payload.update(fields)
+        _diag_log.info(
+            "business_assistant_event %s",
+            json.dumps(payload, default=str, sort_keys=True),
+            extra={"ba_event": payload},
+        )
+    except Exception:
+        pass
 
 
 _LEGAL = {
@@ -204,11 +234,25 @@ class BusinessAssistantApiService:
             # reload/resume (3.5.3, 3.5.11, 3.5.18-F). Images keep using the
             # existing inline markdown/view_url rendering path unchanged.
             artifact_refs = self._non_image_artifact_refs(getattr(ex, "artifacts", None))
+            final_text = select_canonical_final_answer({"summary": ex.summary, "final_answer": ex.summary})
+            if not final_text.strip() and norm.artifact_refs:
+                # Production defect closure: an HTTP-200 conversational turn
+                # that carried an attachment but produced no usable final
+                # answer is exactly the original XLSX-attachment defect
+                # shape. Log it so a future recurrence is diagnosable by
+                # request_id without needing another reproduction round.
+                _log_ba_event(
+                    "conversational_empty_result_with_attachment",
+                    request_id=request_id,
+                    tenant_id=tenant,
+                    execution_id=getattr(ex, "execution_id", ""),
+                    attachment_count=len(norm.artifact_refs),
+                )
             self._append_message(
                 tenant,
                 norm.conversation_id,
                 role="assistant",
-                content=select_canonical_final_answer({"summary": ex.summary, "final_answer": ex.summary}),
+                content=final_text,
                 request_id=request_id,
                 artifact_refs=artifact_refs,
             )
@@ -400,6 +444,12 @@ class BusinessAssistantApiService:
                 text=norm.message,
                 artifact_refs=norm.artifact_refs,
                 read_only=norm.read_only,
+                # Large-batch supplier datasets already routed away from the
+                # interactive/conversational path via _is_batch_request()
+                # above must keep going through the scale-safe batch
+                # workflow engine unchanged -- only non-batch attachments
+                # get the new attachment->conversational preference.
+                attachments_prefer_conversational=(rec.workload_class != WORKLOAD_BATCH),
             )
             rec.ba_request_id = ba_req.request_id
 
@@ -479,6 +529,12 @@ class BusinessAssistantApiService:
                 text=norm.message,
                 artifact_refs=norm.artifact_refs,
                 read_only=norm.read_only,
+                # Large-batch supplier datasets already routed away from the
+                # interactive/conversational path via _is_batch_request()
+                # above must keep going through the scale-safe batch
+                # workflow engine unchanged -- only non-batch attachments
+                # get the new attachment->conversational preference.
+                attachments_prefer_conversational=(rec.workload_class != WORKLOAD_BATCH),
             )
             rec.ba_request_id = ba_req.request_id
 
@@ -990,6 +1046,32 @@ class BusinessAssistantApiService:
             self._event(rec, EV_REQUEST_BLOCKED, message="Request blocked", status=ST_BLOCKED)
         elif mapped == ST_FAILED:
             self._event(rec, EV_REQUEST_FAILED, message="Execution failed", status=ST_FAILED)
+        # Production defect closure (XLSX attachment -> failed response):
+        # a terminal execution that is reported COMPLETED to the caller but
+        # (a) had one or more BLOCKED steps, or (b) still ends up with an
+        # empty summary/final_answer, is exactly the internal-failure-behind-
+        # HTTP-200 shape that made the original defect invisible in
+        # production logs. Emit ONE bounded, safe diagnostic line so a real
+        # future occurrence is correlatable by request_id alone (never logs
+        # message text, attachment content, or secrets).
+        blocked_steps = [
+            {"step_id": step_id, "code": step.error_code}
+            for step_id, step in ex.steps.items()
+            if step.status == "BLOCKED" and step.error_code
+        ]
+        if blocked_steps or (mapped == ST_COMPLETED and not str(ex.summary or "").strip()):
+            _log_ba_event(
+                "business_workflow_degraded_or_empty_result",
+                request_id=rec.request_id,
+                tenant_id=rec.tenant_id,
+                execution_id=getattr(ex, "execution_id", ""),
+                ba_status=ex.status,
+                mapped_status=mapped,
+                blocked_step_count=len(blocked_steps),
+                blocked_step_codes=sorted({b["code"] for b in blocked_steps}),
+                attachment_count=len(rec.artifact_refs or ()),
+                summary_empty=not str(ex.summary or "").strip(),
+            )
         self.store.save_request(rec)
 
     def _maybe_create_artifacts(self, rec: ApiRequestRecord, ex) -> None:
