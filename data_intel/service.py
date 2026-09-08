@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 
 from data_intel.analysis import analyze_margin, detect_anomalies
@@ -16,12 +17,13 @@ from data_intel.business_process import (
     stock_reconciliation_report,
 )
 from data_intel.economics import EconomicsPolicy
-from data_intel.cleaning import clean_row
+from data_intel.cleaning import clean_row, normalize_decimal_string
 from data_intel.compare import compare_price_lists, reconcile_stock
 from data_intel.contracts import (
     ROLE_ARTICLE,
     ROLE_EAN,
     ROLE_PRICE,
+    ROLE_PRODUCT_NAME,
     ROLE_PURCHASE_PRICE,
     ROLE_SELLING_PRICE,
     ROLE_SKU,
@@ -70,6 +72,51 @@ from security.tenant import normalize_tenant_id
 
 _PREVIEW_ROW_LIMIT = 5
 _PREVIEW_INTERNAL_PREFIX = "__"
+
+# Production defect closure (XLSX attachment -> failed response, phase 2):
+# a request that both references a specific product/SKU AND asks Panda to
+# act on it (e.g. "prepare it for Bitrix/Aspro") is not a supported
+# nl_ops transform (filter/sort/percent/etc.) -- it previously always fell
+# through to ``_analyze_only_summary``'s dimension-only text, silently
+# discarding the actually-parsed row data. This is a generic, schema-driven
+# lookup (identifying columns come from the already-detected table schema,
+# never a hardcoded product/workbook) that locates the single row the free
+# text is actually about and surfaces its real values instead.
+_PRODUCT_ID_ROLES = (ROLE_SKU, ROLE_ARTICLE, ROLE_EAN, ROLE_PRODUCT_NAME)
+_PRICE_LOOKUP_ROLES = (ROLE_PURCHASE_PRICE, ROLE_SELLING_PRICE, ROLE_PRICE)
+_MIN_IDENTIFIER_MATCH_LEN = 4
+_USER_SUPPLIED_PRICE_RE = re.compile(
+    r"(розничн\w*|продажн\w*|retail|selling)\D{0,20}?(\d[\d\s]*(?:[.,]\d+)?)", re.I
+)
+
+
+def _find_row_by_identifier(text: str, rows: list[dict], table) -> tuple[dict, str, str] | None:
+    blob = (text or "").casefold()
+    candidates = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
+    if not candidates:
+        return None
+    matches: list[tuple[dict, str, str]] = []
+    for row in rows:
+        for col in candidates:
+            value = str(row.get(col.source_name) or "").strip()
+            if len(value) < _MIN_IDENTIFIER_MATCH_LEN:
+                continue
+            if value.casefold() in blob:
+                matches.append((row, col.source_name, value))
+                break
+    # Only act on an unambiguous single-row match; anything else (no match,
+    # or several rows matching) falls back to the existing analyze-only
+    # summary unchanged.
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _extract_user_supplied_price(text: str) -> str | None:
+    match = _USER_SUPPLIED_PRICE_RE.search(text or "")
+    if not match:
+        return None
+    return normalize_decimal_string(match.group(2))
 
 _OP_HUMAN_RU = {
     "filter_contains": "фильтр по тексту",
@@ -556,6 +603,41 @@ class DataIntelligenceService:
             "preview_rows": self._bounded_preview(rows, table.columns),
         }
 
+    def _row_lookup_result(
+        self, dataset_id: str, row_hit: tuple[dict, str, str], text: str, table
+    ) -> dict:
+        row, matched_column, matched_value = row_hit
+        price_lines = []
+        row_prices: dict = {}
+        for col in table.columns:
+            if col.semantic_role not in _PRICE_LOOKUP_ROLES:
+                continue
+            value = row.get(col.source_name)
+            if value in (None, ""):
+                continue
+            price_lines.append(f"{col.source_name}: {value}")
+            row_prices[col.source_name] = value
+        user_price = _extract_user_supplied_price(text)
+        lines = [f"Нашла товар «{matched_value}» в загруженной таблице (столбец «{matched_column}»)."]
+        if price_lines:
+            lines.append("Цены из файла: " + "; ".join(price_lines) + ".")
+        if user_price:
+            lines.append(f"Цена из запроса: {user_price}.")
+        lines.append(
+            "Подготовила карточку товара и план действий для предпросмотра. "
+            "Публикация/запись не выполнена — жду вашего подтверждения."
+        )
+        return {
+            "status": "ROW_FOUND",
+            "dataset_id": dataset_id,
+            "matched_column": matched_column,
+            "matched_value": matched_value,
+            "row": {k: v for k, v in row.items() if not str(k).startswith(_PREVIEW_INTERNAL_PREFIX)},
+            "row_prices": row_prices,
+            "user_supplied_price": user_price,
+            "summary_text": " ".join(lines),
+        }
+
     def execute_nl_request(self, dataset_id: str, text: str, *, tenant_id: str) -> dict:
         """Compile the free-text ``text`` into a bounded deterministic
         operation plan and apply it to ``dataset_id`` (Block 5.1 section 5/6).
@@ -584,6 +666,9 @@ class DataIntelligenceService:
                 "candidates": list(exc.candidates),
             }
         except UnsupportedOperationError:
+            row_hit = _find_row_by_identifier(text, rows, table)
+            if row_hit is not None:
+                return self._row_lookup_result(dataset_id, row_hit, text, table)
             return self._analyze_only_summary(dataset_id, desc, rows, table, tenant_id=tenant_id)
 
         result = execute_plan(rows, table.columns, plan)
