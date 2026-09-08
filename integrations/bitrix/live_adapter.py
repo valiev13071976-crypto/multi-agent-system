@@ -78,13 +78,44 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         self._assert_live_configured(credential_ref)
         self._raise_if_bad()
         # Engineering block: no destructive/mutating live calls in tests; read path only when configured.
-        # Structural live read delegates to Bitrix REST catalog.product.list when webhook present.
         params = params or {}
         operation = str(params.get("operation") or "")
-        method = "crm.product.list" if operation != "order_read" else "sale.order.list"
-        data = self.client.call(method, credential_ref=credential_ref, params={"filter": {}, "select": ["ID", "NAME"]})
+        if operation == "order_read":
+            data = self.client.call(
+                "sale.order.list", credential_ref=credential_ref, params={"filter": {}, "select": ["ID", "NAME"]}
+            )
+            return {
+                "items": data.get("result") or [],
+                "mode": "LIVE",
+                "live": True,
+                "provider_metadata": self._config.safe_metadata(),
+            }
+        # Product/catalog reads use the self-hosted Bitrix REST "catalog"
+        # service (``catalog.product.list``, webhook scope ``catalog``),
+        # which operates on the installed products IBLOCK. This is NOT
+        # ``crm.product.list`` -- that method belongs to the Bitrix24 CRM
+        # product catalog, which does not exist on a self-hosted
+        # "Управление сайтом" install (calling it there returns HTTP 404,
+        # "method not found", matching a least-privilege webhook that only
+        # grants ``catalog`` + ``iblock`` scopes -- never ``crm``).
+        # ``filter.iblockId`` is a required parameter of
+        # ``catalog.product.list``; it identifies *which* products IBLOCK to
+        # read and is installation-specific, so it is sourced from
+        # ``BitrixIntegrationConfig.catalog_id`` (``BITRIX_CATALOG_ID``)
+        # rather than assumed/hardcoded -- fail closed if unset instead of
+        # guessing an IBLOCK ID.
+        iblock_id = str(self._config.catalog_id or "").strip()
+        if not iblock_id or not iblock_id.lstrip("-").isdigit():
+            raise IntegrationNotConfiguredError("bitrix_catalog_iblock_id_not_configured")
+        data = self.client.call(
+            "catalog.product.list",
+            credential_ref=credential_ref,
+            params={"filter": {"iblockId": int(iblock_id)}, "select": ["id", "iblockId", "name"]},
+        )
+        result = data.get("result")
+        items = result.get("products", []) if isinstance(result, dict) else (result or [])
         return {
-            "items": data.get("result") or [],
+            "items": items,
             "mode": "LIVE",
             "live": True,
             "provider_metadata": self._config.safe_metadata(),

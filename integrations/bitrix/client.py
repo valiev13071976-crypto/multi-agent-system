@@ -60,7 +60,7 @@ class BitrixHttpClient:
                 from integrations.activation.errors import IntegrationTimeoutNormalizedError
 
                 raise IntegrationTimeoutNormalizedError() from exc
-            if exc.category in {ProviderErrorCategory.AUTH_FAILED, ProviderErrorCategory.FORBIDDEN}:
+            if exc.category in {ProviderErrorCategory.AUTHENTICATION_FAILED, ProviderErrorCategory.AUTHORIZATION_FAILED}:
                 from integrations.activation.errors import IntegrationAuthFailedError
 
                 raise IntegrationAuthFailedError() from exc
