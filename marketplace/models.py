@@ -367,3 +367,316 @@ class ProviderMediaProfile:
     min_height: int
     aspect_ratio: str
     version: str = "1.0.0"
+
+
+# =====================================================================
+# Block 5.7A -- canonical cross-provider Marketplace Platform contracts.
+#
+# These are the vendor-neutral commerce-channel entities (catalog/offer/
+# category/price/stock/order/sync) that sit ABOVE the WB/Ozon/YM adapters
+# in ``integrations/{wildberries,ozon,yandex_market}`` and BELOW canonical
+# Product Intelligence (5.5). They are deliberately separate from the
+# price-protection/economics contracts above them in this same module
+# (``MarketplaceSelection``/``MarketplaceCommissionObservation``/
+# ``MarketplaceProfitabilityResult``/... -- that is a different, already
+# CLOSED subsystem which this block does not modify or duplicate).
+# `MarketplaceAccount`/`MarketplaceListing` above are REUSED as-is (they
+# already model exactly what section 3 requires for those two entities).
+# =====================================================================
+
+PROVIDER_MARKETPLACES = (PROVIDER_WILDBERRIES, PROVIDER_OZON, PROVIDER_YANDEX_MARKET)
+
+# Additional capability-driven contract entries (CATEGORIES/CONTENT) --
+# CAP_CATALOG_READ/CAP_CARD_CREATE/CAP_CARD_UPDATE/CAP_CARD_ARCHIVE/
+# CAP_PRICE_READ/CAP_PRICE_WRITE/CAP_STOCK_READ/CAP_STOCK_WRITE/
+# CAP_ORDER_READ/CAP_ORDER_STATUS_WRITE already exist above and are reused.
+CAP_CATEGORY_READ = "CATEGORY_READ"
+CAP_CONTENT_WRITE = "CONTENT_WRITE"
+
+FULFILLMENT_FBO = "FBO"
+FULFILLMENT_FBS = "FBS"
+FULFILLMENT_DBS = "DBS"
+FULFILLMENT_UNKNOWN = "UNKNOWN"
+
+# Canonical order-status layer (spec section 15). Any provider status not
+# in the per-provider mapping table (see ``marketplace.platform``) fails
+# safely into ORDER_STATUS_UNKNOWN -- it must never crash normalization.
+ORDER_STATUS_NEW = "NEW"
+ORDER_STATUS_CONFIRMED = "CONFIRMED"
+ORDER_STATUS_PROCESSING = "PROCESSING"
+ORDER_STATUS_READY_FOR_SHIPMENT = "READY_FOR_SHIPMENT"
+ORDER_STATUS_SHIPPED = "SHIPPED"
+ORDER_STATUS_DELIVERED = "DELIVERED"
+ORDER_STATUS_CANCELLED = "CANCELLED"
+ORDER_STATUS_RETURNED = "RETURNED"
+ORDER_STATUS_UNKNOWN = "UNKNOWN"
+
+ORDER_STATUSES = frozenset(
+    {
+        ORDER_STATUS_NEW,
+        ORDER_STATUS_CONFIRMED,
+        ORDER_STATUS_PROCESSING,
+        ORDER_STATUS_READY_FOR_SHIPMENT,
+        ORDER_STATUS_SHIPPED,
+        ORDER_STATUS_DELIVERED,
+        ORDER_STATUS_CANCELLED,
+        ORDER_STATUS_RETURNED,
+        ORDER_STATUS_UNKNOWN,
+    }
+)
+
+# Category-mapping state (spec section 10).
+CATEGORY_MATCHED = "MATCHED"
+CATEGORY_UNMAPPED = "UNMAPPED"
+
+# Sync/diff classification (spec section 17). Deliberately distinct from
+# the Bitrix bridge's CREATE/UPDATE/UNCHANGED/AMBIGUOUS/INVALID/SKIP action
+# vocabulary (``integrations.bitrix.product_bridge``) -- this is a *diff
+# classification* over (Panda side, marketplace side) state, not a write
+# action; ``marketplace.platform.plan_publication`` derives an action from
+# this classification for the governed write path.
+DIFF_IN_SYNC = "IN_SYNC"
+DIFF_PANDA_NEWER = "PANDA_NEWER"
+DIFF_MARKETPLACE_NEWER = "MARKETPLACE_NEWER"
+DIFF_CONFLICT = "CONFLICT"
+DIFF_MISSING_IN_PANDA = "MISSING_IN_PANDA"
+DIFF_MISSING_IN_MARKETPLACE = "MISSING_IN_MARKETPLACE"
+DIFF_INVALID = "INVALID"
+DIFF_UNMAPPED = "UNMAPPED"
+
+DIFF_STATES = frozenset(
+    {
+        DIFF_IN_SYNC,
+        DIFF_PANDA_NEWER,
+        DIFF_MARKETPLACE_NEWER,
+        DIFF_CONFLICT,
+        DIFF_MISSING_IN_PANDA,
+        DIFF_MISSING_IN_MARKETPLACE,
+        DIFF_INVALID,
+        DIFF_UNMAPPED,
+    }
+)
+
+# Field/source ownership semantics (spec section 32) -- reused, not
+# duplicated, from the same conceptual contract Block 5.6 already
+# established for Bitrix (PANDA_MANAGED/BITRIX_MANAGED/.../
+# UNMANAGED_PRESERVE in ``integrations.bitrix.schema``); named for the
+# marketplace domain but the same six-state shape.
+OWNER_PANDA_AUTHORITATIVE = "PANDA_AUTHORITATIVE"
+OWNER_MARKETPLACE_AUTHORITATIVE = "MARKETPLACE_AUTHORITATIVE"
+OWNER_MARKETPLACE_DERIVED = "MARKETPLACE_DERIVED"
+OWNER_READ_ONLY = "READ_ONLY"
+OWNER_PROVIDER_MANAGED = "PROVIDER_MANAGED"
+OWNER_CONFLICT_MANUAL = "CONFLICT_MANUAL_DECISION"
+
+OWNERSHIP_STATES = frozenset(
+    {
+        OWNER_PANDA_AUTHORITATIVE,
+        OWNER_MARKETPLACE_AUTHORITATIVE,
+        OWNER_MARKETPLACE_DERIVED,
+        OWNER_READ_ONLY,
+        OWNER_PROVIDER_MANAGED,
+        OWNER_CONFLICT_MANUAL,
+    }
+)
+
+
+@dataclass(frozen=True)
+class MarketplaceOffer:
+    """Sellable SKU/variant unit under a ``MarketplaceListing`` (card) --
+    mirrors the Bitrix Product(IBLOCK14)/Offer(IBLOCK15) split from Block
+    5.6 for the same reason: a "card" (WB) / "product" (Ozon) / "offer
+    group" (YM) can contain multiple sellable variants, and collapsing them
+    would lose real per-variant price/stock/identity."""
+
+    offer_id: str
+    tenant_id: str
+    provider: str
+    account_id: str
+    listing_id: str
+    product_id: str
+    sku_id: str
+    external_offer_id: str = ""
+    external_sku: str = ""
+    variant_attributes: tuple[tuple[str, str], ...] = ()
+    status: str = LISTING_SELECTED
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "variant_attributes", tuple(self.variant_attributes))
+
+
+@dataclass(frozen=True)
+class MarketplaceCategoryMap:
+    """Scoped (tenant, provider) mapping between a Panda category and an
+    external marketplace category -- never a hardcoded universal rule
+    (spec section 10: "do not hardcode TV -> category X")."""
+
+    tenant_id: str
+    provider: str
+    panda_category: str
+    external_category_id: str = ""
+    status: str = CATEGORY_UNMAPPED
+    required_attributes: tuple[str, ...] = ()
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "required_attributes", tuple(self.required_attributes))
+        if self.status not in {CATEGORY_MATCHED, CATEGORY_UNMAPPED}:
+            object.__setattr__(self, "status", CATEGORY_UNMAPPED)
+
+
+@dataclass(frozen=True)
+class MarketplaceAttribute:
+    """One category-required attribute definition (spec section 10) --
+    metadata only; actual per-product values live in
+    ``Product.attributes``/``variant_attributes`` (5.5), never duplicated
+    here."""
+
+    provider: str
+    external_category_id: str
+    attribute_code: str
+    name: str = ""
+    required: bool = False
+    value_type: str = "string"
+    allowed_values: tuple[str, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "allowed_values", tuple(self.allowed_values))
+
+
+@dataclass(frozen=True)
+class ListingReadinessIssue:
+    code: str
+    field: str = ""
+    message: str = ""
+
+
+@dataclass(frozen=True)
+class ListingReadinessResult:
+    """Machine-readable publication-readiness result (spec section 11) --
+    never silently fabricates a missing field; a product is READY only
+    when ``issues`` is empty."""
+
+    product_id: str
+    provider: str
+    ready: bool
+    issues: tuple[ListingReadinessIssue, ...] = ()
+
+    def __post_init__(self):
+        object.__setattr__(self, "issues", tuple(self.issues))
+
+
+@dataclass(frozen=True)
+class MarketplacePrice:
+    """Spec section 12 -- READ/WRITE representation only; 5.8 price-
+    protection policy (safe/floor/loss decisions) is explicitly out of
+    scope here and lives in ``marketplace.price_guard``/``economics``."""
+
+    provider: str
+    account_id: str
+    offer_id: str
+    amount: MoneyAmount
+    price_type: str = "BASE"
+    original_amount: MoneyAmount | None = None
+    discounted_amount: MoneyAmount | None = None
+    external_version: str = ""
+    observed_at: datetime | None = None
+    sync_state: str = DIFF_IN_SYNC
+
+
+@dataclass(frozen=True)
+class MarketplaceWarehouse:
+    provider: str
+    account_id: str
+    warehouse_id: str
+    name: str = ""
+    fulfillment_model: str = FULFILLMENT_UNKNOWN
+
+
+@dataclass(frozen=True)
+class MarketplaceStock:
+    """Spec section 13 -- preserves warehouse/fulfillment detail rather
+    than flattening every provider stock model into one integer; callers
+    that only need an aggregate can sum ``quantity`` themselves."""
+
+    provider: str
+    account_id: str
+    offer_id: str
+    warehouse_id: str = ""
+    fulfillment_model: str = FULFILLMENT_UNKNOWN
+    quantity: int = 0
+    available: int | None = None
+    observed_at: datetime | None = None
+
+
+@dataclass(frozen=True)
+class MarketplaceOrderItem:
+    external_offer_id: str = ""
+    external_sku: str = ""
+    product_id: str = ""
+    sku_id: str = ""
+    quantity: int = 1
+    item_price: MoneyAmount | None = None
+
+
+@dataclass(frozen=True)
+class MarketplaceOrderStatus:
+    canonical_status: str
+    provider_status: str
+    provider_substatus: str = ""
+
+    def __post_init__(self):
+        if self.canonical_status not in ORDER_STATUSES:
+            object.__setattr__(self, "canonical_status", ORDER_STATUS_UNKNOWN)
+
+
+@dataclass(frozen=True)
+class MarketplaceShipment:
+    external_shipment_id: str = ""
+    fulfillment_model: str = FULFILLMENT_UNKNOWN
+    warehouse_id: str = ""
+    tracking_reference: str = ""
+
+
+@dataclass(frozen=True)
+class MarketplaceOrder:
+    tenant_id: str
+    provider: str
+    account_id: str
+    external_order_id: str
+    status: MarketplaceOrderStatus
+    currency: str = "RUB"
+    total: MoneyAmount | None = None
+    items: tuple[MarketplaceOrderItem, ...] = ()
+    shipment: MarketplaceShipment | None = None
+    created_at: datetime | None = None
+    updated_at: datetime | None = None
+    raw_reference: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "items", tuple(self.items))
+
+
+@dataclass(frozen=True)
+class MarketplaceSyncState:
+    """One (Panda side vs marketplace side) reconciliation result (spec
+    section 17/18) -- structured, never auto-resolved when ambiguous."""
+
+    tenant_id: str
+    provider: str
+    dimension: str  # CATALOG | PRICE | STOCK | ORDERS | STATUS
+    subject_id: str
+    diff: str
+    panda_value: str = ""
+    marketplace_value: str = ""
+    evidence: tuple[str, ...] = ()
+    checked_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+
+    def __post_init__(self):
+        object.__setattr__(self, "tenant_id", require_tenant_id(self.tenant_id))
+        object.__setattr__(self, "evidence", tuple(self.evidence))
+        if self.diff not in DIFF_STATES:
+            object.__setattr__(self, "diff", DIFF_INVALID)
