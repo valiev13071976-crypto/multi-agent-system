@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Callable
 
 from integrations.activation.adapters import FixtureAdapterState
@@ -11,6 +12,16 @@ from integrations.bitrix.client import BitrixHttpClient
 from integrations.bitrix.config import BitrixIntegrationConfig, load_bitrix_config
 from integrations.bitrix.errors import BitrixValidationError
 from integrations.bitrix.fixture_adapter import BitrixFixtureAdapter
+
+# First controlled production Bitrix product write: only the base product
+# name, BRAND (property 100, verified PANDA_MANAGED on IBLOCK 14), the
+# offer/SKU article (property 283, verified PANDA_MANAGED on IBLOCK 15),
+# and the retail selling price have a verified real write destination on
+# this installation -- see integrations/bitrix/schema.py's module docstring
+# and PropertyBinding table (the source of truth this module reuses,
+# rather than re-deriving/guessing its own property ids).
+_BRAND_PROPERTY = schema.catalog_property(code="BRAND")
+_ARTICLE_PROPERTY = schema.offer_property(code="ARTICLE")
 
 
 class LiveBitrixAdapter(BitrixFixtureAdapter):
@@ -93,6 +104,18 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         if not offers_id or not offers_id.lstrip("-").isdigit():
             raise IntegrationNotConfiguredError("bitrix_offers_iblock_id_not_configured")
         return int(offers_id)
+
+    def _require_retail_price_type_id(self) -> int:
+        # ``catalogGroupId`` -- installation-specific price-type id (see
+        # catalog.priceType.list); never guessed/hardcoded to e.g. "1"
+        # (module docstring in integrations/bitrix/schema.py: regional/
+        # price-type rows for this installation are known to be distinct,
+        # non-uniform ids -- see catalog.price.list evidence in
+        # tests/test_bitrix_production_schema_binding.py).
+        type_id = str(self._config.retail_price_type_id or "").strip()
+        if not type_id or not type_id.lstrip("-").isdigit():
+            raise IntegrationNotConfiguredError("bitrix_retail_price_type_id_not_configured")
+        return int(type_id)
 
     def _envelope(self, items: list) -> dict:
         return {"items": items, "mode": "LIVE", "live": True, "provider_metadata": self._config.safe_metadata()}
@@ -191,6 +214,303 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         return self._envelope(result.get("products", []) if isinstance(result, dict) else (result or []))
 
     def write(self, *, capability: str, payload: dict, idempotency_key: str, tenant_id: str = "", credential_ref: str = "") -> dict:
-        # LIVE writes are structurally implemented but blocked during engineering closure.
         self._assert_live_configured(credential_ref)
-        raise IntegrationNotConfiguredError("bitrix_live_write_blocked_engineering")
+        self._raise_if_bad()
+        operation = str(payload.get("operation") or "").strip()
+        if operation != "product_create":
+            # Every other LIVE write operation (update/price/stock/media/
+            # SEO/publish) remains the pre-existing, deliberate,
+            # documented placeholder -- out of scope for the first
+            # controlled single-product CREATE (see
+            # docs/bitrix-aspro-premier-integration.md's "Deferred /
+            # Unsupported" section). Only product_create is implemented
+            # here, matching exactly what
+            # business_assistant.controlled_bitrix_write.
+            # execute_single_product_write ever calls.
+            raise IntegrationNotConfiguredError("bitrix_live_write_blocked_engineering")
+        return self._write_product_create_live(
+            capability=capability, payload=payload, idempotency_key=idempotency_key, credential_ref=credential_ref
+        )
+
+    # --- LIVE governed product create (first controlled production write) --
+
+    def _write_product_create_live(
+        self, *, capability: str, payload: dict, idempotency_key: str, credential_ref: str
+    ) -> dict:
+        """Real, minimal LIVE create for exactly the fields this
+        installation's schema binding has verified a destination for:
+        name, BRAND (property 100), article/SKU (offer property 283), and
+        the retail selling price. EAN/purchase price/category are never
+        written here -- ``controlled_bitrix_write`` already never includes
+        them in the canonical payload this reads.
+
+        Idempotency/duplicate-protection design note: a FRESH
+        ``LiveBitrixAdapter`` is constructed on every
+        ``IntegrationActivationService.execute_via_gateway`` call (see
+        ``IntegrationActivationService._adapter_for`` -- unlike the FIXTURE
+        adapters, which are cached long-lived instances on the service),
+        so no in-adapter-memory cache here would ever survive a retry
+        across separate calls. Instead this asks BITRIX ITSELF, using the
+        exact already-verified ``catalog.product.list`` /
+        ``catalog.product.offer.list`` / ``catalog.price.list`` read
+        surface, whether a product tagged with this idempotency key's
+        deterministic ``xmlId`` (a native, already-used base field --
+        never a guessed property) already exists before ever calling
+        ``catalog.product.add`` -- a retry, from this process or a
+        different one, can never create a second real product/offer/price
+        row for the same idempotency key. Each step (product/offer/price)
+        is checked-then-created independently, so a retry after a partial
+        failure only performs the remaining, not-yet-completed step(s).
+        """
+        product_in = dict(payload.get("product") or {})
+        name = str(product_in.get("title") or product_in.get("name") or "").strip()
+        if not name:
+            raise BitrixValidationError("name_required")
+        active = bool(payload.get("active", False))
+        brand = str((product_in.get("properties") or {}).get("brand") or "").strip()
+        sku = str(product_in.get("sku") or product_in.get("article") or "").strip()
+        price_field = product_in.get("price") or {}
+        retail_amount = (
+            str(price_field.get("selling_price") or "").strip() if isinstance(price_field, dict) else ""
+        )
+        currency = (price_field.get("currency") if isinstance(price_field, dict) else None) or "RUB"
+
+        xml_id = self._idempotency_xml_id(idempotency_key)
+
+        existing = self._find_product_by_xml_id(xml_id, credential_ref=credential_ref)
+        if existing is not None:
+            product_id = existing.get("id")
+            resolved_active = existing.get("active")
+            resolved_active = resolved_active in (True, "Y", "y", 1, "1") if resolved_active is not None else active
+            resolved_name = existing.get("name") or name
+            idempotent_replay = True
+        else:
+            # Nothing was created yet for this key -- this is the one step
+            # allowed to raise straight through (there is nothing to
+            # report as a partial success if this itself fails).
+            product_id = self._live_create_product(
+                name=name, active=active, brand=brand, xml_id=xml_id, credential_ref=credential_ref
+            )
+            resolved_active = active
+            resolved_name = name
+            idempotent_replay = False
+
+        article_written = ""
+        if sku:
+            try:
+                existing_offer = self._find_offer_by_parent(product_id, credential_ref=credential_ref)
+                if existing_offer is None:
+                    self._live_create_offer(
+                        parent_id=product_id, name=resolved_name, active=resolved_active, sku=sku, credential_ref=credential_ref
+                    )
+            except Exception as exc:  # noqa: BLE001 -- normalize into PARTIAL_FAILURE, product already exists
+                return self._partial_failure(
+                    product_id=product_id,
+                    name=resolved_name,
+                    active=resolved_active,
+                    article="",
+                    failed_step="offer_create",
+                    exc=exc,
+                    idempotent=idempotent_replay,
+                )
+            article_written = sku
+
+        if retail_amount:
+            try:
+                price_type_id = self._require_retail_price_type_id()
+                existing_price = self._find_price(product_id=product_id, catalog_group_id=price_type_id, credential_ref=credential_ref)
+                if not existing_price:
+                    self._live_create_price(
+                        product_id=product_id,
+                        price_type_id=price_type_id,
+                        amount=retail_amount,
+                        currency=currency,
+                        credential_ref=credential_ref,
+                    )
+            except Exception as exc:  # noqa: BLE001 -- normalize into PARTIAL_FAILURE, product already exists
+                return self._partial_failure(
+                    product_id=product_id,
+                    name=resolved_name,
+                    active=resolved_active,
+                    article=article_written,
+                    failed_step="price_create",
+                    exc=exc,
+                    idempotent=idempotent_replay,
+                )
+
+        return {
+            "status": "WRITE_ACCEPTED",
+            "write_id": str(uuid.uuid4()),
+            "capability": capability,
+            "operation": "product_create",
+            "mode": "LIVE",
+            "live": True,
+            # The step calls above only prove Bitrix accepted (or already
+            # held) each mutation -- they are not a substitute for the
+            # separate, independent governed read-back
+            # (BitrixProductBridge.read_product) the controlled write flow
+            # always performs next. Never claimed as fully "VERIFIED" here.
+            "verified": "PENDING_INDEPENDENT_READBACK",
+            "idempotent": idempotent_replay,
+            "product": {
+                "external_product_id": str(product_id),
+                "name": resolved_name,
+                "active": bool(resolved_active),
+                "article": article_written,
+                "properties": {"brand": brand} if brand else {},
+                "mode": "LIVE",
+                "live": True,
+            },
+            "mapping": {"bitrix_id": str(product_id)},
+        }
+
+    def _partial_failure(
+        self, *, product_id, name: str, active: bool, article: str, failed_step: str, exc: Exception, idempotent: bool
+    ) -> dict:
+        return {
+            "status": "PARTIAL_FAILURE",
+            "write_id": str(uuid.uuid4()),
+            "operation": "product_create",
+            "mode": "LIVE",
+            "live": True,
+            "idempotent": idempotent,
+            "product": {
+                "external_product_id": str(product_id),
+                "name": name,
+                "active": bool(active),
+                "article": article,
+            },
+            "mapping": {"bitrix_id": str(product_id)},
+            "failed_step": failed_step,
+            "error": getattr(exc, "code", type(exc).__name__),
+        }
+
+    @staticmethod
+    def _idempotency_xml_id(idempotency_key: str) -> str:
+        # Bounded to a conservative length; every real idempotency_key this
+        # write path generates is far shorter than this.
+        return f"panda-controlled-write:{idempotency_key}"[:255]
+
+    def _find_product_by_xml_id(self, xml_id: str, *, credential_ref: str) -> dict | None:
+        select = ["id", "name", "active", "xmlId"]
+        if _BRAND_PROPERTY is not None:
+            select.append(_BRAND_PROPERTY.select_key)
+        data = self.client.call(
+            "catalog.product.list",
+            credential_ref=credential_ref,
+            params={"filter": {"iblockId": self._require_catalog_iblock_id(), "xmlId": xml_id}, "select": select},
+        )
+        result = data.get("result")
+        items = result.get("products", []) if isinstance(result, dict) else (result or [])
+        return items[0] if items else None
+
+    def _find_offer_by_parent(self, parent_id, *, credential_ref: str) -> dict | None:
+        data = self.client.call(
+            "catalog.product.offer.list",
+            credential_ref=credential_ref,
+            params={
+                "filter": {
+                    "iblockId": self._require_offers_iblock_id(),
+                    schema.CML2_LINK_REST_FIELD: self._as_bitrix_id(parent_id),
+                },
+                "select": ["id", schema.CML2_LINK_REST_FIELD],
+            },
+        )
+        result = data.get("result")
+        items = result.get("offers", []) if isinstance(result, dict) else (result or [])
+        return items[0] if items else None
+
+    def _find_price(self, *, product_id, catalog_group_id: int, credential_ref: str) -> bool:
+        data = self.client.call(
+            "catalog.price.list",
+            credential_ref=credential_ref,
+            params={
+                "filter": {"productId": self._as_bitrix_id(product_id), "catalogGroupId": catalog_group_id},
+                "select": ["id", "productId", "catalogGroupId"],
+            },
+        )
+        result = data.get("result")
+        items = result.get("prices", []) if isinstance(result, dict) else (result or [])
+        return bool(items)
+
+    def _live_create_product(self, *, name: str, active: bool, brand: str, xml_id: str, credential_ref: str):
+        fields: dict = {
+            "iblockId": self._require_catalog_iblock_id(),
+            "name": name,
+            "active": "Y" if active else "N",
+            "xmlId": xml_id,
+        }
+        if brand:
+            if _BRAND_PROPERTY is None:
+                raise IntegrationNotConfiguredError("bitrix_brand_property_not_verified")
+            fields[_BRAND_PROPERTY.select_key] = brand
+        data = self.client.call(
+            "catalog.product.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
+        )
+        product_id = self._extract_id(data, singular_key="product")
+        if product_id is None:
+            raise BitrixValidationError("product_create_malformed_response")
+        return product_id
+
+    def _live_create_offer(self, *, parent_id, name: str, active: bool, sku: str, credential_ref: str):
+        if _ARTICLE_PROPERTY is None:
+            raise IntegrationNotConfiguredError("bitrix_article_property_not_verified")
+        fields: dict = {
+            "iblockId": self._require_offers_iblock_id(),
+            # The CML2_LINK (property 279) parent-product relationship is
+            # exposed/accepted via the REST ``parentId`` field, never a raw
+            # ``property279`` value -- symmetric with how
+            # catalog.product.offer.list already exposes it (see
+            # integrations.bitrix.schema.CML2_LINK_REST_FIELD).
+            "parentId": self._as_bitrix_id(parent_id),
+            "name": name,
+            "active": "Y" if active else "N",
+            _ARTICLE_PROPERTY.select_key: sku,
+        }
+        data = self.client.call(
+            "catalog.product.offer.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
+        )
+        offer_id = self._extract_id(data, singular_key="offer")
+        if offer_id is None:
+            raise BitrixValidationError("offer_create_malformed_response")
+        return offer_id
+
+    def _live_create_price(self, *, product_id, price_type_id: int, amount: str, currency: str, credential_ref: str) -> None:
+        fields = {
+            "productId": self._as_bitrix_id(product_id),
+            "catalogGroupId": price_type_id,
+            "price": amount,
+            "currency": currency,
+        }
+        data = self.client.call(
+            "catalog.price.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
+        )
+        if self._extract_id(data, singular_key="price") is None:
+            raise BitrixValidationError("price_create_malformed_response")
+
+    @staticmethod
+    def _as_bitrix_id(value):
+        text = str(value)
+        return int(text) if text.lstrip("-").isdigit() else value
+
+    @staticmethod
+    def _extract_id(data: dict, *, singular_key: str):
+        """Bitrix's ``catalog.*`` REST family consistently nests a create/
+        get response under the entity's singular name (mirrors this same
+        family's own list responses, e.g. ``catalog.product.offer.list`` ->
+        ``{"offers": [...]}}``, already relied on elsewhere in this module
+        -- catalog.product.add/offer.add/price.add -> ``{"<entity>": {...,
+        "id": ...}}``). Falls back to a flatter ``{"id": ...}`` shape
+        defensively; returns None (never a guessed/fabricated id) if
+        neither is present so the caller fails closed instead of
+        proceeding with an unverified id.
+        """
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return None
+        entity = result.get(singular_key)
+        if isinstance(entity, dict) and entity.get("id") is not None:
+            return entity["id"]
+        if result.get("id") is not None:
+            return result["id"]
+        return None

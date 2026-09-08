@@ -34,6 +34,15 @@ class BitrixIntegrationConfig:
     # ``_resolved_webhook_url``/``client_secret_ref`` and
     # ``docs/bitrix-aspro-premier-integration.md``'s Secret Policy).
     account_login: str = ""
+    # First controlled production write: the ``catalogGroupId`` (Bitrix
+    # price-type id -- see ``catalog.priceType.list``) that corresponds to
+    # this installation's RETAIL selling price. Installation-specific and
+    # NEVER guessed/hardcoded (there is no universal "price type 1 is
+    # always retail" convention -- this installation's schema binding has
+    # never enumerated its real price types) -- a live retail price write
+    # fails closed with ``bitrix_retail_price_type_id_not_configured`` if
+    # this is unset rather than assuming an id.
+    retail_price_type_id: str = ""
 
     @property
     def is_live(self) -> bool:
@@ -58,6 +67,7 @@ class BitrixIntegrationConfig:
             "base_url_configured": bool(self.base_url),
             "catalog_id": self.catalog_id or "",
             "offers_iblock_id": self.offers_iblock_id or "",
+            "retail_price_type_id": self.retail_price_type_id or "",
             "site_id": self.site_id or "",
             "aspro_premier_enabled": self.aspro_premier_enabled,
             "live": self.is_live,
@@ -88,4 +98,5 @@ def load_bitrix_config(env: dict | None = None) -> BitrixIntegrationConfig:
         aspro_premier_enabled=str(e.get("ASPRO_PREMIER_ENABLED", "")).lower() in {"1", "true", "yes"},
         aspro_field_mappings_ref=str(e.get("ASPRO_PREMIER_FIELD_MAPPINGS") or "").strip(),
         account_login=str(e.get("BITRIX_ACCOUNT_LOGIN") or "").strip(),
+        retail_price_type_id=str(e.get("BITRIX_RETAIL_PRICE_TYPE_ID") or "").strip(),
     )

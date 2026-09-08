@@ -374,11 +374,31 @@ if (
     getattr(side_effect_runtime, "product_intelligence_runtime", None) is not None
     and getattr(ba_api_runtime.service.ba, "integration_activation", None) is not None
 ):
+    from integrations.activation.models import ENV_LIVE
+    from integrations.bitrix.config import load_bitrix_config
     from integrations.bitrix.product_bridge import BitrixProductBridge
 
+    # Production defect closure: BusinessAssistantService.integration_environment
+    # is fixed to ENV_FIXTURE (safe default for every integration this
+    # service governs), so the Bitrix bridge previously always targeted the
+    # in-memory fixture catalog even when this deployment has real LIVE
+    # Bitrix credentials configured via protected env
+    # (BITRIX_INTEGRATION_MODE / BITRIX_WEBHOOK_URL) -- the real production
+    # write path never actually reached the live Bitrix adapter. Select
+    # ENV_LIVE for this bridge specifically (not the shared
+    # integration_environment other connectors -- email/calendar/CRM/
+    # marketplaces/1C -- still use) exactly when Bitrix is genuinely
+    # live-configured; falls back to the unchanged default otherwise, so
+    # every existing deployment/test without live Bitrix credentials is
+    # completely unaffected.
+    _bitrix_environment = (
+        ENV_LIVE
+        if load_bitrix_config().live_configured
+        else ba_api_runtime.service.ba.integration_environment
+    )
     ba_api_runtime.service.ba.bitrix_product_bridge = BitrixProductBridge(
         integration_activation=ba_api_runtime.service.ba.integration_activation,
-        environment=ba_api_runtime.service.ba.integration_environment,
+        environment=_bitrix_environment,
     )
     ba_api_runtime.service.ba.product_intelligence_service = (
         side_effect_runtime.product_intelligence_runtime.service
