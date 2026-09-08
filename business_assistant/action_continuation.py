@@ -1382,7 +1382,19 @@ def resolve_action_turn(
             task = active
             if task.status in {STATUS_COMPLETED, STATUS_FAILED_RETRYABLE}:
                 task.status = STATUS_DRAFT
-        task.goal = current
+        # Production defect closure (XLSX attachment -> failed response,
+        # follow-up phase): a pure continuation turn ("Продолжай и выполни
+        # мой предыдущий запрос полностью") carries no identifying content
+        # of its own. ``resolve_follow_up`` already determined it needs
+        # prior context (``inject_context=True``) and already resolved the
+        # earlier substantive user instruction from real conversation
+        # history -- reuse THAT text for the NL compiler instead of losing
+        # the original request to the near-empty "continue" phrasing (never
+        # invented/guessed, taken verbatim from history).
+        effective_text = current
+        if not is_new and follow_up is not None and follow_up.inject_context and follow_up.previous_user:
+            effective_text = f"{follow_up.previous_user} {current}".strip()
+        task.goal = effective_text
 
         # Section 13 (multi-turn continuation): a new attachment always wins
         # over any inherited dataset_id (the user is deliberately switching
@@ -1415,7 +1427,7 @@ def resolve_action_turn(
         task.operation = contract.operation
         task.missing_required = ()
 
-        args: dict[str, Any] = {"text": current}
+        args: dict[str, Any] = {"text": effective_text}
         if has_dataset:
             args["dataset_id"] = inherited_dataset_id
 
