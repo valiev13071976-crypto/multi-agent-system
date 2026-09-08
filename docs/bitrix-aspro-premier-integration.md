@@ -156,6 +156,70 @@ mutation): catalog import (read-only, no Bitrix mutation) and a
 sync-preview → approve → apply flow for a single product, mirroring the
 pre-existing `onec_price_preview`/`onec_price_apply` pattern.
 
+## Real Field Mapping Matrix (Block 5.6, spec section 8)
+
+`integrations/bitrix/field_schema.py` is the single source of truth mapping
+every Panda concept this connector touches to its real Bitrix/Aspro schema
+location — required so the connector never invents an `IBLOCK_ID`,
+`PROPERTY_ID`/`CODE`, `PRICE_TYPE_ID`, `STORE_ID`, or Aspro property
+semantic for the specific installed store.
+
+- Standard, Bitrix-documented REST field codes (`NAME`, `ACTIVE`, `XML_ID`,
+  `DETAIL_TEXT`, `PREVIEW_TEXT`, `DETAIL_PICTURE`, `CURRENCY`, the
+  `IPROPERTY_TEMPLATES_ELEMENT_META_*` SEO fields, ...) are hardcoded — they
+  are platform contract, not installation-specific.
+- Anything installation-specific (custom `PROPERTY_ID`/`CODE`, the offers
+  IBLOCK, price type IDs, warehouse/store IDs, Aspro banner/relations/WB/
+  advertising property codes) carries a `config_ref` — the name of a
+  non-secret environment variable (see `.env.example`'s "Block 5.6 real
+  installation schema" section) that must be populated with the real value
+  discovered from `panda.msk.ru`'s actual Bitrix admin/REST introspection.
+  Until populated, `FieldMappingEntry.schema_status` truthfully reports
+  `PENDING_REAL_SCHEMA` rather than guessing (mirrors the `LIVE
+  VERIFICATION PENDING` posture from section 43, applied to schema
+  discovery). `BitrixProductBridge.pending_schema_configuration()` /
+  `field_mapping_matrix()` expose this for reporting.
+- The observed price-type UI labels (`OPT`/`MSC`/`EKB`/`MAGNITOGORSK`) are
+  intentionally **not** hardcoded as real `PRICE_TYPE_ID` values anywhere —
+  `BITRIX_PRICE_TYPE_MAP` is where the real per-installation ID for each
+  named tier goes.
+
+### Field ownership (spec section 16 / Acceptance W)
+
+Every entry in the matrix is classified with exactly one of:
+
+| Label | Meaning |
+|-------|---------|
+| `PANDA_MANAGED` | Panda is the source of truth; Panda may write it |
+| `BITRIX_MANAGED` | Bitrix admin/CMS owns it; not synchronized by Block 5.6 |
+| `ASPRO_MANAGED` | Rendered by the Aspro template from another Panda-managed field |
+| `DERIVED` | Bitrix-computed (min/max price, rating, review/comment/vote counts) — Panda never writes |
+| `READ_ONLY` | Bitrix/1C-owned (requisites, tax rates, forum topic) — Panda never writes |
+| `UNMANAGED_PRESERVE` | Aspro banner / relations / Wildberries / Yandex.Direct — never targeted by any Bitrix write path |
+
+`integrations.bitrix.mapping.canonical_to_bitrix_payload` calls
+`field_schema.sanitize_canonical_for_write` as its first step — a defensive
+filter that drops any canonical field not classified `PANDA_MANAGED` before
+it can ever be translated into a Bitrix payload key. This is the single
+choke point enforcing ownership, regardless of caller.
+
+### Existing-data preservation (Acceptance V)
+
+- `BitrixCatalogStore.update_product` only ever writes the specific keys
+  present in a computed `changes` dict (via `plan_sync`) — banner/relations/
+  WB/advertising properties on the same record are never read, diffed, or
+  touched by a normal product update.
+- `BitrixCatalogStore.set_price` updates exactly the matching `price_type`
+  entry in a product's `prices` list; every other price type is left
+  byte-identical (spec section 19: "Updating one price type MUST NOT modify
+  unrelated price types").
+- `BitrixCatalogStore.set_stock` updates exactly the targeted `store_id`
+  warehouse key; sibling warehouses are preserved and `total` is recomputed
+  as their sum rather than silently overwritten (spec section 20).
+- `BitrixProductBridge.sync_price(..., price_type=...)` /
+  `sync_stock(..., store_id=...)` expose these as explicit parameters —
+  never positional/name-guessed.
+
 ## Tenant Isolation
 
 All catalog state, mappings, and connections are tenant-scoped. Cross-tenant connection access raises `INTEGRATION_CROSS_TENANT`.
@@ -193,8 +257,8 @@ Without production credentials: `BITRIX_LIVE_ACTIVE=false` and `ASPRO_PREMIER_LI
 
 ## Key Files
 
-- `integrations/bitrix/` — adapter, catalog, client, config, mapping, webhooks, `product_bridge.py` (Block 5.6 Product Intelligence bridge)
+- `integrations/bitrix/` — adapter, catalog, client, config, mapping, webhooks, `product_bridge.py` (Block 5.6 Product Intelligence bridge), `field_schema.py` (real Field Mapping Matrix + ownership classification)
 - `integrations/activation/service.py` — gateway wiring
 - `commerce/product_platform/aspro.py` — Aspro profile mapping
 - `tests/test_bitrix_aspro_premier_closure.py` — closure E2E
-- `tests/test_block5_6_bitrix_aspro_integration.py` — Block 5.6 bridge closure E2E (Acceptance A–U)
+- `tests/test_block5_6_bitrix_aspro_integration.py` — Block 5.6 bridge closure E2E (Acceptance A–X)

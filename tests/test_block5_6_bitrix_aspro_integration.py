@@ -17,6 +17,16 @@ from integrations.activation.models import ENV_FIXTURE
 from integrations.activation.service import IntegrationActivationService
 from integrations.bitrix.catalog import BitrixCatalogStore
 from integrations.bitrix.errors import BitrixNotFoundError
+from integrations.bitrix.field_schema import (
+    ASPRO_MANAGED,
+    DERIVED,
+    OWNERSHIP_LABELS,
+    READ_ONLY,
+    UNMANAGED_PRESERVE,
+    FIELD_MAPPING_MATRIX,
+    pending_schema_vars,
+    sanitize_canonical_for_write,
+)
 from integrations.bitrix.fixture_adapter import BitrixFixtureAdapter
 from integrations.bitrix.mapping import canonical_to_bitrix_payload
 from integrations.bitrix.product_bridge import (
@@ -385,6 +395,175 @@ class ProductionReadBoundaryTests(unittest.TestCase):
 
         cfg = load_bitrix_config({k: v for k, v in os.environ.items() if not k.startswith("BITRIX_")})
         self.assertFalse(cfg.live_configured)
+
+
+class FieldMappingMatrixTests(unittest.TestCase):
+    """Acceptance G / X -- real Field Mapping Matrix (spec section 8)."""
+
+    def test_every_entry_classified_with_spec_vocabulary(self):
+        for entry in FIELD_MAPPING_MATRIX:
+            self.assertIn(entry.ownership, OWNERSHIP_LABELS, msg=entry)
+
+    def test_no_custom_property_hardcodes_a_guessed_code(self):
+        # Any entry describing an installation-specific custom property
+        # (no fixed ``bitrix_code``) must expose a config var name to source
+        # the real PROPERTY_ID/CODE/IBLOCK/PRICE_TYPE/STORE id from -- never
+        # a bare guessed literal baked into the matrix itself.
+        for entry in FIELD_MAPPING_MATRIX:
+            if not entry.bitrix_code:
+                self.assertTrue(
+                    entry.config_ref or entry.ownership in (DERIVED, READ_ONLY, ASPRO_MANAGED),
+                    msg=f"{entry.aspro_purpose!r} has neither a fixed code nor a config_ref",
+                )
+
+    def test_preserve_only_groups_are_never_panda_managed(self):
+        preserve_entries = [
+            e for e in FIELD_MAPPING_MATRIX if e.bitrix_tab in ("БАННЕР", "СВЯЗИ", "WILDBERRIES", "РЕКЛАМА")
+        ]
+        self.assertTrue(preserve_entries)
+        for entry in preserve_entries:
+            self.assertEqual(entry.ownership, UNMANAGED_PRESERVE, msg=entry)
+
+    def test_schema_status_pending_without_production_config(self):
+        # No BITRIX_* schema env vars are populated in this sandbox --
+        # truthfully report PENDING rather than guessing real IDs.
+        pending = pending_schema_vars()
+        self.assertIn("BITRIX_PRICE_TYPE_MAP", pending)
+        self.assertIn("BITRIX_STORE_MAP", pending)
+        self.assertIn("BITRIX_PROPERTY_ARTNUMBER_CODE", pending)
+
+
+class FieldOwnershipEnforcementTests(unittest.TestCase):
+    """Acceptance W -- Panda never writes Bitrix/Aspro-derived/system fields."""
+
+    def test_sanitize_drops_hypothetical_non_owned_fields(self):
+        product = {
+            "product_id": "panda-1",
+            "sku": "SKU-1",
+            "title": "Real Product",
+            "description": "desc",
+            # None of these exist on product_intel's canonical export today,
+            # but if a future field slipped in under these names it must
+            # never reach a Bitrix write payload.
+            "rating": 4.8,
+            "min_price": "1",
+            "max_price": "2",
+            "review_count": 10,
+        }
+        safe = sanitize_canonical_for_write(product)
+        self.assertNotIn("rating", safe)
+        self.assertNotIn("min_price", safe)
+        self.assertNotIn("max_price", safe)
+        self.assertNotIn("review_count", safe)
+        self.assertEqual(safe["title"], "Real Product")
+        self.assertEqual(safe["product_id"], "panda-1")
+
+    def test_mapping_boundary_never_emits_unowned_keys(self):
+        payload = canonical_to_bitrix_payload(
+            product={"title": "X", "sku": "SKU-X", "rating": 5, "min_price": "1"}, aspro_enabled=False
+        )
+        self.assertNotIn("rating", str(payload))
+        self.assertNotIn("RATING", payload)
+
+
+class PriceTypePreservationTests(unittest.TestCase):
+    """Acceptance J / V -- one price type updated, others untouched."""
+
+    def test_updating_retail_price_preserves_wholesale_price(self):
+        bridge, activation, store = _bridge()
+        cat = store.catalog("tenant-a")
+        bid = "bitrix-prod-1001"
+        cat[bid]["prices"] = [
+            {"amount": "49990.00", "currency": "RUB", "price_type": "RETAIL"},
+            {"amount": "45000.00", "currency": "RUB", "price_type": "WHOLESALE"},
+        ]
+        canonical = {"sku": "SKU-X100", "price": {"currency": "RUB", "selling_price": "59999.00"}}
+        r = bridge.sync_price(
+            tenant_id="tenant-a", canonical_product=canonical, idempotency_key="price-retail-1", price_type="RETAIL"
+        )
+        self.assertTrue(r["mutated"])
+        self.assertEqual(r["result"]["verified"], "VERIFIED")
+        wholesale = activation.execute_via_gateway(
+            tenant_id="tenant-a",
+            capability="cms.bitrix.catalog.read",
+            environment=ENV_FIXTURE,
+            operation_class="READ",
+            payload={"operation": "price_read", "article": "SKU-X100", "price_type": "WHOLESALE"},
+        )
+        self.assertEqual(wholesale["result"]["price"]["amount"], "45000.00")
+        retail = activation.execute_via_gateway(
+            tenant_id="tenant-a",
+            capability="cms.bitrix.catalog.read",
+            environment=ENV_FIXTURE,
+            operation_class="READ",
+            payload={"operation": "price_read", "article": "SKU-X100", "price_type": "RETAIL"},
+        )
+        self.assertEqual(retail["result"]["price"]["amount"], "59999.00")
+
+    def test_updating_one_offer_price_never_touches_sibling_offer(self):
+        bridge, activation, store = _bridge()
+        canonical = {"sku": "SKU-X100-BLK", "price": {"currency": "RUB", "selling_price": "60000.00"}}
+        bridge.sync_price(tenant_id="tenant-a", canonical_product=canonical, idempotency_key="blk-price-1")
+        sibling = activation.execute_via_gateway(
+            tenant_id="tenant-a",
+            capability="cms.bitrix.catalog.read",
+            environment=ENV_FIXTURE,
+            operation_class="READ",
+            payload={"operation": "price_read", "article": "SKU-X100-WHT"},
+        )
+        self.assertEqual(sibling["result"]["price"]["amount"], "51990.00")
+
+
+class StockWarehousePreservationTests(unittest.TestCase):
+    """Acceptance K / V -- one warehouse updated, sibling warehouses untouched."""
+
+    def test_updating_one_warehouse_preserves_sibling_warehouse(self):
+        bridge, activation, store = _bridge()
+        cat = store.catalog("tenant-a")
+        bid = "bitrix-prod-1002"  # SKU-X200, base product with no offers
+        cat[bid]["stock"] = {"total": 80, "warehouses": {"main": 50, "warehouse-east": 30}, "available": True}
+        canonical = {"sku": "SKU-X200", "stock": {"quantity": "99"}}
+        r = bridge.sync_stock(
+            tenant_id="tenant-a", canonical_product=canonical, idempotency_key="stock-main-1", store_id="main"
+        )
+        self.assertTrue(r["mutated"])
+        self.assertEqual(r["result"]["verified"], "VERIFIED")
+        read = activation.execute_via_gateway(
+            tenant_id="tenant-a",
+            capability="cms.bitrix.catalog.read",
+            environment=ENV_FIXTURE,
+            operation_class="READ",
+            payload={"operation": "stock_read", "article": "SKU-X200"},
+        )
+        self.assertEqual(read["result"]["warehouses"]["main"], 99)
+        self.assertEqual(read["result"]["warehouses"]["warehouse-east"], 30)
+        self.assertEqual(read["result"]["total"], 129)
+
+
+class UnmanagedFieldPreservationTests(unittest.TestCase):
+    """Acceptance V -- banner/relations/WB/advertising survive a normal update."""
+
+    def test_product_update_preserves_preserve_only_property_groups(self):
+        bridge, activation, store = _bridge()
+        cat = store.catalog("tenant-a")
+        bid = "bitrix-prod-1002"
+        preserved = {
+            "aspro_banner_enabled": True,
+            "aspro_banner_button1_text": "Buy now",
+            "relations_region": "Moscow",
+            "wb_nm_id": "998877",
+            "wb_sync_status": "SYNCED",
+            "advertising_yandex_direct_campaign_id": "camp-1",
+        }
+        cat[bid].setdefault("properties", {}).update(preserved)
+        canonical = {"product_id": "panda-preserve-1", "title": "Updated Name", "sku": "SKU-X200", "description": "new desc"}
+        r = bridge.sync_product(tenant_id="tenant-a", canonical_product=canonical, idempotency_key="preserve-upd-1")
+        self.assertEqual(r["action"], SYNC_UPDATE)
+        self.assertTrue(r["mutated"])
+        after = store.lookup(tenant_id="tenant-a", bitrix_id=bid)
+        for key, value in preserved.items():
+            self.assertEqual(after["properties"].get(key), value, msg=key)
+        self.assertEqual(after["name"], "Updated Name")
 
 
 if __name__ == "__main__":

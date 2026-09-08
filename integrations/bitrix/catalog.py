@@ -228,20 +228,44 @@ class BitrixCatalogStore:
         currency: str = "RUB",
         price_type: str = "RETAIL",
     ) -> tuple[dict, dict, dict]:
+        """Update exactly one price type, preserving all others (spec section
+        19 / Acceptance V/J): "Updating one price type MUST NOT modify
+        unrelated price types." Product-level ``prices`` is a list keyed by
+        ``price_type`` -- only the matching entry is replaced/appended; every
+        other entry in the list is left byte-identical.
+        """
         resolved = self.resolve_offer(tenant_id=tenant_id, article=article)
         if not resolved:
             return {}, {}, {}
         prod, offer = resolved
-        old = {}
+        new = {"amount": new_amount, "currency": currency, "price_type": price_type}
         if offer:
             old = dict(offer.get("price") or {})
-            offer["price"] = {"amount": new_amount, "currency": currency, "price_type": price_type}
+            offer["price"] = dict(new)
         else:
-            old = dict((prod.get("prices") or [{}])[0])
-            prod["prices"] = [{"amount": new_amount, "currency": currency, "price_type": price_type}]
-        return normalize_product(prod), old, {"amount": new_amount, "currency": currency, "price_type": price_type}
+            prices = [dict(p) for p in (prod.get("prices") or [])]
+            idx = next(
+                (i for i, p in enumerate(prices) if str(p.get("price_type", "")).upper() == price_type.upper()),
+                None,
+            )
+            old = dict(prices[idx]) if idx is not None else {}
+            if idx is not None:
+                prices[idx] = dict(new)
+            else:
+                prices.append(dict(new))
+            prod["prices"] = prices
+        return normalize_product(prod), old, new
 
-    def set_stock(self, *, tenant_id: str, article: str, quantity: int) -> tuple[dict, int]:
+    def set_stock(self, *, tenant_id: str, article: str, quantity: int, store_id: str = "") -> tuple[dict, int]:
+        """Update stock for one product/offer.
+
+        When ``store_id`` targets a specific warehouse, only that warehouse
+        key is written -- other warehouses in ``warehouses`` are preserved
+        untouched (spec section 20 / Acceptance V/K: "Never ... corrupt
+        unrelated warehouse quantities"). ``total`` is recomputed as the sum
+        of all known warehouses so it always reflects reality rather than
+        silently drifting.
+        """
         resolved = self.resolve_offer(tenant_id=tenant_id, article=article)
         if not resolved:
             return {}, 0
@@ -250,9 +274,13 @@ class BitrixCatalogStore:
             old = int((offer.get("stock") or {}).get("total") or 0)
             offer.setdefault("stock", {})["total"] = quantity
         else:
-            old = int((prod.get("stock") or {}).get("total") or 0)
-            prod.setdefault("stock", {})["total"] = quantity
-            prod["stock"]["warehouses"] = {"main": quantity}
+            stock = prod.setdefault("stock", {})
+            warehouses = dict(stock.get("warehouses") or {})
+            key = store_id or "main"
+            old = int(warehouses.get(key) or 0)
+            warehouses[key] = quantity
+            stock["warehouses"] = warehouses
+            stock["total"] = sum(int(v) for v in warehouses.values())
         return normalize_product(prod), old
 
     def list_sections(self, *, tenant_id: str) -> dict:
@@ -311,7 +339,7 @@ class BitrixCatalogStore:
         cat[bitrix_id]["active"] = True
         return normalize_product(cat[bitrix_id])
 
-    def read_price(self, *, tenant_id: str, article: str) -> dict:
+    def read_price(self, *, tenant_id: str, article: str, price_type: str = "") -> dict:
         resolved = self.resolve_offer(tenant_id=tenant_id, article=article)
         if not resolved:
             return {}
@@ -328,13 +356,22 @@ class BitrixCatalogStore:
                 "mode": "FIXTURE",
                 "live": False,
             }
-        p = (prod.get("prices") or [{}])[0]
+        prices = prod.get("prices") or [{}]
+        if price_type:
+            p = next(
+                (dict(x) for x in prices if str(x.get("price_type", "")).upper() == price_type.upper()),
+                {},
+            )
+        else:
+            # Backward-compatible default: first/primary price entry.
+            p = dict(prices[0]) if prices else {}
         return {
             "article": article,
             "product_id": prod.get("external_product_id"),
             "price": dict(p),
             "currency": p.get("currency", "RUB"),
             "price_type": p.get("price_type", "RETAIL"),
+            "all_price_types": [str(x.get("price_type", "")) for x in prices],
             "mode": "FIXTURE",
             "live": False,
         }

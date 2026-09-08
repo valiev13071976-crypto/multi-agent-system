@@ -5,6 +5,7 @@ from __future__ import annotations
 from commerce.product_platform.aspro import fixture_aspro_premier_profile, map_product_to_bitrix_payload
 from integrations.bitrix.catalog import BitrixCatalogStore, normalize_product
 from integrations.bitrix.errors import BitrixAmbiguousTargetError, BitrixNotFoundError, BitrixValidationError
+from integrations.bitrix.field_schema import sanitize_canonical_for_write
 
 
 def build_preview(*, operation: str, before: dict | None, after: dict) -> dict:
@@ -44,6 +45,10 @@ def resolve_product_target(
 
 
 def canonical_to_bitrix_payload(*, product: dict, aspro_enabled: bool = False) -> dict:
+    # Single choke point (Acceptance W): drop any canonical field not
+    # classified PANDA_MANAGED in the Field Mapping Matrix BEFORE it is ever
+    # translated into a Bitrix payload key, regardless of caller.
+    product = sanitize_canonical_for_write(product)
     if aspro_enabled:
         profile = fixture_aspro_premier_profile()
         return map_product_to_bitrix_payload(product=product, profile=profile)

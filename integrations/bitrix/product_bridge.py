@@ -29,6 +29,7 @@ import hashlib
 
 from integrations.activation.models import ENV_FIXTURE, OP_READ, OP_WRITE
 from integrations.bitrix.catalog import GLOBAL_BITRIX_CATALOG, BitrixCatalogStore
+from integrations.bitrix.field_schema import matrix_report, pending_schema_vars
 from integrations.bitrix.mapping import canonical_to_bitrix_payload
 from product_intel.planner import assert_sync_product_allowed
 from security.tenant import require_tenant_id
@@ -106,6 +107,18 @@ class BitrixProductBridge:
         self._environment = environment
         self._aspro_enabled = aspro_enabled
         self._store = store or GLOBAL_BITRIX_CATALOG
+
+    # --- Field Mapping Matrix (spec section 8 / Acceptance G/X) ---------
+
+    @staticmethod
+    def field_mapping_matrix() -> list[dict]:
+        """Bounded, secret-free Field Mapping Matrix summary for reporting."""
+        return matrix_report()
+
+    @staticmethod
+    def pending_schema_configuration() -> tuple[str, ...]:
+        """Non-secret installation-schema config vars still unpopulated."""
+        return pending_schema_vars()
 
     # --- health (spec section 8) --------------------------------------
 
@@ -307,7 +320,16 @@ class BitrixProductBridge:
         idempotency_key: str,
         approved_write: bool = True,
         connection_id: str | None = None,
+        price_type: str = "RETAIL",
     ) -> dict:
+        """Sync exactly one named price type, never touching unrelated ones.
+
+        ``price_type`` is a symbolic tier name (e.g. ``RETAIL``); the real
+        Bitrix ``PRICE_TYPE_ID`` for that name comes only from
+        ``BITRIX_PRICE_TYPE_MAP`` (see ``field_schema.py`` / spec section
+        19) -- never guessed from observed UI labels like OPT/MSC/EKB/
+        MAGNITOGORSK.
+        """
         price = canonical_product.get("price") or {}
         selling = price.get("selling_price")
         if selling in (None, ""):
@@ -325,6 +347,7 @@ class BitrixProductBridge:
                 "article": sku,
                 "new_price": str(selling),
                 "currency": price.get("currency") or "RUB",
+                "price_type": price_type,
             },
             idempotency_key=idempotency_key,
             approved_write=approved_write,
@@ -340,7 +363,14 @@ class BitrixProductBridge:
         idempotency_key: str,
         approved_write: bool = True,
         connection_id: str | None = None,
+        store_id: str = "",
     ) -> dict:
+        """Sync stock for exactly one warehouse (``store_id``), never
+        corrupting sibling warehouses' quantities (spec section 20). Real
+        ``STORE_ID`` values come only from ``BITRIX_STORE_MAP`` (see
+        ``field_schema.py``); an empty ``store_id`` targets the single
+        default/aggregate warehouse used by FIXTURE/mock verification.
+        """
         stock = canonical_product.get("stock") or {}
         qty = stock.get("quantity")
         if qty in (None, ""):
@@ -354,7 +384,12 @@ class BitrixProductBridge:
             capability=WRITE_CAPABILITY,
             environment=self._environment,
             operation_class=OP_WRITE,
-            payload={"operation": "stock_update", "article": sku, "quantity": int(float(qty))},
+            payload={
+                "operation": "stock_update",
+                "article": sku,
+                "quantity": int(float(qty)),
+                "store_id": store_id,
+            },
             idempotency_key=idempotency_key,
             approved_write=approved_write,
             connection_id=connection_id,

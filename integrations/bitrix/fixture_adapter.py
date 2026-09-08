@@ -66,7 +66,8 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
             return self._read_product_lookup(tenant, params)
         if operation == "price_read":
             article = str(params.get("article") or params.get("sku") or "")
-            out = self._store.read_price(tenant_id=tenant, article=article)
+            price_type = str(params.get("price_type") or "")
+            out = self._store.read_price(tenant_id=tenant, article=article, price_type=price_type)
             if not out:
                 raise BitrixNotFoundError("price_not_found")
             return out
@@ -291,7 +292,7 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
         verified = self._verify_after_write(
             tenant=tenant,
             article=article,
-            expected={"amount": new_amount},
+            expected={"amount": new_amount, "price_type": price_type},
             price_check=True,
         )
         return {
@@ -311,7 +312,8 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
     def _write_stock_update(self, *, tenant: str, capability: str, payload: dict, idempotency_key: str) -> dict:
         article = str(payload.get("article") or payload.get("sku") or "")
         qty = int(payload.get("quantity") or payload.get("stock") or 0)
-        prod, old = self._store.set_stock(tenant_id=tenant, article=article, quantity=qty)
+        store_id = str(payload.get("store_id") or "")
+        prod, old = self._store.set_stock(tenant_id=tenant, article=article, quantity=qty, store_id=store_id)
         if not prod:
             raise BitrixNotFoundError("stock_target_not_found")
         preview = payload.get("preview") or build_preview(
@@ -319,7 +321,12 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
             before={"article": article, "total": old},
             after={"article": article, "total": qty},
         )
-        verified = self._verify_after_write(tenant=tenant, article=article, expected={"total": qty}, stock_check=True)
+        verified = self._verify_after_write(
+            tenant=tenant,
+            article=article,
+            expected={"quantity": qty, "store_id": store_id},
+            stock_check=True,
+        )
         return {
             "status": "WRITE_ACCEPTED",
             "write_id": str(uuid.uuid4()),
@@ -330,7 +337,7 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
             "verified": verified,
             "idempotent": False,
             "preview": preview,
-            "stock": {"article": article, "old": old, "new": qty},
+            "stock": {"article": article, "old": old, "new": qty, "store_id": store_id or "main"},
             "external_write_count": self._store.record_write(idempotency_key),
         }
 
@@ -491,13 +498,31 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
         if self.state.verification_mismatch:
             return "VERIFICATION_FAILED"
         if price_check and article:
-            observed = self._store.read_price(tenant_id=tenant, article=article)
+            # Must read back the SAME price type that was just written --
+            # ``read_price`` without ``price_type`` defaults to the first
+            # entry, which would false-negative-verify (or worse,
+            # false-positive against an unrelated price type) once a product
+            # carries more than one price type (spec section 19/V).
+            observed = self._store.read_price(
+                tenant_id=tenant, article=article, price_type=str(expected.get("price_type") or "")
+            )
             if str((observed.get("price") or {}).get("amount")) != str(expected.get("amount")):
                 raise BitrixWriteVerificationFailedError("price_verification_failed")
             return "VERIFIED"
         if stock_check and article:
             observed = self._store.read_stock(tenant_id=tenant, article=article)
-            if int(observed.get("total") or -1) != int(expected.get("total")):
+            if "warehouses" in observed:
+                # Always verify the SPECIFIC warehouse key that was written
+                # (defaulting to "main", mirroring ``BitrixCatalogStore.
+                # set_stock``'s own default) -- never the aggregate
+                # ``total``, which legitimately includes other, untouched
+                # warehouses too (spec section 20/V: unrelated warehouses
+                # must never be corrupted, nor mistaken for a mismatch).
+                key = str(expected.get("store_id") or "") or "main"
+                actual = int((observed.get("warehouses") or {}).get(key) or 0)
+            else:
+                actual = int(observed.get("total") or -1)
+            if actual != int(expected.get("quantity")):
                 raise BitrixWriteVerificationFailedError("stock_verification_failed")
             return "VERIFIED"
         if bitrix_id:
