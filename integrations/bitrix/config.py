@@ -20,6 +20,12 @@ class BitrixIntegrationConfig:
     site_id: str
     aspro_premier_enabled: bool
     aspro_field_mappings_ref: str
+    # Offers/SKU IBLOCK ID (distinct from ``catalog_id``, the *products*
+    # IBLOCK) -- installation-specific, never guessed/hardcoded. Required
+    # for any offer/variant read (``catalog.product.offer.list``), which
+    # links back to its parent product via the CML2_LINK property (REST
+    # field ``parentId``) -- see ``integrations/bitrix/schema.py``.
+    offers_iblock_id: str = ""
     # Account/login identifier for the connected Bitrix account -- explicitly
     # NON-SECRET per spec (it identifies *which* account, not how to
     # authenticate to it). Safe to surface in metadata/logs/UI. Never used
@@ -51,6 +57,7 @@ class BitrixIntegrationConfig:
             "auth_mode": self.auth_mode,
             "base_url_configured": bool(self.base_url),
             "catalog_id": self.catalog_id or "",
+            "offers_iblock_id": self.offers_iblock_id or "",
             "site_id": self.site_id or "",
             "aspro_premier_enabled": self.aspro_premier_enabled,
             "live": self.is_live,
@@ -76,6 +83,7 @@ def load_bitrix_config(env: dict | None = None) -> BitrixIntegrationConfig:
         timeout_seconds=float(e.get("BITRIX_TIMEOUT_SECONDS") or 30),
         verify_tls=str(e.get("BITRIX_VERIFY_TLS", "true")).lower() not in {"0", "false", "no"},
         catalog_id=str(e.get("BITRIX_CATALOG_ID") or "").strip(),
+        offers_iblock_id=str(e.get("BITRIX_OFFERS_IBLOCK_ID") or "").strip(),
         site_id=str(e.get("BITRIX_SITE_ID") or "").strip(),
         aspro_premier_enabled=str(e.get("ASPRO_PREMIER_ENABLED", "")).lower() in {"1", "true", "yes"},
         aspro_field_mappings_ref=str(e.get("ASPRO_PREMIER_FIELD_MAPPINGS") or "").strip(),

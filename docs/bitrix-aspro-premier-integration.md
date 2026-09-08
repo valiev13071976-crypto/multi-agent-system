@@ -51,7 +51,8 @@ Rules:
 | `BITRIX_CLIENT_SECRET` | OAuth secret reference |
 | `BITRIX_TIMEOUT_SECONDS` | HTTP timeout |
 | `BITRIX_VERIFY_TLS` | TLS verification (default true) |
-| `BITRIX_CATALOG_ID` | Catalog identifier |
+| `BITRIX_CATALOG_ID` | Products IBLOCK ID (this installation: `14`) |
+| `BITRIX_OFFERS_IBLOCK_ID` | Offers/SKU IBLOCK ID (this installation: `15`) — required for `offer_read` |
 | `BITRIX_SITE_ID` | Site identifier |
 | `ASPRO_PREMIER_ENABLED` | Enable Aspro field mapping |
 | `ASPRO_PREMIER_FIELD_MAPPINGS` | Optional mapping config reference |
@@ -120,6 +121,45 @@ Duplicate approval, workflow resume, and HTTP retry return cached idempotent res
 - Normalized 429/timeout/auth errors
 - No secret-bearing URL logging
 - LIVE dormant without configuration
+
+## Real Production Schema Binding (panda.msk.ru)
+
+`integrations/bitrix/schema.py` binds this connector to the REAL, installed
+panda.msk.ru schema — catalog IBLOCK `14`, offers IBLOCK `15` — without a
+second connector/architecture:
+
+- **Known real properties** (catalog IBLOCK 14: 97–115, 136; offers IBLOCK
+  15: 278–297) are declared with an explicit ownership label
+  (`PANDA_MANAGED` / `BITRIX_MANAGED` / `ASPRO_MANAGED` / `DERIVED` /
+  `READ_ONLY` / `UNMANAGED_PRESERVE`). Any property NOT in this table is
+  conservatively treated as `UNMANAGED_PRESERVE` — never assumed writable.
+- **CML2_LINK (property 279)** models the offer → parent-product
+  relationship. The REST method `catalog.product.offer.list` exposes this
+  same relationship as a `parentId` filter/select field, not a raw
+  `property279` value — offer ID is never assumed to equal product ID.
+- **Category/section resolution is dynamic**: `resolve_section_ancestors()`
+  walks the real `catalog.section.list` parent chain for whatever section a
+  product actually has — there is no hardcoded "product X is category Y"
+  assumption anywhere in this binding.
+- **Prices** (`catalog.price.list`) are kept one row per
+  `(productId, catalogGroupId)` pair — regional/price-type variants (e.g.
+  base retail vs. MSC/EKB/MAGNITOGORSK) are never collapsed into one value.
+- **SEO**: `seo_effective_status()` reports explicit per-product SEO
+  overrides when present, and explicitly classifies *inherited/effective*
+  IPROPERTY SEO as unavailable via `catalog.product.list` (a genuine
+  REST-surface gap, not a missing scope) — it is never fabricated.
+- `LiveBitrixAdapter.read()` supports `product_lookup`, `section_read` /
+  `category_read`, `offer_read`, and `price_read` operations against the
+  real self-hosted REST surface (`catalog.product.list`,
+  `catalog.section.list`, `catalog.product.offer.list`,
+  `catalog.price.list` — all scope `catalog`, already granted), each
+  failing closed (no network call) without the required IBLOCK
+  configuration.
+- `BitrixProductBridge.verify_schema_binding(...)` runs the full bounded,
+  READ-ONLY verification sequence for one known product through the
+  existing governed gateway and returns a report with an explicit
+  `limitations` list for anything the current REST scope/surface cannot
+  prove (never silently fabricated).
 
 ## Product Intelligence Bridge (Block 5.6)
 
