@@ -7,6 +7,7 @@ from __future__ import annotations
 import unittest
 
 from product_enrichment.characteristics import (
+    CANONICAL_CHARACTERISTIC_ALIASES,
     bridge_characteristics_to_bitrix,
     extract_spec_lines,
     match_canonical_key,
@@ -182,6 +183,80 @@ class ExtractSpecLinesTests(unittest.TestCase):
     def test_overlong_lines_are_skipped(self):
         text = "label: " + ("x" * 300)
         self.assertEqual(list(extract_spec_lines(text)), [])
+
+    def test_html_markup_is_stripped_before_line_extraction(self):
+        """Regression: ``scrape.fetch``'s ``body_text`` is raw, undecoded
+        HTML (tools.platform.web_fetch_adapter.WebFetchAdapter never
+        extracts plain text). A single-line page containing
+        ``<meta property="og:image" content="...">`` must never be
+        misread as a "label: value" spec line -- previously the FIRST
+        colon in the whole line (inside the ``og:image`` attribute) was
+        used as the split point, extracting garbage like a fragment of
+        the raw markup as the "value"."""
+        html = (
+            '<html><head><meta property="og:image" '
+            'content="https://example.com/hero.png"></head>'
+            "<body>Цвет: черный</body></html>"
+        )
+        lines = list(extract_spec_lines(html))
+        # The only real spec line (Цвет: черный) must still be found ...
+        self.assertIn(("Цвет", "черный"), lines)
+        # ... and nothing derived from the meta/og markup must appear.
+        for label, value in lines:
+            self.assertNotIn("http", value)
+            self.assertNotIn("<", label)
+            self.assertNotIn("<", value)
+
+    def test_script_and_style_block_contents_are_never_treated_as_spec_lines(self):
+        html = (
+            "<style>body{color:red;background:blue}</style>"
+            '<script>var x = {"a": "b", "resolution": "9999x9999"};</script>'
+            "<body>Диагональ экрана: 139 см</body>"
+        )
+        lines = list(extract_spec_lines(html))
+        self.assertIn(("Диагональ экрана", "139 см"), lines)
+        self.assertFalse(any("9999" in value for _label, value in lines))
+        self.assertFalse(any("color" in label.casefold() for label, value in lines))
+
+
+class HdmiCountAliasRegressionTests(unittest.TestCase):
+    """Regression: three entries in ``CANONICAL_CHARACTERISTIC_ALIASES``
+    (``hdmi_count``, ``usb_count``, ``vesa_mount``) had their aliases
+    written as a bare string in parentheses (e.g. ``("hdmi")``) instead of
+    a one-element tuple (``("hdmi",)``). Python treats ``("hdmi")`` as the
+    plain string ``"hdmi"``; iterating a string in the ``_LABEL_LOOKUP``
+    comprehension yields its individual CHARACTERS ('h', 'd', 'm', 'i') as
+    single-character aliases, so ``match_canonical_key`` matched these keys
+    for almost any text containing any of those extremely common letters
+    -- e.g. real HTML markup like "<html><head><meta ...". This is a
+    correctness-critical bug for production research: once real
+    manufacturer/retailer pages are actually fetched (Brave search +
+    scrape.fetch), this false-matching would have silently corrupted
+    characteristics with garbage values on nearly every page."""
+
+    def test_every_alias_entry_is_a_real_tuple_not_a_bare_string(self):
+        for key, (_unit, aliases) in CANONICAL_CHARACTERISTIC_ALIASES.items():
+            self.assertNotIsInstance(aliases, str, f"{key!r} aliases must be a tuple, not a bare string")
+            self.assertIsInstance(aliases, tuple, f"{key!r} aliases must be a tuple")
+
+    def test_hdmi_alias_matches_the_whole_word_only(self):
+        self.assertEqual(match_canonical_key("HDMI разъёмы"), "hdmi_count")
+
+    def test_usb_alias_matches_the_whole_word_only(self):
+        self.assertEqual(match_canonical_key("USB порты"), "usb_count")
+
+    def test_vesa_alias_matches_the_whole_word_only(self):
+        self.assertEqual(match_canonical_key("VESA крепление"), "vesa_mount")
+
+    def test_unrelated_label_containing_single_alias_letters_does_not_match(self):
+        for label in ("head", "meta", "image", "did", "modem"):
+            self.assertNotEqual(match_canonical_key(label), "hdmi_count")
+            self.assertNotEqual(match_canonical_key(label), "usb_count")
+            self.assertNotEqual(match_canonical_key(label), "vesa_mount")
+
+    def test_unrelated_label_with_no_known_alias_returns_none(self):
+        self.assertIsNone(match_canonical_key("head"))
+        self.assertIsNone(match_canonical_key("meta"))
 
 
 if __name__ == "__main__":

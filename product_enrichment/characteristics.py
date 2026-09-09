@@ -43,13 +43,13 @@ CANONICAL_CHARACTERISTIC_ALIASES: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "smart_tv_support": ("", ("smart tv", "смарт тв", "смарт-тв")),
     "operating_system": ("", ("операционная система", "operating system", "смарт-платформа")),
     "tuners": ("", ("тюнер", "tuner")),
-    "hdmi_count": ("", ("hdmi")),
-    "usb_count": ("", ("usb")),
+    "hdmi_count": ("", ("hdmi",)),
+    "usb_count": ("", ("usb",)),
     "wifi_support": ("", ("wi-fi", "wifi")),
     "bluetooth_support": ("", ("bluetooth", "блютус")),
     "ethernet_support": ("", ("ethernet", "lan")),
     "audio_power_w": ("W", ("мощность звука", "audio power", "мощность динамиков")),
-    "vesa_mount": ("mm", ("vesa")),
+    "vesa_mount": ("mm", ("vesa",)),
     "color": ("", ("цвет", "color", "colour")),
     "dimensions_with_stand": ("mm", ("габариты с подставкой", "dimensions with stand")),
     "dimensions_without_stand": ("mm", ("габариты без подставки", "dimensions without stand")),
@@ -71,6 +71,25 @@ _LABEL_LOOKUP = tuple(sorted(_LABEL_LOOKUP, key=lambda item: -len(item[0])))
 _INCH_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\"|inch|inches|дюйм)", re.I)
 _CM_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:cm|см)", re.I)
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+# ``scrape.fetch``'s ``body_text`` (``tools.platform.web_fetch_adapter.
+# WebFetchAdapter``) is raw, undecoded page HTML -- it never extracts
+# plain text. Real manufacturer/retailer pages are thick with colons in
+# tags/attributes/CSS/JS that are NOT product specifications (e.g.
+# ``<meta property="og:image" content="...">``, inline ``color:#fff``,
+# ``<script>`` JSON blobs) and must never be mistaken for a
+# "label: value" spec line by ``extract_spec_lines`` below.
+_SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+
+
+def _strip_html_markup(text: str) -> str:
+    """Defensive HTML-to-text normalization ahead of line-based spec
+    extraction. Script/style blocks are dropped entirely (their content is
+    never a real spec value); remaining tags are replaced with a space so
+    words on either side of a stripped tag never get glued together."""
+    without_scripts = _SCRIPT_STYLE_RE.sub(" ", str(text or ""))
+    return _HTML_TAG_RE.sub(" ", without_scripts)
 
 
 def match_canonical_key(raw_label: str) -> str | None:
@@ -225,8 +244,11 @@ def extract_spec_lines(page_text: str) -> Iterable[tuple[str, str]]:
     lines from plain page text (manufacturer/distributor spec pages
     commonly render one characteristic per line in this shape). Never
     invents a label/value that is not literally present in the text --
-    lines that do not match the pattern are simply skipped."""
-    for raw_line in str(page_text or "").splitlines():
+    lines that do not match the pattern are simply skipped. Markup is
+    stripped first (see ``_strip_html_markup``) so raw HTML page bodies
+    never leak tag/attribute/CSS/JS colons into the result."""
+    plain_text = _strip_html_markup(page_text)
+    for raw_line in plain_text.splitlines():
         line = raw_line.strip()
         if not line or len(line) > 200:
             continue
