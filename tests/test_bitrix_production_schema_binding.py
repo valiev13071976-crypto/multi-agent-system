@@ -87,6 +87,77 @@ class OwnershipClassificationTests(unittest.TestCase):
             self.assertEqual(schema.catalog_property(code=code).ownership, schema.DERIVED)
 
 
+class PropertyValueUnwrapTests(unittest.TestCase):
+    """Block 5.6 follow-up defect closure: LIVE Bitrix wraps most non-
+    boolean custom property values as ``{"value": ..., "valueId": ...}``
+    (or a list of such envelopes for multi-value properties) instead of a
+    bare scalar. ``schema.unwrap_property_value`` must extract the real
+    value in every shape while staying backward compatible with the bare
+    scalars fixtures/older responses already use."""
+
+    def test_scalar_value_passes_through_unchanged(self):
+        self.assertEqual(schema.unwrap_property_value("Y"), "Y")
+        self.assertEqual(schema.unwrap_property_value(1000), 1000)
+
+    def test_wrapped_single_value_is_unwrapped(self):
+        self.assertEqual(schema.unwrap_property_value({"value": "87", "valueId": "2585"}), "87")
+
+    def test_wrapped_multi_value_list_is_unwrapped_element_by_element(self):
+        wrapped = [
+            {"value": "1", "valueId": "621"},
+            {"value": "2", "valueId": "622"},
+            {"value": "4", "valueId": "623"},
+        ]
+        self.assertEqual(schema.unwrap_property_value(wrapped), ["1", "2", "4"])
+
+    def test_null_or_missing_property_stays_none(self):
+        self.assertIsNone(schema.unwrap_property_value(None))
+
+    def test_image_reference_objects_are_not_mistaken_for_the_envelope(self):
+        """File/image reference dicts (previewPicture/detailPicture, and the
+        inner value of a wrapped MORE_PHOTO/280 entry) have no "value" key
+        and must pass through unchanged."""
+        image_ref = {"id": "689", "url": "/rest/catalog.product.download?...", "urlMachine": "..."}
+        self.assertEqual(schema.unwrap_property_value(image_ref), image_ref)
+
+    def test_wrapped_multi_value_file_property_unwraps_to_the_inner_file_objects(self):
+        """MORE_PHOTO/280-shaped live data: a list of {"value": <file ref
+        object>, "valueId": ...} envelopes."""
+        wrapped_gallery = [
+            {"value": {"id": "2369", "url": "/rest/x?fileId=2369"}, "valueId": "10332"},
+            {"value": {"id": "2370", "url": "/rest/x?fileId=2370"}, "valueId": "10333"},
+        ]
+        unwrapped = schema.unwrap_property_value(wrapped_gallery)
+        self.assertEqual(unwrapped, [{"id": "2369", "url": "/rest/x?fileId=2369"}, {"id": "2370", "url": "/rest/x?fileId=2370"}])
+
+    def test_brand_mapping_unwraps_to_scalar_via_map_catalog_product(self):
+        item = {
+            "id": 118,
+            "iblockId": 14,
+            "name": "Test product",
+            "property100": {"value": "74", "valueId": "619"},
+        }
+        mapped = schema.map_catalog_product(item)
+        self.assertEqual(mapped["brand"]["value"], "74")
+        self.assertNotIsInstance(mapped["brand"]["value"], dict)
+
+    def test_article_mapping_unwraps_to_scalar_via_map_offer(self):
+        offer_item = {
+            "id": 621,
+            "iblockId": 15,
+            "name": "Test offer",
+            "parentId": 169,
+            "property283": {"value": "W324R5Y-36", "valueId": "10335"},
+        }
+        mapped = schema.map_offer(offer_item, parent_product_id="169")
+        self.assertEqual(mapped["identity"]["article"], "W324R5Y-36")
+        self.assertNotIsInstance(mapped["identity"]["article"], dict)
+
+    def test_missing_brand_property_maps_to_none_not_a_dict(self):
+        mapped = schema.map_catalog_product({"id": 1, "iblockId": 14, "name": "No brand"})
+        self.assertIsNone(mapped["brand"]["value"])
+
+
 class CatalogProductMappingTests(unittest.TestCase):
     def test_maps_identity_category_content_brand_characteristics_aspro_stock(self):
         item = {
@@ -113,7 +184,10 @@ class CatalogProductMappingTests(unittest.TestCase):
         self.assertEqual(mapped["category"]["section_id"], 73)
         self.assertEqual(mapped["content"]["preview_text"], "preview")
         self.assertEqual(mapped["content"]["detail_text"], "detail")
-        self.assertEqual(mapped["brand"], {"value": {"value": "75", "valueId": "1"}, "ownership": schema.PANDA_MANAGED})
+        # LIVE Bitrix wraps this custom property as {"value": ..., "valueId":
+        # ...} -- the mapping must unwrap it to the real scalar brand value,
+        # never expose the whole envelope.
+        self.assertEqual(mapped["brand"], {"value": "75", "ownership": schema.PANDA_MANAGED})
         self.assertEqual(mapped["aspro"]["BNR_TOP_UNDER_HEADER"], "banner-under-header")
         self.assertEqual(mapped["stock"], {"total_quantity": 1000, "warehouse_stock": None})
 
@@ -181,7 +255,26 @@ class OfferParentLinkTests(unittest.TestCase):
         self.assertEqual(mapped["parent_link"]["property_id"], 279)
         self.assertEqual(mapped["parent_link"]["property_code"], "CML2_LINK")
         self.assertTrue(mapped["parent_link"]["matches_queried_parent"])
-        self.assertEqual(mapped["identity"]["article"], {"value": "REWS-788-BLK"})
+        # LIVE Bitrix wraps ARTICLE the same way -- must unwrap to the real
+        # scalar SKU string, never expose the envelope.
+        self.assertEqual(mapped["identity"]["article"], "REWS-788-BLK")
+
+    def test_maps_offer_with_live_wrapped_parent_id_envelope(self):
+        """LIVE READ-ONLY discovery follow-up: ``parentId`` itself comes back
+        wrapped in the same ``{"value": ..., "valueId": ...}`` envelope as
+        any other custom property on this installation (it is backed by
+        CML2_LINK/279) -- never a bare scalar. Must still resolve/compare
+        correctly, not silently mismatch a dict against a string."""
+        offer_item = {
+            "id": 568,
+            "iblockId": 15,
+            "name": "Offer with wrapped parentId",
+            "parentId": {"value": "169", "valueId": "9805"},
+            "quantity": 9000,
+        }
+        mapped = schema.map_offer(offer_item, parent_product_id="169")
+        self.assertEqual(mapped["parent_link"]["parent_product_id"], "169")
+        self.assertTrue(mapped["parent_link"]["matches_queried_parent"])
 
     def test_mismatched_parent_is_detected_not_silently_accepted(self):
         offer_item = {"id": 9002, "parentId": 999, "quantity": 0}

@@ -297,6 +297,11 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         self.assertEqual(product_body["fields"]["active"], "N")
         # BRAND -> verified property 100
         self.assertEqual(product_body["fields"]["property100"], TARGET_BRAND)
+        # Purchase price -> native purchasingPrice/purchasingCurrency fields
+        # on the SAME catalog.product.add call as the base product (Block
+        # 5.6 follow-up defect closure) -- never on the offer or price call.
+        self.assertEqual(product_body["fields"]["purchasingPrice"], TARGET_PURCHASE_PRICE)
+        self.assertEqual(product_body["fields"]["purchasingCurrency"], "RUB")
 
         _, offer_body = transport.calls[3]
         self.assertEqual(offer_body["fields"]["iblockId"], 15)
@@ -304,29 +309,42 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         self.assertEqual(offer_body["fields"]["active"], "N")
         # SKU/article -> verified offer property 283
         self.assertEqual(offer_body["fields"]["property283"], TARGET_SKU)
+        # Purchase price must never leak onto the offer create either.
+        self.assertNotIn("purchasingPrice", offer_body["fields"])
 
         _, price_body = transport.calls[5]
         self.assertEqual(price_body["fields"]["productId"], CREATED_PRODUCT_ID)
         self.assertEqual(price_body["fields"]["catalogGroupId"], 7)
-        # 6. proof retail 29990 and purchase 22513.70 remain separate
+        # 6. proof retail 29990 and purchase 22513.70 remain separate --
+        # retail price only ever goes through catalog.price.add, purchase
+        # price only ever goes through catalog.product.add's native fields;
+        # neither call's fields carry the other's value.
         self.assertEqual(price_body["fields"]["price"], TARGET_RETAIL_PRICE)
+        self.assertNotIn("purchasingPrice", price_body["fields"])
+        self.assertNotIn(TARGET_PURCHASE_PRICE, json.dumps(price_body))
 
-        # Purchase price must never appear in ANY outbound Bitrix payload.
-        serialized_calls = json.dumps(transport.calls)
-        self.assertNotIn(TARGET_PURCHASE_PRICE, serialized_calls)
         # EAN/category must never be guessed onto any property either.
+        serialized_calls = json.dumps(transport.calls)
         self.assertNotIn(TARGET_EAN, serialized_calls)
         self.assertNotIn(TARGET_CATEGORY, serialized_calls)
 
+        # Result-level proof that purchase price was actually written.
+        self.assertTrue(result["purchase_price_written"])
+
     def test_fields_without_verified_destination_are_reported_not_written(self):
+        """EAN and category still have no verified Bitrix destination on
+        this installation and are never written. Purchase price now DOES
+        have one (native purchasingPrice/purchasingCurrency fields, Block
+        5.6 follow-up defect closure) and is written on this LIVE bridge --
+        it must no longer be reported as unwritten."""
         transport = _RecordingTransport()
         with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
             bridge, _ = _bridge_and_activation()
             result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
 
         not_written_fields = {item["field"] for item in result["not_written"]}
-        self.assertEqual(not_written_fields, {"ean", "purchase_price", "category"})
-        self.assertEqual(result["purchase_price_written"], False)
+        self.assertEqual(not_written_fields, {"ean", "category"})
+        self.assertEqual(result["purchase_price_written"], True)
         self.assertEqual(result["active"], False)
         self.assertEqual(result["published"], False)
 
@@ -576,6 +594,162 @@ class FailClosedWithoutRetailPriceTypeTests(unittest.TestCase):
         self.assertEqual(result["failed_step"], "price_create")
         self.assertEqual(result["error"], "bitrix_retail_price_type_id_not_configured")
         self.assertEqual(transport.price_add_count, 0)
+
+    def test_production_confirmed_retail_price_type_id_1_maps_to_catalog_group_id_1(self):
+        """Business owner has explicitly confirmed BITRIX_RETAIL_PRICE_TYPE_ID
+        =1 (catalogGroupId 1 / BASE) is the intended retail price for THIS
+        production installation -- proves the real production value works
+        end to end, while remaining entirely environment-driven (never
+        hardcoded into the general integration logic; see ``_LiveEnv``'s
+        default of "7" in every other test in this file, which proves the
+        adapter never assumes 1)."""
+        transport = _RecordingTransport()
+        with _LiveEnv(retail_price_type_id="1"), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        _, price_body = next((m, b) for m, b in transport.calls if m == "catalog.price.add")
+        self.assertEqual(price_body["fields"]["catalogGroupId"], 1)
+        self.assertEqual(price_body["fields"]["price"], TARGET_RETAIL_PRICE)
+
+
+class PurchasePriceMappingTests(unittest.TestCase):
+    """Block 5.6 follow-up defect closure: the LIVE READ-ONLY discovery
+    proved ``purchasingPrice``/``purchasingCurrency`` are real, native
+    Bitrix catalog.product fields -- this closure implements writing them
+    for the controlled single-product create, independent of (and never
+    substitutable for) the retail selling price."""
+
+    def test_purchase_price_and_currency_are_mapped_onto_the_product_create_call(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertTrue(result["purchase_price_written"])
+        _, product_body = next((m, b) for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"]["purchasingPrice"], "22513.70")
+        self.assertEqual(product_body["fields"]["purchasingCurrency"], "RUB")
+
+    def test_retail_price_remains_29990_and_catalog_group_id_remains_config_driven(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertEqual(result["retail_price"]["amount"], TARGET_RETAIL_PRICE)
+        _, price_body = next((m, b) for m, b in transport.calls if m == "catalog.price.add")
+        self.assertEqual(price_body["fields"]["price"], TARGET_RETAIL_PRICE)
+        # config-driven (this test's _LiveEnv default), never hardcoded 1.
+        self.assertEqual(price_body["fields"]["catalogGroupId"], 7)
+
+    def test_purchase_price_can_never_overwrite_or_appear_in_the_retail_price_call(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        _, price_body = next((m, b) for m, b in transport.calls if m == "catalog.price.add")
+        self.assertEqual(price_body["fields"]["price"], TARGET_RETAIL_PRICE)
+        self.assertNotEqual(price_body["fields"]["price"], TARGET_PURCHASE_PRICE)
+        self.assertNotIn("purchasingPrice", price_body["fields"])
+
+    def test_no_purchase_price_supplied_writes_no_purchasing_fields_at_all(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(
+                bridge, tenant_id=TARGET_TENANT, request=_request(purchase_price=""), approved=True
+            )
+
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertFalse(result["purchase_price_written"])
+        _, product_body = next((m, b) for m, b in transport.calls if m == "catalog.product.add")
+        self.assertNotIn("purchasingPrice", product_body["fields"])
+        self.assertNotIn("purchasingCurrency", product_body["fields"])
+
+    def test_malformed_purchase_price_fails_closed_before_any_http_call(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(
+                bridge, tenant_id=TARGET_TENANT, request=_request(purchase_price="not-a-number"), approved=True
+            )
+
+        self.assertEqual(result["status"], "UNRESOLVED")
+        self.assertEqual(result["reason"], "invalid_purchase_price")
+        self.assertFalse(result.get("mutated", False))
+        self.assertEqual(transport.calls, [])
+
+    def test_negative_purchase_price_fails_closed_before_any_http_call(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(
+                bridge, tenant_id=TARGET_TENANT, request=_request(purchase_price="-500"), approved=True
+            )
+
+        self.assertEqual(result["status"], "UNRESOLVED")
+        self.assertEqual(result["reason"], "invalid_purchase_price")
+        self.assertEqual(transport.calls, [])
+
+    def test_ean_is_never_written_alongside_purchase_price(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertIn("ean", {item["field"] for item in result["not_written"]})
+        self.assertNotIn(TARGET_EAN, json.dumps(transport.calls))
+
+    def test_active_remains_n_even_with_purchase_price_written(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertEqual(result["active"], False)
+        _, product_body = next((m, b) for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"]["active"], "N")
+
+    def test_duplicate_idempotency_protection_remains_intact_with_purchase_price(self):
+        transport = _RecordingTransport()
+        fixed_key = "cbw-fixed-key-purchase-price-idempotency"
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            first = execute_single_product_write(
+                bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True, idempotency_key=fixed_key
+            )
+            second = execute_single_product_write(
+                bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True, idempotency_key=fixed_key
+            )
+
+        self.assertEqual(first["status"], STATUS_WRITE_VERIFIED)
+        self.assertIn(second["status"], {STATUS_WRITE_VERIFIED, "UNCHANGED"})
+        self.assertEqual(transport.product_add_count, 1)
+
+    def test_no_unrelated_unmanaged_properties_are_mutated(self):
+        """Only the verified fields (name, active, BRAND/property100,
+        purchasingPrice/purchasingCurrency, ARTICLE/property283, retail
+        price) ever appear in any outbound Bitrix payload for this write --
+        no other propertyN key is ever sent."""
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        allowed_product_fields = {"iblockId", "name", "active", "xmlId", "property100", "purchasingPrice", "purchasingCurrency"}
+        allowed_offer_fields = {"iblockId", "name", "active", "parentId", "property283"}
+        for method, body in transport.calls:
+            fields = body.get("fields")
+            if not fields:
+                continue
+            if method == "catalog.product.add":
+                self.assertTrue(set(fields.keys()).issubset(allowed_product_fields), fields)
+            elif method == "catalog.product.offer.add":
+                self.assertTrue(set(fields.keys()).issubset(allowed_offer_fields), fields)
 
 
 class ProductionRegression400Tests(unittest.TestCase):

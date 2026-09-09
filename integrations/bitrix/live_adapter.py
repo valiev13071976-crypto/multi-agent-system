@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from decimal import Decimal, InvalidOperation
 from typing import Callable
 
 logger = logging.getLogger(__name__)
@@ -16,13 +17,16 @@ from integrations.bitrix.config import BitrixIntegrationConfig, load_bitrix_conf
 from integrations.bitrix.errors import BitrixValidationError
 from integrations.bitrix.fixture_adapter import BitrixFixtureAdapter
 
-# First controlled production Bitrix product write: only the base product
-# name, BRAND (property 100, verified PANDA_MANAGED on IBLOCK 14), the
-# offer/SKU article (property 283, verified PANDA_MANAGED on IBLOCK 15),
-# and the retail selling price have a verified real write destination on
-# this installation -- see integrations/bitrix/schema.py's module docstring
-# and PropertyBinding table (the source of truth this module reuses,
-# rather than re-deriving/guessing its own property ids).
+# First controlled production Bitrix product write: the base product name,
+# BRAND (property 100, verified PANDA_MANAGED on IBLOCK 14), the offer/SKU
+# article (property 283, verified PANDA_MANAGED on IBLOCK 15), the retail
+# selling price, and (Block 5.6 follow-up defect closure) the native
+# purchasingPrice/purchasingCurrency product fields all have a verified
+# real write destination on this installation -- see
+# integrations/bitrix/schema.py's module docstring and PropertyBinding
+# table (the source of truth this module reuses, rather than re-deriving/
+# guessing its own property ids). EAN/GTIN and category still have no
+# verified destination and remain unwritten.
 _BRAND_PROPERTY = schema.catalog_property(code="BRAND")
 _ARTICLE_PROPERTY = schema.offer_property(code="ARTICLE")
 
@@ -242,10 +246,11 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
     ) -> dict:
         """Real, minimal LIVE create for exactly the fields this
         installation's schema binding has verified a destination for:
-        name, BRAND (property 100), article/SKU (offer property 283), and
-        the retail selling price. EAN/purchase price/category are never
-        written here -- ``controlled_bitrix_write`` already never includes
-        them in the canonical payload this reads.
+        name, BRAND (property 100), article/SKU (offer property 283), the
+        retail selling price, and (Block 5.6 follow-up defect closure) the
+        native ``purchasingPrice``/``purchasingCurrency`` product fields.
+        EAN/category are never written here -- ``controlled_bitrix_write``
+        already never includes them in the canonical payload this reads.
 
         Idempotency/duplicate-protection design note: a FRESH
         ``LiveBitrixAdapter`` is constructed on every
@@ -278,6 +283,34 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         )
         currency = (price_field.get("currency") if isinstance(price_field, dict) else None) or "RUB"
 
+        # Native purchasingPrice/purchasingCurrency (Block 5.6 follow-up
+        # defect closure -- LIVE READ-ONLY discovery proved these are real,
+        # first-class Bitrix catalog.product fields, distinct from the
+        # retail selling price above). Deliberately read from a SEPARATE
+        # top-level ``purchase_price`` key -- never from ``price_field`` --
+        # so a purchase price can structurally never be substituted for the
+        # retail selling price. Validated up front (fail closed on
+        # malformed data) before any HTTP call is made, same as the
+        # ``name_required`` check above.
+        purchase_price_field = product_in.get("purchase_price") or {}
+        purchase_price_amount = ""
+        purchase_price_currency = "RUB"
+        if isinstance(purchase_price_field, dict):
+            raw_purchase_amount = str(purchase_price_field.get("amount") or "").strip()
+            if raw_purchase_amount:
+                try:
+                    parsed = Decimal(raw_purchase_amount)
+                except (InvalidOperation, ValueError, TypeError):
+                    raise BitrixValidationError("purchase_price_invalid")
+                if parsed <= 0:
+                    raise BitrixValidationError("purchase_price_invalid")
+                purchase_price_amount = raw_purchase_amount
+                purchase_price_currency = str(purchase_price_field.get("currency") or "RUB").strip() or "RUB"
+        elif purchase_price_field:
+            # A non-empty, non-dict purchase_price payload is itself
+            # malformed input -- fail closed rather than silently ignoring it.
+            raise BitrixValidationError("purchase_price_invalid")
+
         xml_id = self._idempotency_xml_id(idempotency_key)
 
         existing = self._find_product_by_xml_id(xml_id, credential_ref=credential_ref)
@@ -292,11 +325,24 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             # allowed to raise straight through (there is nothing to
             # report as a partial success if this itself fails).
             product_id = self._live_create_product(
-                name=name, active=active, brand=brand, xml_id=xml_id, credential_ref=credential_ref
+                name=name,
+                active=active,
+                brand=brand,
+                xml_id=xml_id,
+                credential_ref=credential_ref,
+                purchase_price=purchase_price_amount,
+                purchase_price_currency=purchase_price_currency,
             )
             resolved_active = active
             resolved_name = name
             idempotent_replay = False
+
+        # Set on the very create call above (or, on an idempotent replay,
+        # implied by the same deterministic xmlId already having been
+        # created with this same request's fields) -- never re-sent via a
+        # separate update call; mirrors ``article_written``'s existing
+        # "confirmed present, regardless of which branch created it" style.
+        purchase_price_written = bool(purchase_price_amount)
 
         article_written = ""
         if sku:
@@ -315,6 +361,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     failed_step="offer_create",
                     exc=exc,
                     idempotent=idempotent_replay,
+                    purchase_price_written=purchase_price_written,
                 )
             article_written = sku
 
@@ -339,6 +386,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     failed_step="price_create",
                     exc=exc,
                     idempotent=idempotent_replay,
+                    purchase_price_written=purchase_price_written,
                 )
 
         return {
@@ -361,6 +409,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 "active": bool(resolved_active),
                 "article": article_written,
                 "properties": {"brand": brand} if brand else {},
+                "purchase_price_written": purchase_price_written,
                 "mode": "LIVE",
                 "live": True,
             },
@@ -368,7 +417,16 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         }
 
     def _partial_failure(
-        self, *, product_id, name: str, active: bool, article: str, failed_step: str, exc: Exception, idempotent: bool
+        self,
+        *,
+        product_id,
+        name: str,
+        active: bool,
+        article: str,
+        failed_step: str,
+        exc: Exception,
+        idempotent: bool,
+        purchase_price_written: bool = False,
     ) -> dict:
         return {
             "status": "PARTIAL_FAILURE",
@@ -382,6 +440,11 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 "name": name,
                 "active": bool(active),
                 "article": article,
+                # The base product (including purchasingPrice/Currency, if
+                # any) is always created BEFORE the offer/price steps that
+                # can fail here -- so this reflects a real, already-sent
+                # value, never a guess about a step that hasn't run yet.
+                "purchase_price_written": purchase_price_written,
             },
             "mapping": {"bitrix_id": str(product_id)},
             "failed_step": failed_step,
@@ -450,7 +513,17 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         items = result.get("prices", []) if isinstance(result, dict) else (result or [])
         return bool(items)
 
-    def _live_create_product(self, *, name: str, active: bool, brand: str, xml_id: str, credential_ref: str):
+    def _live_create_product(
+        self,
+        *,
+        name: str,
+        active: bool,
+        brand: str,
+        xml_id: str,
+        credential_ref: str,
+        purchase_price: str = "",
+        purchase_price_currency: str = "",
+    ):
         fields: dict = {
             "iblockId": self._require_catalog_iblock_id(),
             "name": name,
@@ -461,6 +534,12 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             if _BRAND_PROPERTY is None:
                 raise IntegrationNotConfiguredError("bitrix_brand_property_not_verified")
             fields[_BRAND_PROPERTY.select_key] = brand
+        if purchase_price:
+            # Native catalog.product fields (Block 5.6 follow-up defect
+            # closure) -- structurally separate from retail selling price,
+            # which is only ever written via ``catalog.price.add`` below.
+            fields[schema.PURCHASING_PRICE_FIELD] = purchase_price
+            fields[schema.PURCHASING_CURRENCY_FIELD] = purchase_price_currency or "RUB"
         data = self.client.call(
             "catalog.product.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
         )
