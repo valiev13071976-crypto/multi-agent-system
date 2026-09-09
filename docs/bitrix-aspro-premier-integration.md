@@ -276,21 +276,43 @@ never a guessed property ID/code):
   `prepare_single_product_write` only reports it under `will_write` for a
   LIVE-environment bridge.
 
-**Never written**: EAN, category/section — no verified destination exists
-for these on this installation; `controlled_bitrix_write` never includes
-them in the payload this adapter reads, so there is nothing to guess.
+**Never written**: EAN, SEO (META TITLE/KEYWORDS/DESCRIPTION), and
+gallery/additional images — no verified destination exists for these on
+this installation; `controlled_bitrix_write` never includes them in the
+payload this adapter reads, so there is nothing to guess. Category/section,
+weight/dimensions, preview/detail text, preview/detail pictures, and a
+small verified set of characteristics DO now have verified destinations —
+see "Complete Product Card Follow-up Pass" below.
 
 **Example — controlled create for a real LG test product**, given
 title `"Телевизор LG 32LQ63006LA.ARUG"`, SKU `32LQ63006LA.ARUG`, brand
-`LG`, purchase price `22513.70 RUB`, and retail price `29990 RUB`:
+`LG`, purchase price `22513.70 RUB`, retail price `29990 RUB`, subcategory
+`"Телевизоры"`, weight `12000` (g), dimensions `720x420x60` (mm), a short
+and detailed description, and verified characteristics:
 
 ```
+catalog.section.list (read, resolves subcategory "Телевизоры" -> id 70)
+
 catalog.product.add fields (IBLOCK 14):
   name              = "Телевизор LG 32LQ63006LA.ARUG"
   active            = "N"
   property100       = "LG"                # BRAND
   purchasingPrice   = "22513.70"
   purchasingCurrency = "RUB"
+  iblockSectionId   = 70                  # resolved "Телевизоры", never guessed
+  weight            = "12000"
+  length            = "720"
+  width             = "420"
+  height            = "60"
+  previewText       = "<short description>"
+  previewTextType   = "text"
+  detailText        = "<detailed description>"
+  detailTextType    = "text"
+  property154       = "81"                # screen_diagonal_cm
+  property156       = "3840x2160"         # screen_resolution
+  property206       = "webOS"             # operating_system
+  property209       = "Да"                # smart_tv_support
+  property246       = "Черный"            # color
   xmlId             = <deterministic idempotency-key-derived id>
 
 catalog.product.offer.add fields (IBLOCK 15):
@@ -305,6 +327,12 @@ catalog.price.add fields:
   price          = "29990"
   currency       = "RUB"
 ```
+
+Preview/detail pictures (when supplied as `{"filename", "base64"}`) are
+sent as `previewPicture`/`detailPicture` = `{"fileData": ["<filename>",
+"<base64>"]}` on the same `catalog.product.add` call. EAN and SEO have no
+verified destination and are never included in any of the above (see
+"Complete Product Card Follow-up Pass" above).
 
 **Product visibility**: created `active="N"` unless the caller explicitly
 passes `active=True` — `controlled_bitrix_write` always passes `active=False`
@@ -386,6 +414,214 @@ report. Regression coverage: `tests/test_bitrix_live_product_create_write.py`'s
 an empty/malformed `result`, and confirms the real `"element"` shape is
 now recognized as success — plus that no false `WRITE_VERIFIED` is ever
 returned without a concrete id).
+
+## Complete Product Card Follow-up Pass (real products 992/993 — closing the "skeleton" defect)
+
+The first real production controlled create (Bitrix product 992 / offer
+993, `Телевизор LG 32LQ63006LA.ARUG`) succeeded but produced only a
+**skeleton** product card: no catalog section, no characteristics, no
+weight/dimensions, no preview/detail content or images, and the visible
+Aspro admin SEO controls had no verified write path. A second, bounded
+LIVE READ-ONLY discovery pass (real webhook, read-only
+`catalog.section.list`/`catalog.product(.offer).list` explicit-select
+calls, and — newly discovered this pass — `catalog.productProperty.list`/
+`.get`, a different method family from the previously-tried and still
+`ERROR_METHOD_NOT_FOUND` `iblock.property.list`) resolved most of the
+still-missing product-card data. Real products 992/993 were never
+modified during this pass; every discovery call was read-only, and every
+write mapping below is exercised only by mocked-transport tests.
+
+### A. Category / section — RESOLVED
+
+`catalog.section.list` (filter `iblockId=14`) works and returns the real
+section tree. The verified "Телевизоры" section:
+
+| Field | Value |
+|-------|-------|
+| id | `70` |
+| name | Телевизоры |
+| code | `televizory` |
+| parent (`iblockSectionId`) | `61` (Электроника) |
+
+`catalog.product.add` accepts `iblockSectionId` as a normal writable
+field. Panda never guesses this id: `schema.resolve_section_id(category,
+subcategory, sections)` deterministically matches a Panda
+category/subcategory string against an EXACT (trimmed, case-insensitive)
+section name from an already-fetched live `catalog.section.list`
+snapshot. `subcategory` (e.g. `"Телевизоры"`) is tried first if supplied;
+`category` is used only as a fallback when no subcategory was supplied at
+all — a supplied-but-unmatched subcategory fails closed rather than
+silently falling back to a broader parent section. Zero matches or more
+than one section sharing that exact name both fail closed
+(`no_matching_section_found` / `ambiguous_section_name`) via
+`prepare_single_product_write` returning `UNRESOLVED` — the product is
+**never** left at catalog root when a category/subcategory was actually
+supplied. No category/subcategory supplied at all = unchanged prior
+behavior (field simply omitted).
+
+### B. EAN / barcode — BLOCKED (deferred)
+
+Probed `catalog.*Barcode.list`, `crm.product.list`, `catalog.measure.*`,
+`iblock.element.get`, explicit `select=["barcode"]` on
+`catalog.product.list`/`catalog.product.offer.list` — every method either
+returns `ERROR_METHOD_NOT_FOUND` or `insufficient_scope`, and no barcode-
+shaped key appears in any real product/offer response on this
+installation. No verified writable destination exists for EAN on this
+installation. EAN remains sourced-but-unwritten (`not_written`, reason
+`no_verified_bitrix_property_for_ean_on_this_installation`) — never
+guessed onto an arbitrary property.
+
+### C. Characteristics / specifications — RESOLVED (bounded set)
+
+`catalog.productProperty.list` (filter `iblockId`) — a distinct REST
+method family from `iblock.property.list` (still
+`ERROR_METHOD_NOT_FOUND`) — DOES work on this installation and returns
+full metadata (`id`, `code`, `name`, `propertyType`, `multiple`, …) for
+every one of IBLOCK 14's ~179 custom properties. Cross-referencing that
+metadata against real populated products verified exactly these
+semantically-unambiguous, scalar, `PANDA_MANAGED` characteristics (added
+to `schema.CATALOG_CHARACTERISTICS`):
+
+| Panda key | Property ID | Bitrix code | Bitrix name |
+|-----------|------------|-------------|-------------|
+| `screen_diagonal_cm` | 154 | `PROP_2053` | Диагональ дисплея, см |
+| `screen_resolution` | 156 | `PROP_2054` | Разрешение экрана, пикс |
+| `operating_system` | 206 | `PROP_301` | Операционная система |
+| `smart_tv_support` | 209 | `PROP_304` | Поддержка Smart TV |
+| `color` | 246 | `COLOR_REF2` | Цвет |
+
+`display_technology`, `refresh_rate_hz`, and `model_year` were explicitly
+checked against the full property list and have **no** matching property
+on this installation — deferred, not guessed. `schema.
+map_characteristics_to_properties({key: value})` is the ONLY place that
+resolves a Panda characteristic key to a real `propertyN` write field (or
+drops it); an unrecognized key is never written, only reported
+sourced-but-unwritten (`not_written` field `characteristic:<key>`) so
+Panda still preserves the source value. Only the base product (IBLOCK 14)
+is covered — no offer-level (IBLOCK 15) characteristic was verified this
+pass, so none is implemented for offers.
+
+### D. Weight and dimensions — RESOLVED (fields verified; units NOT independently verifiable)
+
+`weight`, `length`, `width`, `height` are native, selectable, writable
+fields on `catalog.product.add`/`catalog.product.list` (per Bitrix's own
+REST reference, typed `double`/`float`) — confirmed present but `null` on
+every sampled live product; this installation has never populated them.
+**Bitrix's own REST reference does not state a unit for any of the four**
+(the long-standing informal Bitrix convention is grams/millimeters, but
+that could not be independently confirmed against real non-null data on
+this installation). To make that ambiguity explicit at every call site
+rather than silently assuming a unit deep in the write path, the Panda
+canonical request fields are unit-suffixed: `weight_g`, `length_mm`,
+`width_mm`, `height_mm`. Values are passed through **verbatim, with zero
+unit conversion** — `LiveBitrixAdapter._physical_fields`/
+`business_assistant.controlled_bitrix_write._normalize_physical_fields`
+only validate "positive decimal string", never converts. A missing
+dimension is simply omitted from the write (never forced to `0`, which
+Bitrix would treat as a real, meaningfully-zero value). A malformed
+supplied value fails closed (`invalid_weight_g`/`invalid_length_mm`/etc.)
+before any HTTP call.
+
+### E. Preview / announcement — RESOLVED
+
+`previewText`, `previewTextType`, and `previewPicture` are confirmed
+real, writable fields on `catalog.product.add`. Panda maps
+`description.short` (canonical `content.short_description`, cleaned via
+the existing `data_intel.cleaning.clean_text`) onto `previewText`, always
+paired with `previewTextType="text"` (plain text, not HTML) — the adapter
+never fabricates marketing copy, it only passes through already-prepared
+Panda content. `previewPicture`'s confirmed WRITE shape (per Bitrix's own
+REST reference) is `{"fileData": [filename, base64_content]}`, never a
+bare URL — Panda must supply an already-encoded `base64` string plus a
+`filename`; a media entry missing either fails closed before any HTTP
+call. No LIVE upload was ever attempted from the agent.
+
+### F. Detail content — RESOLVED for text/main images; gallery deferred
+
+`detailText`, `detailTextType`, and `detailPicture` are confirmed real,
+writable fields with the identical shape/semantics as their preview
+counterparts above (`detailText`/`detailTextType="text"` from
+`content.detailed_description`; `detailPicture` via the same
+`{"fileData": [filename, base64]}` shape). The offer-level `MORE_PHOTO`
+gallery/additional-image property's multi-value `fileData` WRITE format
+was not independently confirmed by documentation this pass (only its
+READ shape was previously known) — implementing it speculatively would
+risk a wrong upload shape, so gallery/additional images remain deferred.
+No LIVE upload was ever attempted from the agent for any of these.
+
+### G. SEO — BLOCKED (deferred)
+
+Re-confirmed `iblock.element.get`/`iblock.elementproperty.list` still
+return `ERROR_METHOD_NOT_FOUND`, and `lists.element.get` returns
+`insufficient_scope` on this installation's webhook. No real
+`metaTitle`/`seoTitle`-shaped field exists on `catalog.product.add`, and
+no alternative inherited-property/template SEO REST method could be
+found that this webhook's granted scopes can call. No verified writable
+mechanism exists for META TITLE/KEYWORDS/DESCRIPTION, element/page title,
+or image ALT/TITLE on this installation. SEO write remains entirely
+deferred — no speculative write was implemented.
+
+### Mapping table (this pass's additions)
+
+| Panda field | Bitrix destination | Method | Status |
+|-------------|--------------------|--------|--------|
+| `subcategory`/`category_source` → resolved section id | `iblockSectionId` (IBLOCK 14) | `catalog.section.list` (read) + `catalog.product.add` (write) | RESOLVED |
+| `weight_g` | `weight` | `catalog.product.add` | RESOLVED (unit unverified) |
+| `length_mm` | `length` | `catalog.product.add` | RESOLVED (unit unverified) |
+| `width_mm` | `width` | `catalog.product.add` | RESOLVED (unit unverified) |
+| `height_mm` | `height` | `catalog.product.add` | RESOLVED (unit unverified) |
+| `short_description` | `previewText` (+`previewTextType="text"`) | `catalog.product.add` | RESOLVED |
+| `detailed_description` | `detailText` (+`detailTextType="text"`) | `catalog.product.add` | RESOLVED |
+| preview image (`{filename, base64}`) | `previewPicture` (`{"fileData": [name, base64]}`) | `catalog.product.add` | RESOLVED (no LIVE upload tested) |
+| detail image (`{filename, base64}`) | `detailPicture` (`{"fileData": [name, base64]}`) | `catalog.product.add` | RESOLVED (no LIVE upload tested) |
+| `characteristics.screen_diagonal_cm` | `property154` (`PROP_2053`) | `catalog.product.add` | RESOLVED |
+| `characteristics.screen_resolution` | `property156` (`PROP_2054`) | `catalog.product.add` | RESOLVED |
+| `characteristics.operating_system` | `property206` (`PROP_301`) | `catalog.product.add` | RESOLVED |
+| `characteristics.smart_tv_support` | `property209` (`PROP_304`) | `catalog.product.add` | RESOLVED |
+| `characteristics.color` | `property246` (`COLOR_REF2`) | `catalog.product.add` | RESOLVED |
+| any other `characteristics.<key>` | — | — | preserved in Panda, reported `not_written`, never guessed |
+| gallery/additional images | `MORE_PHOTO` (offer, IBLOCK 15) | — | deferred (write shape unconfirmed) |
+| EAN/barcode | — | — | BLOCKED (no verified destination) |
+| SEO (title/keywords/description/ALT) | — | — | BLOCKED (no verified method) |
+
+### Extended read-back verification
+
+`execute_single_product_write`'s independent post-write read-back
+(`bridge.read_product`, a fresh governed READ, never the write's own
+embedded echo) is extended to also assert `iblockSectionId` whenever this
+write actually resolved a section — an already-existing product with no
+category data supplied is never false-mismatched against an unset
+expectation.
+
+### Canonical model extension
+
+`business_assistant.controlled_bitrix_write.SingleProductWriteRequest`
+gained `subcategory`, `weight_g`, `length_mm`, `width_mm`, `height_mm`,
+`short_description`, `detailed_description`, and `characteristics`
+(`Mapping[str, str]`, keyed by the semantic keys above). None of these
+force an unavailable field to `null`/`0` — every one is simply omitted
+from the canonical payload (and therefore from the Bitrix write) when not
+supplied.
+
+### Tests
+
+`tests/test_bitrix_live_product_create_write.py` (`SectionAssignmentTests`,
+`PhysicalDimensionsTests`, `ContentAndMediaFieldsTests`,
+`CharacteristicsWriteTests`) covers the `LiveBitrixAdapter` field-
+construction/validation layer directly (an already-resolved section id;
+malformed/missing physical values; preview/detail text and the
+`fileData` picture shape; verified vs. unverified characteristic keys).
+`tests/test_bitrix_complete_product_card_followup.py` covers the layer
+above that — `schema.resolve_section_id`/`schema.
+map_characteristics_to_properties` as pure functions, plus full
+`prepare_single_product_write`/`execute_single_product_write`
+orchestration on a mocked-transport LIVE bridge: unambiguous resolution,
+category fallback, ambiguous/no-match/lookup-failure all failing closed
+with zero product-create calls, and the full weight/dimensions/content/
+characteristics payload actually reaching the mocked `catalog.product.add`
+call. All real Bitrix HTTP interaction in every test is a mocked
+transport — zero real network calls, zero real Bitrix mutations, and real
+products 992/993 were never touched by any test or discovery call.
 
 ## Product Intelligence Bridge (Block 5.6)
 
