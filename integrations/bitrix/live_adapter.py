@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Callable
+
+logger = logging.getLogger(__name__)
 
 from integrations.activation.adapters import FixtureAdapterState
 from integrations.activation.errors import IntegrationNotConfiguredError
@@ -461,9 +464,23 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         data = self.client.call(
             "catalog.product.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
         )
-        product_id = self._extract_id(data, singular_key="product")
+        # Production defect closure (product_create_malformed_response,
+        # HTTP 200 on both catalog.product.list and catalog.product.add):
+        # Bitrix's documented REST contract for catalog.product.add nests
+        # the created product under "element", NOT "product" -- unlike
+        # catalog.product.offer.add ("offer") and catalog.price.add
+        # ("price"), which already matched. This one call used the wrong
+        # singular key, so a genuinely successful create was never
+        # recognized: HTTP 200 was reached, but no concrete id could ever
+        # be extracted from it, so this always failed closed rather than
+        # ever falsely reporting WRITE_VERIFIED.
+        product_id = self._extract_id(data, singular_key="element")
         if product_id is None:
-            raise BitrixValidationError("product_create_malformed_response")
+            self._log_malformed_response("catalog.product.add", data, xml_id=xml_id)
+            raise BitrixValidationError(
+                "product_create_malformed_response",
+                message=self._malformed_response_message("catalog.product.add", data),
+            )
         return product_id
 
     def _live_create_offer(self, *, parent_id, name: str, active: bool, sku: str, credential_ref: str):
@@ -486,7 +503,11 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         )
         offer_id = self._extract_id(data, singular_key="offer")
         if offer_id is None:
-            raise BitrixValidationError("offer_create_malformed_response")
+            self._log_malformed_response("catalog.product.offer.add", data)
+            raise BitrixValidationError(
+                "offer_create_malformed_response",
+                message=self._malformed_response_message("catalog.product.offer.add", data),
+            )
         return offer_id
 
     def _live_create_price(self, *, product_id, price_type_id: int, amount: str, currency: str, credential_ref: str) -> None:
@@ -500,7 +521,11 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             "catalog.price.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
         )
         if self._extract_id(data, singular_key="price") is None:
-            raise BitrixValidationError("price_create_malformed_response")
+            self._log_malformed_response("catalog.price.add", data)
+            raise BitrixValidationError(
+                "price_create_malformed_response",
+                message=self._malformed_response_message("catalog.price.add", data),
+            )
 
     @staticmethod
     def _as_bitrix_id(value):
@@ -528,3 +553,45 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         if result.get("id") is not None:
             return result["id"]
         return None
+
+    @staticmethod
+    def _safe_response_shape(data: dict) -> dict:
+        """Bounded, sanitized description of an unexpected Bitrix REST
+        response -- top-level key NAMES only (never values, which could in
+        principle echo request data), truncated defensively. Never
+        includes the webhook URL, credentials, or authorization data --
+        those never appear in a Bitrix REST response body in the first
+        place, and this only ever looks at ``data``/``data["result"]``."""
+        top_level_keys = sorted(str(k) for k in data.keys())[:20]
+        result = data.get("result")
+        result_keys = sorted(str(k) for k in result.keys())[:20] if isinstance(result, dict) else None
+        shape: dict = {"top_level_keys": top_level_keys, "result_keys": result_keys}
+        if isinstance(data.get("error"), (str, int)) or isinstance(data.get("error_description"), str):
+            shape["error"] = str(data.get("error"))[:200]
+            shape["error_description"] = str(data.get("error_description"))[:200]
+        return shape
+
+    @classmethod
+    def _malformed_response_message(cls, method: str, data: dict) -> str:
+        shape = cls._safe_response_shape(data)
+        return f"bitrix REST method {method} returned HTTP 200 without a recognizable created-entity id; observed response shape: {shape}"
+
+    @classmethod
+    def _log_malformed_response(cls, method: str, data: dict, *, xml_id: str = "") -> None:
+        """Production diagnostics closure: HTTP 200 alone is never treated
+        as proof of success (see the callers above, which always require a
+        concrete extracted id before proceeding) -- this additionally
+        makes the exact unexpected response SHAPE observable in
+        application logs (captured by Railway) the moment it happens,
+        without waiting for another production incident report. ``xml_id``
+        (when supplied) already embeds this write's idempotency key --
+        see ``_idempotency_xml_id`` -- so it doubles as the correlation
+        handle back to the originating request without threading a new
+        parameter through the whole call chain."""
+        shape = cls._safe_response_shape(data)
+        logger.warning(
+            "bitrix_malformed_create_response method=%s xml_id=%s shape=%s",
+            method,
+            xml_id or "(n/a)",
+            shape,
+        )

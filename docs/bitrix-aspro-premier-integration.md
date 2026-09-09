@@ -209,7 +209,7 @@ client/architecture):
 | Step | REST method | Purpose |
 |------|-------------|---------|
 | idempotency check | `catalog.product.list` (filter `xmlId`) | has this idempotency key already created a product? |
-| product create | `catalog.product.add` | base product: `name`, `active`, BRAND (`property100`) |
+| product create | `catalog.product.add` | base product: `name`, `active`, BRAND (`property100`); response nests the created product under `"element"` (per Bitrix's documented contract — NOT `"product"`) |
 | idempotency check | `catalog.product.offer.list` (filter `parentId`) | does this product already have an offer? |
 | offer create | `catalog.product.offer.add` | SKU/article (`property283`) linked via `parentId` |
 | idempotency check | `catalog.price.list` (filter `productId`+`catalogGroupId`) | is the retail price already recorded? |
@@ -282,6 +282,35 @@ Regression coverage: `tests/test_bitrix_live_product_create_write.py`'s
 Bitrix required-`select`-field contract, plus a diagnostics assertion
 that a genuine 400 now surfaces `error_description`/error code instead of
 bare `BAD_REQUEST`).
+
+### Production defect closure — `product_create_malformed_response` despite HTTP 200
+
+After the above fix shipped, the first real LIVE controlled write got past
+the idempotency lookup and reached `catalog.product.add` — both
+`catalog.product.list` and `catalog.product.add` returned HTTP 200 — yet
+Panda reported `product_create_malformed_response (BitrixValidationError)`
+and no product appeared in Bitrix. Root cause: Bitrix's documented REST
+contract for `catalog.product.add` nests the created product under
+**`"element"`**, not `"product"` (unlike `catalog.product.offer.add` ->
+`"offer"` and `catalog.price.add` -> `"price"`, which were already
+correct). The adapter's own fail-closed check (never treat HTTP 200 alone
+as success; only a concretely extracted id counts) worked exactly as
+designed — it correctly refused to claim success it could not verify —
+but was checking the wrong key, so a genuinely successful create was
+never recognized. Fixed by extracting the created product id from
+`result.element.id` instead of `result.product.id`; the offer/price
+extraction keys were already correct and untouched. Also adds a bounded,
+sanitized diagnostic log (`bitrix_malformed_create_response`, REST
+method + top-level/`result` key names + Bitrix `error`/`error_description`
+if present — never the webhook URL, credentials, or authorization data)
+whenever any of the three create steps returns HTTP 200 without a
+recognizable id, so any future contract mismatch is immediately
+observable in application logs without waiting for another production
+report. Regression coverage: `tests/test_bitrix_live_product_create_write.py`'s
+`MalformedHttp200ResponseTests` (reproduces the exact wrong-key defect,
+an empty/malformed `result`, and confirms the real `"element"` shape is
+now recognized as success — plus that no false `WRITE_VERIFIED` is ever
+returned without a concrete id).
 
 ## Product Intelligence Bridge (Block 5.6)
 

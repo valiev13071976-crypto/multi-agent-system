@@ -109,11 +109,23 @@ class _RecordingTransport:
     a fresh adapter instance is constructed per call, so it can never rely
     on its own memory across calls)."""
 
-    def __init__(self, *, offer_should_fail: bool = False, price_should_fail: bool = False, product_error: dict | None = None):
+    def __init__(
+        self,
+        *,
+        offer_should_fail: bool = False,
+        price_should_fail: bool = False,
+        product_error: dict | None = None,
+        product_add_response_key: str | None = None,
+    ):
         self.calls: list[tuple[str, dict]] = []
         self.offer_should_fail = offer_should_fail
         self.price_should_fail = price_should_fail
         self.product_error = product_error
+        # Lets tests reproduce the exact malformed-shape defect (a real
+        # HTTP 200 whose body nests the created product under the WRONG
+        # key, e.g. the pre-fix adapter's own "product" assumption) without
+        # ever needing a genuine Bitrix error envelope.
+        self.product_add_response_key = product_add_response_key
         self.product_add_count = 0
         self.offer_add_count = 0
         self.price_add_count = 0
@@ -189,7 +201,18 @@ class _RecordingTransport:
             self._next_id += 1
             record = {"id": product_id, "name": body["fields"]["name"], "active": body["fields"]["active"], "property100": body["fields"].get("property100")}
             self._products_by_xml_id[body["fields"]["xmlId"]] = record
-            return httpx.Response(200, json={"result": {"product": {"id": product_id, "name": record["name"], "active": record["active"]}}})
+            # Real Bitrix REST contract (apidocs.bitrix24.com/api-reference/
+            # catalog/product/catalog-product-add.html): catalog.product.add
+            # nests the created product under "element", NOT "product" --
+            # this is the exact real production defect
+            # (product_create_malformed_response): the adapter previously
+            # looked for "product" and never recognized a genuinely
+            # successful HTTP 200 create.
+            if self.product_add_response_key:
+                return httpx.Response(
+                    200, json={"result": {self.product_add_response_key: {"id": product_id, "name": record["name"], "active": record["active"]}}}
+                )
+            return httpx.Response(200, json={"result": {"element": {"id": product_id, "name": record["name"], "active": record["active"]}}})
 
         if rest_method == "catalog.product.offer.list":
             parent_id = filt.get(schema.CML2_LINK_REST_FIELD)
@@ -377,6 +400,86 @@ class BitrixApiFailureTests(unittest.TestCase):
         text = format_bitrix_write_result_text(result)
         self.assertIn("не удалась", text)
         self.assertNotIn("Товар создан", text)
+
+
+class MalformedHttp200ResponseTests(unittest.TestCase):
+    """Production defect closure (product_create_malformed_response,
+    request_id observed with HTTP 200 on both catalog.product.list and
+    catalog.product.add, yet no product ever appeared in Bitrix): proves
+    HTTP 200 is never treated as proof of success, only a concretely
+    extracted id is -- and reproduces the exact real defect (the adapter
+    previously looked for "product" instead of Bitrix's real "element"
+    key) end to end."""
+
+    def test_the_real_previously_wrong_response_key_reproduces_the_defect_and_fails_closed(self):
+        transport = _RecordingTransport(product_add_response_key="product")
+        with _LiveEnv():
+            webhook_url = os.environ["BITRIX_WEBHOOK_URL"]
+            with self.assertLogs("integrations.bitrix.live_adapter", level="WARNING") as log_ctx:
+                with patch.object(BoundedHttpClient, "request", side_effect=transport):
+                    bridge, _ = _bridge_and_activation()
+                    result = execute_single_product_write(
+                        bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True
+                    )
+
+        self.assertEqual(result["status"], STATUS_WRITE_FAILED)
+        self.assertFalse(result["mutated"])
+        self.assertEqual(result["error"], "product_create_malformed_response")
+        # catalog.product.add was reached and returned HTTP 200, but no
+        # offer/price step must ever be attempted without a concrete id.
+        methods_called = [m for m, _ in transport.calls]
+        self.assertEqual(methods_called, ["catalog.product.list", "catalog.product.add"])
+        self.assertEqual(transport.offer_add_count, 0)
+        self.assertEqual(transport.price_add_count, 0)
+        text = format_bitrix_write_result_text(result)
+        self.assertIn("product_create_malformed_response", text)
+        self.assertNotIn("WRITE_VERIFIED", str(result["status"]))
+        # Diagnostics closure (requirement 4): the malformed shape itself
+        # -- REST method + bounded/sanitized top-level response keys -- is
+        # observable in application logs, without needing the webhook URL,
+        # credentials, or any other secret.
+        joined_logs = " ".join(log_ctx.output)
+        self.assertIn("catalog.product.add", joined_logs)
+        self.assertIn("result_keys", joined_logs)
+        self.assertNotIn(webhook_url, joined_logs)
+
+    def test_a_response_with_no_result_at_all_also_fails_closed_not_verified(self):
+        transport = _RecordingTransport()
+
+        # Force a response with no usable "result" shape whatsoever --
+        # simulates a genuinely empty/unexpected HTTP 200 body distinct
+        # from any known-wrong key.
+        real_call = transport.__call__
+
+        def _empty_result_for_product_add(method, url, **kwargs):
+            rest_method = url.rsplit("/", 1)[-1].removesuffix(".json")
+            if rest_method == "catalog.product.add":
+                transport.calls.append((rest_method, json.loads(json.dumps(kwargs.get("json_body") or {}))))
+                transport.product_add_count += 1
+                return httpx.Response(200, json={"result": {}})
+            return real_call(method, url, **kwargs)
+
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=_empty_result_for_product_add):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertEqual(result["status"], STATUS_WRITE_FAILED)
+        self.assertEqual(result["error"], "product_create_malformed_response")
+        self.assertNotEqual(result["status"], STATUS_WRITE_VERIFIED)
+
+    def test_the_real_documented_element_key_is_now_recognized_as_success(self):
+        """The exact real successful catalog.product.add response shape
+        (apidocs.bitrix24.com/api-reference/catalog/product/catalog-
+        product-add.html): {"result": {"element": {"id": ..., ...}}}."""
+        transport = _RecordingTransport()  # defaults to the real "element" key
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
+
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertEqual(result["bitrix_product_id"], str(CREATED_PRODUCT_ID))
+        _, product_body = next((m, b) for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"]["name"], TARGET_TITLE)
 
 
 class PartialFailureAndResumableRetryTests(unittest.TestCase):
