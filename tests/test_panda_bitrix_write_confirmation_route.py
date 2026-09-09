@@ -48,6 +48,15 @@ NOUN_FORM_CONFIRMATION_TEXT = (
     f"Розничная цена {USER_RETAIL_PRICE_RUB} \u20bd."
 )
 
+# The byte-exact production confirmation that STILL did not reach the
+# governed write after the noun-form phrases above were added: it qualifies
+# the noun ("реальную запись"), so no adjacent verb+noun phrase matched, and
+# it carries no retail price of its own (the prepared card's persisted
+# preview price must be reused).
+PRODUCTION_CONFIRMATION_TEXT = (
+    "Подтверждаю. Выполни реальную запись этого подготовленного товара в Bitrix/Aspro."
+)
+
 
 class ExplicitWriteConfirmationExecutesGovernedWriteTests(unittest.IsolatedAsyncioTestCase):
     async def test_noun_form_confirmation_writes_the_prepared_card_once(self):
@@ -141,6 +150,78 @@ class ExplicitWriteConfirmationExecutesGovernedWriteTests(unittest.IsolatedAsync
         self.assertEqual(repeat.metadata.get("action_decision"), CALL_CONTROLLED_BITRIX_WRITE)
         self.assertEqual(len(store.catalog("tenant-a")), after_first)
         self.assertIn("уже существует", repeat.text)
+
+
+class ProductionQualifiedNounConfirmationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_production_confirmation_text_executes_the_governed_write_exactly_once(self):
+        search_provider = FakeSearchProvider(
+            {f"{TARGET_BRAND} {TARGET_SKU}": [fake_result(RESEARCH_URL, title=f"LG {TARGET_SKU}")]}
+        )
+        bridge, store = _bitrix_bridge()
+        panda, artifact_service = _panda(bitrix_bridge=bridge, search_provider=search_provider)
+        ref = await _register_upload(
+            artifact_service, tenant="tenant-a", owner="u1", conv="c1", filename="LG.xlsx", content=_price_list_bytes()
+        )
+        await panda.respond(
+            ConversationRequest(
+                text=PREVIEW_TURN_TEXT,
+                tenant_id="tenant-a",
+                user_id="u1",
+                request_id="r1",
+                conversation_id="c1",
+                attachment_refs=(ref,),
+            )
+        )
+        await panda.respond(
+            ConversationRequest(
+                text=ENRICHMENT_TURN_TEXT,
+                tenant_id="tenant-a",
+                user_id="u1",
+                request_id="r2",
+                conversation_id="c1",
+            )
+        )
+        task = panda._action_store.get(tenant_id="tenant-a", owner_id="u1", conversation_id="c1")  # noqa: SLF001
+        prepared = dict(task.parameters["bitrix_enrichment_write_request"])
+        searches_after_enrichment = len(search_provider.queries)
+        before = len(store.catalog("tenant-a"))
+
+        writes: list[dict] = []
+        real_sync_product = bridge.sync_product
+
+        def _spy_sync_product(**kwargs):
+            writes.append(dict(kwargs.get("canonical_product") or {}))
+            return real_sync_product(**kwargs)
+
+        bridge.sync_product = _spy_sync_product
+
+        confirmation = await panda.respond(
+            ConversationRequest(
+                text=PRODUCTION_CONFIRMATION_TEXT,
+                tenant_id="tenant-a",
+                user_id="u1",
+                request_id="r3",
+                conversation_id="c1",
+            )
+        )
+
+        self.assertEqual(confirmation.metadata.get("action_decision"), CALL_CONTROLLED_BITRIX_WRITE)
+        self.assertNotIn("жду вашего подтверждения", confirmation.text)
+        # The existing governed write ran exactly once.
+        self.assertEqual(len(writes), 1)
+        self.assertTrue((confirmation.metadata.get("bitrix_write_result") or {}).get("mutated"))
+        self.assertEqual(len(store.catalog("tenant-a")) - before, 1)
+
+        # It wrote the persisted prepared card, reusing the retail price
+        # captured earlier (this message states none), and neither search
+        # nor enrichment ran again on the confirmation turn.
+        canonical = writes[0]
+        self.assertEqual(canonical.get("sku"), prepared.get("sku"))
+        content = canonical.get("content") or {}
+        self.assertEqual(content.get("short_description"), prepared.get("short_description"))
+        self.assertEqual(content.get("detailed_description"), prepared.get("detailed_description"))
+        self.assertEqual((canonical.get("price") or {}).get("selling_price"), USER_RETAIL_PRICE_RUB)
+        self.assertEqual(len(search_provider.queries), searches_after_enrichment)
 
 
 if __name__ == "__main__":

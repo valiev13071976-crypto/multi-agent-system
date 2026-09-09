@@ -508,6 +508,20 @@ _BITRIX_CREATE_VERB_STEMS = (
     "write the product",
     "write this prepared product",
 )
+# Production defect closure: the phrases above only match when the action
+# verb and the write noun are ADJACENT, but the real production
+# confirmation qualifies the noun -- "Подтверждаю. Выполни РЕАЛЬНУЮ запись
+# этого подготовленного товара в Bitrix/Aspro." -- so none of them matched
+# and the turn fell through to the FAMILY_EXCEL preview again. Allow a
+# couple of qualifier words between an explicit perform/do verb and the
+# write noun. Still requires a real action verb (never a bare "запись"),
+# and the approval marker + Bitrix/Aspro target are checked separately.
+_BITRIX_WRITE_ACTION_RE = re.compile(
+    r"\b(выполн\w+|сделай|сделать|произвед\w+|запусти)\s+(?:[\w-]+\s+){0,2}запис"
+    r"|\b(perform|execute|do|make)\s+(?:[\w-]+\s+){0,2}write"
+    r"|\bwrite\s+(?:[\w-]+\s+){0,2}(product|card|item)\b",
+    re.I,
+)
 # Fail closed: an explicit "do NOT write" in the same message always wins
 # over a confirmation phrase above (the enrichment/preview replies this
 # conversation flow produces routinely end with "Ничего в Bitrix не
@@ -698,7 +712,7 @@ def is_explicit_bitrix_write_confirmation(text: str) -> bool:
         return False
     if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
         return False
-    return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS)
+    return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS) or bool(_BITRIX_WRITE_ACTION_RE.search(blob))
 
 
 def is_explicit_product_enrichment_request(text: str) -> bool:
