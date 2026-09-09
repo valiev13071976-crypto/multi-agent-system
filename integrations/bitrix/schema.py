@@ -222,6 +222,7 @@ narrative.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 
@@ -302,6 +303,77 @@ class SectionResolutionError(Exception):
         super().__init__(message or code)
 
 
+# Production defect closure (no_matching_section_found on a HTTP 200
+# catalog.section.list): a supplier price list names its categories in its
+# OWN vocabulary/language ("TV", "Television", "Телевизор"), while the
+# installation's sections are the shop's own names ("Телевизоры"), so an
+# exact string equality between the two essentially never matches and every
+# product failed closed before any write. These two generic, installation-
+# independent layers close that gap WITHOUT ever fuzzy-matching (which
+# could silently land a product in a wrong section):
+#
+#   1. ``_normalize_section_term`` -- casefold, punctuation -> space,
+#      collapse whitespace and strip one trailing plural marker per token,
+#      so "Телевизоры" and "Телевизор" (or "TVs" and "TV") are the same
+#      term. Whole-term comparison only, never substring: "Телевизоры и
+#      видео" stays a different term than "Телевизоры".
+#   2. ``CATEGORY_CONCEPT_ALIASES`` -- a small, generic cross-language
+#      vocabulary of product-category concepts. A candidate and a section
+#      match when both normalize to the SAME concept. Vocabulary this table
+#      does not know simply falls through and fails closed exactly as
+#      before -- nothing is ever guessed, and no section id, brand, SKU or
+#      EAN is encoded here.
+#
+# Both layers still require EXACTLY ONE surviving section, otherwise the
+# same fail-closed SectionResolutionError as before.
+_PLURAL_MARKERS = ("ами", "ями", "ов", "ев", "ы", "и", "а", "я", "s")
+
+
+def _normalize_section_term(text: str) -> str:
+    blob = re.sub(r"[^\w\s-]+", " ", str(text or "").strip().casefold().replace("ё", "е"))
+    tokens = []
+    for token in blob.split():
+        for marker in _PLURAL_MARKERS:
+            if len(token) > 4 and token.endswith(marker):
+                token = token[: -len(marker)]
+                break
+        tokens.append(token)
+    return " ".join(tokens)
+
+
+CATEGORY_CONCEPT_ALIASES: tuple[tuple[str, ...], ...] = (
+    ("tv", "tv set", "television", "телевизор", "телевизоры", "телеви"),
+    ("smartphone", "mobile phone", "cellphone", "смартфон", "телефон"),
+    ("laptop", "notebook", "ноутбук"),
+    ("monitor", "монитор"),
+    ("tablet", "планшет"),
+    ("headphones", "headset", "earphones", "наушник", "наушники"),
+    ("speaker", "soundbar", "audio", "колонка", "колонки", "саундбар", "аудио"),
+    ("camera", "фотоаппарат", "камера"),
+    ("printer", "принтер"),
+    ("refrigerator", "fridge", "холодильник"),
+    ("washing machine", "washer", "стиральная машина"),
+    ("dishwasher", "посудомоечная машина"),
+    ("oven", "духовой шкаф", "духовка"),
+    ("vacuum cleaner", "пылесос"),
+    ("microwave", "микроволновая печь", "микроволновка"),
+    ("air conditioner", "кондиционер"),
+    ("smartwatch", "watch", "смарт-часы", "часы"),
+    ("console", "game console", "игровая приставка", "приставка"),
+    ("accessories", "аксессуар", "аксессуары"),
+)
+
+_CONCEPT_BY_TERM: dict[str, str] = {}
+for _aliases in CATEGORY_CONCEPT_ALIASES:
+    _concept = _aliases[0]
+    for _alias in _aliases:
+        _CONCEPT_BY_TERM[_normalize_section_term(_alias)] = _concept
+
+
+def _section_concept(text: str) -> str:
+    return _CONCEPT_BY_TERM.get(_normalize_section_term(text), "")
+
+
 def resolve_section_id(*, category: str = "", subcategory: str = "", sections: list) -> dict:
     """Deterministically resolve a Panda category/subcategory pair to one
     EXISTING Bitrix section id, from an already-fetched live/fixture
@@ -333,6 +405,17 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
             by_name.setdefault(name, []).append(section)
 
     matches = by_name.get(candidate.casefold()) or []
+    match_kind = "exact_name"
+    if not matches:
+        # Layer 1: same term after normalization (plural/punctuation only).
+        wanted = _normalize_section_term(candidate)
+        matches = [s for s in sections if wanted and _normalize_section_term(s.get("name")) == wanted]
+        match_kind = "normalized_name"
+    if not matches:
+        # Layer 2: same product-category concept in either language.
+        concept = _section_concept(candidate)
+        matches = [s for s in sections if concept and _section_concept(s.get("name")) == concept]
+        match_kind = "category_concept"
     if len(matches) == 1:
         match = matches[0]
         return {
@@ -340,6 +423,7 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
             "name": match.get("name"),
             "code": match.get("code"),
             "matched_on": candidate,
+            "match_kind": match_kind,
         }
     if len(matches) > 1:
         raise SectionResolutionError(
