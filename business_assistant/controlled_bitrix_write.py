@@ -133,6 +133,21 @@ _WRITE_FAILURE_HINTS: dict[str, str] = {
     ),
     "INTEGRATION_ENVIRONMENT_MISMATCH": "несоответствие окружения (LIVE/FIXTURE) для этого подключения",
     "INTEGRATION_CROSS_TENANT": "подключение принадлежит другому тенанту",
+    "product_create_malformed_response": (
+        "Bitrix вернул HTTP 200 на создание товара, но без распознаваемого "
+        "ID созданного товара — товар НЕ считается созданным; см. "
+        "application-логи (Railway) с меткой bitrix_malformed_create_response "
+        "для точной формы фактического ответа Bitrix"
+    ),
+    "offer_create_malformed_response": (
+        "Bitrix вернул HTTP 200 на создание торгового предложения (SKU), но "
+        "без распознаваемого ID — см. application-логи с меткой "
+        "bitrix_malformed_create_response"
+    ),
+    "price_create_malformed_response": (
+        "Bitrix вернул HTTP 200 на запись цены, но без распознаваемого ID — "
+        "см. application-логи с меткой bitrix_malformed_create_response"
+    ),
 }
 
 
