@@ -752,7 +752,20 @@ class WorkflowPandaConversationGateway:
             # dict) so the LATER, separate explicit "Подтверждаю: создай
             # этот товар в Bitrix..." confirmation turn writes the SAME
             # enriched fields, not just the original bare XLSX row.
+            #
+            # ``self._action_store.put(task)`` MUST happen before
+            # ``mark_executed`` -- ``ActiveTaskStore.get``/``put`` both
+            # return/store a ``snapshot()`` (a shallow copy), so ``task``
+            # here is already a copy distinct from whatever is currently
+            # stored. ``mark_executed`` re-fetches its own fresh snapshot
+            # from the store (see the FAMILY_EXCEL/ROW_FOUND callsite
+            # above, which follows the same put-before-mark_executed
+            # pattern) -- without persisting this mutation first, that
+            # re-fetch would silently discard the enriched write request
+            # and the later confirmation turn would fall back to the
+            # bare, un-enriched XLSX row.
             task.parameters["bitrix_enrichment_write_request"] = serialize_write_request(result["write_request"])
+            self._action_store.put(task)
             mark_executed(self._action_store, task, failed=False)
 
         return ConversationResult(

@@ -23,6 +23,7 @@ from business_assistant.action_continuation import (
     ActiveTask,
     ActiveTaskStore,
     continuation_decision,
+    mark_executed,
     resolve_action_turn,
     scene_mentions,
 )
@@ -539,6 +540,66 @@ class ConversationalIntentTests(unittest.TestCase):
     def test_wolf_is_conversational_not_business_write(self):
         self.assertEqual(classify_intent(WOLF), INTENT_CONVERSATIONAL)
         self.assertNotEqual(classify_intent("измени цену товара на Ozon"), INTENT_CONVERSATIONAL)
+
+
+class MarkExecutedPersistsCallerMutationsTests(unittest.TestCase):
+    """Regression (product enrichment pipeline follow-up): ``ActiveTaskStore.
+    get``/``put`` both return/store a ``snapshot()`` (a shallow COPY of the
+    task, including a fresh copy of ``parameters``). ``mark_executed`` used
+    to re-fetch its OWN snapshot from the store before mutating/saving it --
+    if a caller had already mutated ``task.parameters`` in place on its OWN
+    (already-distinct) copy without first calling ``store.put(task)``, that
+    mutation was silently discarded: ``mark_executed``'s re-fetch produced a
+    completely different dict instance that never saw the caller's edit.
+
+    This exact bug made ``business_assistant.conversation_gateway.
+    WorkflowPandaConversationGateway._invoke_product_enrichment``'s enriched
+    write request vanish before the later Bitrix-write confirmation turn
+    could ever read it back -- see the module-level fix requiring
+    ``self._action_store.put(task)`` before ``mark_executed(...)``."""
+
+    def _seeded_task(self, store: ActiveTaskStore) -> ActiveTask:
+        task = ActiveTask(
+            task_id="t1",
+            tenant_id="tenant-a",
+            owner_id="u1",
+            conversation_id="c1",
+            family="product",
+            tool_id="data_intel.product_catalog_assist",
+            operation="assist",
+            goal="g",
+        )
+        store.put(task)
+        return store.get(tenant_id="tenant-a", owner_id="u1", conversation_id="c1")
+
+    def test_parameter_mutation_without_explicit_put_is_lost_pre_fix_shaped_repro(self):
+        """Documents the EXACT failure shape the bug produced: mutating a
+        store-returned task's ``parameters`` and calling ``mark_executed``
+        alone (no intervening ``store.put``) is NOT sufficient for that
+        mutation to survive -- callers MUST call ``store.put(task)``
+        themselves first (this is the fix applied in
+        ``conversation_gateway._invoke_product_enrichment``)."""
+        store = ActiveTaskStore()
+        task = self._seeded_task(store)
+        task.parameters["bitrix_enrichment_write_request"] = {"sku": "ABC"}
+        # Deliberately NOT calling store.put(task) here -- this reproduces
+        # the exact ordering the pre-fix code used.
+        mark_executed(store, task, failed=False)
+        persisted = store.get(tenant_id="tenant-a", owner_id="u1", conversation_id="c1")
+        self.assertNotIn("bitrix_enrichment_write_request", persisted.parameters)
+
+    def test_parameter_mutation_with_explicit_put_before_mark_executed_survives(self):
+        """The fix: ``store.put(task)`` immediately after mutating
+        ``task.parameters`` and BEFORE ``mark_executed`` makes the mutation
+        durable across the re-fetch inside ``mark_executed``."""
+        store = ActiveTaskStore()
+        task = self._seeded_task(store)
+        task.parameters["bitrix_enrichment_write_request"] = {"sku": "ABC"}
+        store.put(task)
+        mark_executed(store, task, failed=False)
+        persisted = store.get(tenant_id="tenant-a", owner_id="u1", conversation_id="c1")
+        self.assertEqual(persisted.parameters.get("bitrix_enrichment_write_request"), {"sku": "ABC"})
+        self.assertEqual(persisted.execution_count, 1)
 
 
 class ContinuationAmbiguityTests(unittest.TestCase):
