@@ -34,6 +34,7 @@ from tools.adapters import descriptor_from_side_effect, github_issue_labels_desc
 from tools.gateway import ToolGateway
 from tools.registry import ToolRegistry
 from tools.router import ToolRouter
+from tools.search.factory import build_search_provider
 from observability.runtime import ObservabilityRuntime, build_observability_runtime
 from workflow.engine import WorkflowEngine
 from workflow.state_manager import StateManager
@@ -503,6 +504,11 @@ def build_tool_gateway(
 
     tool_registry = ToolRegistry()
     gateway = ToolGateway(
+        # Real backend when SEARCH_PROVIDER/SEARCH_API_KEY are configured
+        # (e.g. Railway's SEARCH_PROVIDER=brave); NullSearchProvider
+        # otherwise -- see tools.search.factory.build_search_provider's
+        # own docstring for the exact fail-safe fallback rules.
+        search_provider=build_search_provider(env),
         registry=tool_registry,
         side_effect_executor=executor,
         gate=gate,

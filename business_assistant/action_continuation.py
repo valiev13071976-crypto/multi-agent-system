@@ -84,6 +84,18 @@ FAIL_UNAVAILABLE = "FAIL_UNAVAILABLE"
 # dispatch it through a dedicated, unambiguous decision instead of the
 # generic tool-invocation path.
 CALL_CONTROLLED_BITRIX_WRITE = "CALL_CONTROLLED_BITRIX_WRITE"
+# Product enrichment pipeline follow-up: an explicit instruction to prepare
+# a COMPLETE product card (research/characteristics/content/media/SEO --
+# ``product_enrichment`` package) for the SAME single product a prior
+# ``data.excel_assistant`` ROW_FOUND preview identified -- e.g. "Подготовь
+# полную карточку товара". Deliberately NOT ``CALL_CONTROLLED_BITRIX_WRITE``
+# (enrichment never mutates Bitrix -- see ``is_explicit_product_enrichment_
+# request`` below, which never matches an explicit Bitrix-write
+# confirmation) and NOT ``CALL_TOOL`` (enrichment is not a ToolGateway-
+# registered tool either -- it composes ToolGateway calls internally, but
+# is invoked directly by ``WorkflowPandaConversationGateway``, exactly like
+# ``CALL_CONTROLLED_BITRIX_WRITE``).
+CALL_PRODUCT_ENRICHMENT = "CALL_PRODUCT_ENRICHMENT"
 
 STATUS_DRAFT = "DRAFT"
 STATUS_WAITING_FOR_INPUT = "WAITING_FOR_INPUT"
@@ -458,6 +470,24 @@ _CONFIRMED_RETAIL_PRICE_RE = re.compile(
     r"(розничн\w*|продажн\w*|retail|selling)\D{0,20}?(\d[\d\s]*(?:[.,]\d+)?)", re.I
 )
 
+# Product enrichment pipeline follow-up: two independent stem groups, BOTH
+# required in the same message -- an enrichment "prepare/enrich" verb AND
+# an explicit "full/complete card" (or "characteristics"/"specification")
+# target noun. Deliberately narrower than ``_PRODUCT_INTENT_STEMS``'
+# "подготовь карточки"/"карточки товар" (Block 5.5's batch-catalog
+# family) -- those are plural/different phrasing and never match here; the
+# task's own literal example ("Подготовь полную карточку товара") is the
+# calibration point for this pair.
+_ENRICHMENT_VERB_STEMS = ("подготов", "обогат", "enrich", "prepare")
+_ENRICHMENT_TARGET_STEMS = (
+    "полную карточ",
+    "полная карточ",
+    "complete card",
+    "complete product card",
+    "full card",
+    "full product card",
+)
+
 # Block 5.2: a bare http(s) URL in the message is the strongest, fully
 # deterministic acquisition signal -- mirrors how a spreadsheet attachment is
 # the strongest Excel signal (spec section 20: "no technical mode picker").
@@ -612,6 +642,26 @@ def is_explicit_bitrix_write_confirmation(text: str) -> bool:
     if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
         return False
     return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS)
+
+
+def is_explicit_product_enrichment_request(text: str) -> bool:
+    """True only for an explicit instruction to prepare/enrich a COMPLETE
+    product card -- e.g. 'Подготовь полную карточку товара'. Deliberately
+    distinct from ``is_explicit_bitrix_write_confirmation`` (that one
+    additionally requires an explicit Bitrix target + confirm marker) --
+    this NEVER writes anything to Bitrix by itself; it only runs the
+    ``product_enrichment`` pipeline and shows a complete preview
+    (requirement 12: "enrichment is NOT approval to write"). Requires
+    BOTH an enrichment verb and an explicit "full/complete card" target in
+    the SAME message, so it can never be confused with Block 5.5's own
+    "Подготовь карточки товаров" (batch product-catalog family, plural,
+    different phrasing) or a bare "подготовь"/"обогати" alone."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if not _has_stem(blob, _ENRICHMENT_VERB_STEMS):
+        return False
+    return _has_stem(blob, _ENRICHMENT_TARGET_STEMS)
 
 
 def _extract_confirmed_retail_price(text: str) -> str:
@@ -1027,6 +1077,65 @@ def _bitrix_missing_context_decision(active: ActiveTask | None) -> ActionDecisio
     )
 
 
+def _enrichment_missing_context_decision(active: ActiveTask | None) -> ActionDecision:
+    return ActionDecision(
+        decision=ANSWER_TEXT,
+        readiness=NOT_EXECUTABLE,
+        continuation=NEW_TASK,
+        task=active,
+        user_message=(
+            "Не вижу товара для подготовки полной карточки. Сначала приложите "
+            "файл и уточните конкретный товар (например, его артикул), затем "
+            "попросите подготовить полную карточку."
+        ),
+        extra_llm=False,
+    )
+
+
+def resolve_product_enrichment_request(
+    text: str,
+    *,
+    active: ActiveTask | None,
+    store: ActiveTaskStore,
+    request_id: str = "",
+) -> ActionDecision:
+    """Deterministic routing for "Подготовь полную карточку товара..."
+    (product enrichment pipeline follow-up). Resolves the SAME
+    previously-previewed product from the active FAMILY_EXCEL task's
+    ``parameters['bitrix_product_fields']`` -- mirrors
+    ``resolve_bitrix_write_confirmation`` exactly, but dispatches
+    ``CALL_PRODUCT_ENRICHMENT`` (never mutates Bitrix) instead of
+    ``CALL_CONTROLLED_BITRIX_WRITE``."""
+    if active is None or active.family != FAMILY_EXCEL:
+        return _enrichment_missing_context_decision(active)
+
+    fields = dict(active.parameters.get("bitrix_product_fields") or {})
+    if not fields.get("title") or not fields.get("sku"):
+        return _enrichment_missing_context_decision(active)
+
+    retail_price = str(active.parameters.get("bitrix_retail_price_preview") or "")
+    args = {
+        "product_fields": fields,
+        "retail_price": retail_price,
+        "dataset_id": str(active.parameters.get("dataset_id") or ""),
+    }
+    idem = _idempotency_key(request_id, "product_enrichment.prepare_complete_card", args)
+    active.status = STATUS_READY
+    store.put(active)
+    return ActionDecision(
+        decision=CALL_PRODUCT_ENRICHMENT,
+        readiness=READY_TO_EXECUTE,
+        continuation=CONTINUE_ACTIVE_TASK,
+        task=active,
+        arguments=args,
+        tool_id="product_enrichment.prepare_complete_card",
+        operation="prepare_complete_card",
+        extra_llm=False,
+        capability_status=CAPABILITY_AVAILABLE_AND_AUTHORIZED,
+        idempotency_key=idem,
+    )
+
+
 def resolve_bitrix_write_confirmation(
     text: str,
     *,
@@ -1118,6 +1227,22 @@ def resolve_action_turn(
     # bare "да"/"ок"/"давай"/"продолжай"/"делай дальше".
     if is_explicit_bitrix_write_confirmation(current):
         return resolve_bitrix_write_confirmation(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
+
+    # Product enrichment pipeline follow-up: same unconditional, up-front
+    # placement as the Bitrix write confirmation above -- an explicit
+    # "prepare the complete card" instruction must never be reclassified by
+    # a follow-up/continuation guess either. Checked AFTER the Bitrix write
+    # confirmation (so a message that happens to satisfy both -- it never
+    # can, by construction of the two stem sets -- would still prefer the
+    # write path), never fires for a bare verb alone (see the function's
+    # own docstring).
+    if is_explicit_product_enrichment_request(current):
+        return resolve_product_enrichment_request(
             current,
             active=active,
             store=store,

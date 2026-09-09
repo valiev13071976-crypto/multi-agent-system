@@ -272,6 +272,7 @@ class WorkflowPandaConversationGateway:
         tool_capabilities=None,
         artifact_service=None,
         bitrix_product_bridge=None,
+        media_fetcher=None,
     ):
         self._workflow_engine = workflow_engine
         self._run_router = run_router
@@ -297,6 +298,27 @@ class WorkflowPandaConversationGateway:
         self._action_store = action_store
         self._tool_capabilities = tool_capabilities
         self._executed_keys: set[str] = set()
+        # Product enrichment pipeline follow-up: process-lifetime cache
+        # keyed by (tenant_id, identity_key) -- mirrors ``ActiveTaskStore``'s
+        # own simplicity (requirement 13: avoid repeating research/media
+        # work for the exact same product; not a new infrastructure stack).
+        from product_enrichment.cache import EnrichmentCache
+
+        self._enrichment_cache = EnrichmentCache()
+        # Product enrichment "MEDIA GAP" closure: the EXISTING, unchanged
+        # product_enrichment.media_fetch.GovernedImageFetcher (SSRF-safe
+        # raw binary download -- see its own module docstring) is the one
+        # capability this conversational path previously never
+        # constructed/passed at all, so image candidates research
+        # discovers had nowhere to go. None-safe injection point for
+        # tests (a FakeImageFetcher/mocked-transport instance); defaults
+        # to a real fetcher in production -- construction itself makes no
+        # network call.
+        if media_fetcher is None:
+            from product_enrichment.media_fetch import GovernedImageFetcher
+
+            media_fetcher = GovernedImageFetcher()
+        self._media_fetcher = media_fetcher
         self.last_action_decision = None
 
     def _record_latency(self, t0: float, follow_up_ms: int) -> None:
@@ -518,6 +540,13 @@ class WorkflowPandaConversationGateway:
             if str(data.get("status") or "") == "ROW_FOUND":
                 product_fields = data.get("product_fields")
                 if isinstance(product_fields, dict) and product_fields:
+                    if task.parameters.get("bitrix_product_fields") != dict(product_fields):
+                        # Product enrichment pipeline follow-up: a NEW
+                        # ROW_FOUND for a DIFFERENT product must never let a
+                        # PRIOR product's enrichment (characteristics/
+                        # content/media) leak into this one's later write
+                        # confirmation.
+                        task.parameters.pop("bitrix_enrichment_write_request", None)
                     task.parameters["bitrix_product_fields"] = dict(product_fields)
                     changed = True
                 retail_preview = str(data.get("retail_price_preview") or "")
@@ -622,11 +651,31 @@ class WorkflowPandaConversationGateway:
             )
 
         args = dict(action.arguments or {})
-        write_request = build_write_request_from_fields(
-            dict(args.get("product_fields") or {}),
-            tenant_id=str(request.tenant_id or ""),
-            retail_price=str(args.get("retail_price") or ""),
-        )
+        retail_price = str(args.get("retail_price") or "")
+        # Product enrichment pipeline follow-up: if this SAME task already
+        # went through "Подготовь полную карточку..." (CALL_PRODUCT_ENRICHMENT,
+        # see ``_invoke_product_enrichment``), reuse that enriched write
+        # request (characteristics/content/media -- see
+        # ``product_enrichment_bridge.build_enriched_write_request``)
+        # instead of rebuilding a bare one from ``product_fields`` alone.
+        # The confirmation turn's own retail price always wins (the owner
+        # may confirm a different price than the one shown during
+        # enrichment preview).
+        enriched = dict(getattr(task, "parameters", {}).get("bitrix_enrichment_write_request") or {})
+        if enriched:
+            import dataclasses
+
+            from business_assistant.product_enrichment_bridge import deserialize_write_request
+
+            write_request = deserialize_write_request(enriched)
+            if retail_price:
+                write_request = dataclasses.replace(write_request, retail_price=retail_price)
+        else:
+            write_request = build_write_request_from_fields(
+                dict(args.get("product_fields") or {}),
+                tenant_id=str(request.tenant_id or ""),
+                retail_price=retail_price,
+            )
         result = execute_single_product_write(
             self._bitrix_bridge,
             tenant_id=str(request.tenant_id or ""),
@@ -645,6 +694,87 @@ class WorkflowPandaConversationGateway:
                 "action_decision": CALL_CONTROLLED_BITRIX_WRITE,
                 "artifacts": [],
                 "bitrix_write_result": result,
+            },
+        )
+
+    async def _invoke_product_enrichment(
+        self, request: ConversationRequest, action
+    ) -> ConversationResult:
+        """Product enrichment pipeline follow-up: dispatches
+        ``action.decision == CALL_PRODUCT_ENRICHMENT`` straight to
+        ``business_assistant.product_enrichment_bridge.prepare_complete_card``
+        -- NOT through ``self._tool_gateway`` (mirrors
+        ``_invoke_controlled_bitrix_write``'s own reasoning: this composes
+        ToolGateway calls internally for research, but is not itself a
+        ToolGateway-registered tool). NEVER mutates Bitrix -- at most calls
+        the existing, read-only ``prepare_single_product_write`` for a
+        resolved-section preview."""
+        from business_assistant.action_continuation import CALL_PRODUCT_ENRICHMENT, mark_executed
+        from business_assistant.product_enrichment_bridge import prepare_complete_card, serialize_write_request
+
+        task = action.task
+        idem = str(action.idempotency_key or request.request_id or "")
+        if idem and idem in self._executed_keys:
+            return ConversationResult(
+                text="Полная карточка для этого товара уже была подготовлена ранее.",
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CALL_PRODUCT_ENRICHMENT, "duplicate": True, "artifacts": []},
+            )
+
+        args = dict(action.arguments or {})
+        product_fields = dict(args.get("product_fields") or {})
+        retail_price = str(args.get("retail_price") or "")
+        tenant_id = str(request.tenant_id or "")
+        try:
+            result = await prepare_complete_card(
+                tenant_id=tenant_id,
+                product_fields=product_fields,
+                retail_price=retail_price,
+                bitrix_bridge=self._bitrix_bridge,
+                tool_gateway=self._tool_gateway,
+                media_fetcher=self._media_fetcher,
+                cache=self._enrichment_cache,
+            )
+        except Exception:
+            if task is not None:
+                mark_executed(self._action_store, task, failed=True)
+            return ConversationResult(
+                text="Не удалось подготовить полную карточку товара — попробуйте ещё раз.",
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CALL_PRODUCT_ENRICHMENT, "artifacts": []},
+            )
+
+        if idem:
+            self._executed_keys.add(idem)
+        if task is not None:
+            # Persist the enriched write request (never the raw
+            # dataclasses object -- ``ActiveTask.parameters`` is a plain
+            # dict) so the LATER, separate explicit "Подтверждаю: создай
+            # этот товар в Bitrix..." confirmation turn writes the SAME
+            # enriched fields, not just the original bare XLSX row.
+            #
+            # ``self._action_store.put(task)`` MUST happen before
+            # ``mark_executed`` -- ``ActiveTaskStore.get``/``put`` both
+            # return/store a ``snapshot()`` (a shallow copy), so ``task``
+            # here is already a copy distinct from whatever is currently
+            # stored. ``mark_executed`` re-fetches its own fresh snapshot
+            # from the store (see the FAMILY_EXCEL/ROW_FOUND callsite
+            # above, which follows the same put-before-mark_executed
+            # pattern) -- without persisting this mutation first, that
+            # re-fetch would silently discard the enriched write request
+            # and the later confirmation turn would fall back to the
+            # bare, un-enriched XLSX row.
+            task.parameters["bitrix_enrichment_write_request"] = serialize_write_request(result["write_request"])
+            self._action_store.put(task)
+            mark_executed(self._action_store, task, failed=False)
+
+        return ConversationResult(
+            text=result["text"],
+            task_id=getattr(task, "task_id", None),
+            metadata={
+                "action_decision": CALL_PRODUCT_ENRICHMENT,
+                "artifacts": [],
+                "enrichment_preview": result["enrichment_preview"],
             },
         )
 
@@ -728,6 +858,7 @@ class WorkflowPandaConversationGateway:
             ANSWER_TEXT,
             ASK_CLARIFICATION,
             CALL_CONTROLLED_BITRIX_WRITE,
+            CALL_PRODUCT_ENRICHMENT,
             CALL_TOOL,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
@@ -799,6 +930,18 @@ class WorkflowPandaConversationGateway:
 
         if action.decision == CALL_TOOL and self._tool_gateway is not None:
             result = await self._invoke_tool(request, action)
+            self._record_latency(t0, follow_up_ms)
+            meta = dict(result.metadata or {})
+            meta["follow_up_kind"] = resolution.kind
+            meta["follow_up_target"] = resolution.target
+            return ConversationResult(
+                text=result.text,
+                workflow_id=result.workflow_id,
+                task_id=result.task_id or task_id,
+                metadata=meta,
+            )
+        if action.decision == CALL_PRODUCT_ENRICHMENT:
+            result = await self._invoke_product_enrichment(request, action)
             self._record_latency(t0, follow_up_ms)
             meta = dict(result.metadata or {})
             meta["follow_up_kind"] = resolution.kind

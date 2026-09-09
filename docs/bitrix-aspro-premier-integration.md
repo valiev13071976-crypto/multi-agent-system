@@ -623,6 +623,86 @@ call. All real Bitrix HTTP interaction in every test is a mocked
 transport — zero real network calls, zero real Bitrix mutations, and real
 products 992/993 were never touched by any test or discovery call.
 
+## Product Enrichment Pipeline (supplier XLSX → complete card, pre-Bitrix-write)
+
+Follow-up to the Complete Product Card pass above: when a supplier XLSX
+row only carries basic commercial data (name/SKU/EAN/category/brand/
+purchase price), Panda now enriches it into a complete card — trusted
+research, normalized characteristics, fact-only content, downloaded/
+validated/processed media — **before** the existing controlled-write
+preview, using only already-existing Panda capabilities (governed
+search/`scrape.fetch`, the verified Bitrix characteristic resolver from
+the pass above, `product_media`'s validation/transform primitives). No
+new write path, no new approval gate, no new architecture.
+
+### Target flow
+
+```
+supplier XLSX row (ROW_FOUND preview, unchanged Block 5.5)
+    → "Подготовь полную карточку товара" → CALL_PRODUCT_ENRICHMENT (NEW)
+        → product_enrichment.orchestrator.enrich_product:
+            identity (fail-closed) → research → characteristics → content → media
+        → COMPLETE PREVIEW (identity/classification/commerce/content/
+          physical/characteristics/media/SEO + READY TO WRITE /
+          NOT WRITABLE / MISSING SOURCE DATA) — ZERO Bitrix mutation
+    → "Подтверждаю: создай этот товар в Bitrix..." → CALL_CONTROLLED_BITRIX_WRITE
+      (unchanged, existing governed write path — reuses the enriched
+      SingleProductWriteRequest built above, never a second write path)
+```
+
+### New package: `product_enrichment/`
+
+| Module | Responsibility |
+|---|---|
+| `models.py` | Canonical, category-agnostic data model: `ProductIdentityQuery`/`ResolvedIdentity`, `SourceFact` (provenance), `NormalizedCharacteristic`, `ContentDraft`, `MediaAsset`/`MediaResult`, `IdentityConflict`, `EnrichmentResult`. |
+| `identity.py` | Fail-closed identity resolution (brand + model/article, EAN format check); variant-token (screen size, model year) mismatch detection so a similar-looking model is never merged. |
+| `research.py` | `ToolGatewayResearchAdapter` — the one new adapter, composed entirely from the EXISTING `ToolGateway.search()` and the `scrape.fetch` tool; source-priority classification (manufacturer > manufacturer docs > authorized distributor > retail). Fails safe (empty facts) on any search/fetch problem. |
+| `characteristics.py` | Generic label→canonical-key matching, deterministic unit conversion (inches→cm only), multi-source fact merging with conflict detection, and bridging to the verified `integrations.bitrix.schema.CATALOG_CHARACTERISTICS` resolver. Unknown/unverified characteristics are preserved, never guessed onto a property. |
+| `content.py` | Deterministic, template-based Russian content generation — every phrase is built directly from already-verified identity/characteristics; nothing is LLM-authored or invented. |
+| `media_fetch.py` | `GovernedImageFetcher` — the other new adapter: SSRF-safe **raw binary** download (the existing `scrape.fetch` always UTF-8-decodes, which corrupts image bytes), reusing the exact same `tools.url_safety.validate_http_url` boundary, revalidated on every redirect hop. `FakeImageFetcher` for tests. |
+| `media.py` | `MediaAcquisitionService` — download → `product_media.validation.validate_and_extract_image` → reject invalid/too-small/wrong-aspect-ratio → dedup by content hash (`product_media.platform_models.content_hash_bytes`) → `product_media.transform.resize_image` (never upscales) for `preview`/`detail` destinations; extra accepted candidates become `gallery`. The external URL is retained only as provenance — only base64 bytes ever reach a Bitrix write. |
+| `observability.py` | `EnrichmentObserver` — local event log + optional external sink; never logs base64/secret-shaped values. |
+| `cache.py` | `EnrichmentCache` — in-process, `(tenant_id, identity_key)`-keyed reuse of a full `EnrichmentResult`; no new infrastructure stack. |
+| `preview.py` | Renders the complete, Bitrix-mutation-free preview (`enrichment_preview_dict`/`format_enrichment_preview_text`). |
+| `orchestrator.py` | `enrich_product(...)` — the single public entry point wiring all of the above; degrades component-by-component on any failure (search unavailable, one bad image, no Bitrix property for a characteristic) rather than aborting the whole pipeline. |
+
+### Conversational wiring
+
+- `business_assistant/action_continuation.py`: new `CALL_PRODUCT_ENRICHMENT` decision, `is_explicit_product_enrichment_request` (requires BOTH an enrichment verb — "подготов"/"обогат"/"prepare"/"enrich" — AND an explicit "full/complete card" target in the same message), `resolve_product_enrichment_request` (mirrors `resolve_bitrix_write_confirmation`, reusing the same `ActiveTask.parameters["bitrix_product_fields"]`).
+- `business_assistant/conversation_gateway.py`: `_invoke_product_enrichment` runs `business_assistant.product_enrichment_bridge.prepare_complete_card` and persists the resulting enriched `SingleProductWriteRequest` on `task.parameters["bitrix_enrichment_write_request"]`; `_invoke_controlled_bitrix_write` reuses it when present (the confirmation turn's own retail price still wins). Selecting a *different* product (a new `ROW_FOUND`) clears any stale enrichment so it can never leak onto a different product's write.
+- `business_assistant/product_enrichment_bridge.py` (new): builds the identity query from the same flat `product_fields` dict the XLSX row lookup already produces, runs `enrich_product`, merges its output into the EXISTING `SingleProductWriteRequest` (a field the raw row already supplied always wins over enrichment — enrichment only fills gaps), and renders one combined preview message together with the existing `prepare_single_product_write` read-only preview.
+
+### Canonical model extension (media pass-through)
+
+`SingleProductWriteRequest` gained `preview_picture`/`detail_picture`
+(`{"filename", "base64"}` — already-downloaded/validated/processed bytes,
+never a bare URL). `controlled_bitrix_write.py`'s `_canonical_payload` now
+merges a `media_fields` dict into `canonical["media"]`, and
+`execute_single_product_write`/`format_bitrix_write_result_text` surface
+`media_written` (the Bitrix wire field names actually sent) so the
+existing #48 `LiveBitrixAdapter._media_fields` write path — previously
+unreachable from this write path — is now wired end to end.
+
+### Tests
+
+Package-level unit tests (`tests/test_product_enrichment_*.py`) cover
+identity resolution/conflicts, characteristic normalization/merging/
+conflicts, fact-only content generation, the governed binary fetcher
+(mocked `httpx.MockTransport`, zero real network), media acquisition/
+validation/dedup/processing, research source classification and
+fail-safe degradation, full orchestration (including cache reuse and
+observability), and the complete preview renderer.
+`tests/test_bitrix_controlled_write_media_wiring.py` covers the media
+pass-through into the real `catalog.product.add` call shape.
+`tests/test_product_enrichment_bridge.py` covers the bridge module against
+a duck-typed `ToolGateway` double. `tests/test_panda_product_enrichment_conversational.py`
+covers the full conversational flow end to end (enrichment preview never
+mutates Bitrix, idempotent duplicate detection, confirmation reuses the
+enriched request, switching products discards stale enrichment,
+regression: confirming without ever enriching still works unchanged) —
+exclusively against the FIXTURE Bitrix adapter; zero real Bitrix
+mutations and zero real network calls anywhere in this test set.
+
 ## Product Intelligence Bridge (Block 5.6)
 
 `integrations/bitrix/product_bridge.py`'s `BitrixProductBridge` is the one
