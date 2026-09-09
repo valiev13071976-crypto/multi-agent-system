@@ -9,7 +9,7 @@ from __future__ import annotations
 import hashlib
 import re
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Mapping
 
 from agents.routing_requirements import FRESHNESS_CURRENT, derive_task_requirements
@@ -1103,6 +1103,23 @@ def _enrichment_missing_context_decision(active: ActiveTask | None) -> ActionDec
     )
 
 
+def _enrichment_needs_excel_ingestion_first(
+    active: ActiveTask | None, has_spreadsheet_attachment: bool
+) -> bool:
+    """True when an explicit "Подготовь полную карточку товара <SKU>..."
+    request carries its OWN spreadsheet on THIS turn but has no
+    FAMILY_EXCEL context yet -- i.e. the attachment and the enrichment
+    instruction arrived in the SAME message, so nothing has been ingested
+    and ``resolve_product_enrichment_request`` would fail closed on its
+    ``active is None`` guard without ever looking at the attachment. Such a
+    turn must first go through the existing FAMILY_EXCEL ingestion/row
+    lookup (exactly what a "Найди товар <SKU>..." turn does) before
+    enrichment can resolve a product."""
+    if not has_spreadsheet_attachment:
+        return False
+    return active is None or active.family != FAMILY_EXCEL
+
+
 def resolve_product_enrichment_request(
     text: str,
     *,
@@ -1250,6 +1267,10 @@ def resolve_action_turn(
     # -- never a raw/unresolved ref count. 0 for every pre-5.1 caller/test
     # (default), so existing image/document/search routing is unaffected.
     spreadsheet_attachment_count: int = 0,
+    # Private recursion guard for the one-turn "spreadsheet attachment +
+    # explicit enrichment request in the SAME message" dispatch below.
+    # Never set by external callers.
+    _skip_enrichment_dispatch: bool = False,
 ) -> ActionDecision:
     """Pure-ish turn resolver. At most one extra LLM call: never (extra_llm=False)."""
     current = (text or "").strip()
@@ -1282,7 +1303,33 @@ def resolve_action_turn(
     # can, by construction of the two stem sets -- would still prefer the
     # write path), never fires for a bare verb alone (see the function's
     # own docstring).
-    if is_explicit_product_enrichment_request(current):
+    if is_explicit_product_enrichment_request(current) and not _skip_enrichment_dispatch:
+        if _enrichment_needs_excel_ingestion_first(active, has_spreadsheet_attachment):
+            # Production defect closure (one-turn case): the XLSX and the
+            # "Подготовь полную карточку товара <SKU>..." instruction were
+            # submitted in the SAME message, so there is no FAMILY_EXCEL
+            # task/dataset yet and resolve_product_enrichment_request would
+            # fail closed on its ``active is None`` guard without the
+            # attachment ever being parsed. Resolve THIS turn as an ordinary
+            # FAMILY_EXCEL turn instead -- the branch below creates the task
+            # and the tool call ingests the workbook and performs the SAME
+            # row lookup a "Найди товар <SKU>..." turn performs -- then reuse
+            # the existing chaining marker so the gateway continues into
+            # CALL_PRODUCT_ENRICHMENT within this same turn once the row
+            # resolves (unresolved/ambiguous rows keep the Excel reply).
+            excel_first = resolve_action_turn(
+                current,
+                tenant_id=tenant,
+                owner_id=owner,
+                conversation_id=conv,
+                store=store,
+                follow_up=follow_up,
+                gateway=gateway,
+                request_id=request_id,
+                spreadsheet_attachment_count=spreadsheet_attachment_count,
+                _skip_enrichment_dispatch=True,
+            )
+            return replace(excel_first, chain_to_enrichment_text=current)
         return resolve_product_enrichment_request(
             current,
             active=active,
