@@ -199,6 +199,17 @@ MAX_TOOL_ARGUMENT_DEPTH = 4
 MAX_TOOL_ARGUMENT_LIST_LEN = 64
 MAX_TOOL_ARGUMENT_STRING_LEN = 4_096
 MAX_TOOL_RESULT_DATA_BYTES = 65_536
+# For a page-fetch tool the result IS the page, so the generic bound above
+# is the wrong shape: ``tools.gateway.bound_result_data`` replaces an
+# oversized payload with a ``{"truncated": True, ...}`` stub, which handed
+# callers a "successful" fetch carrying no body at all -- how every real
+# (100 KB+) product page became invisible to its in-process consumer even
+# though the HTTP fetch returned 200. Such a tool declares its own, larger
+# bound through ``ToolDescriptor.metadata[RESULT_DATA_BOUND_METADATA_KEY]``;
+# the size is really limited by the adapter's own response-byte bound
+# (``tools.platform.web_fetch_adapter.DEFAULT_MAX_RESPONSE_BYTES``).
+MAX_TOOL_PAGE_RESULT_DATA_BYTES = 6_000_000
+RESULT_DATA_BOUND_METADATA_KEY = "max_result_data_bytes"
 
 SEARCH_TOOL_ID = "search"
 SEARCH_OPERATION = "search"

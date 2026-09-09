@@ -70,38 +70,141 @@ _AUTHORIZED_DISTRIBUTOR_DOMAINS = ("citilink.ru", "mvideo.ru", "dns-shop.ru", "e
 _OG_IMAGE_RE = re.compile(
     r'<meta[^>]+(?:property|name)=["\']og:image["\'][^>]+content=["\']([^"\']+)["\']', re.IGNORECASE
 )
-_IMG_TAG_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
+# Other declared "this page's product image" metadata real catalogs use
+# (schema.org ``itemprop``, Twitter cards, and og:image with the attribute
+# order reversed) -- all still page-declared canonical images, never a
+# guessed URL.
+_DECLARED_IMAGE_RES = (
+    _OG_IMAGE_RE,
+    re.compile(
+        r'<meta[^>]+(?:property|name|itemprop)=["\'](?:og:image:secure_url|twitter:image(?::src)?|image)["\']'
+        r'[^>]+content=["\']([^"\']+)["\']',
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]*(?:property|name|itemprop)='
+        r'["\'](?:og:image|twitter:image|image)["\']',
+        re.IGNORECASE,
+    ),
+)
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
+# Lazy loading is the norm on real catalog pages: the ``src`` attribute
+# holds a placeholder (or is absent) while the real photo sits in a
+# ``data-*``/``srcset`` attribute. Reading ``src`` only made every real
+# product photo on such a page invisible to this extractor.
+_IMG_URL_ATTRS = ("data-src", "data-original", "data-lazy-src", "data-lazy", "data-image", "src")
+_IMG_SRCSET_ATTRS = ("data-srcset", "srcset")
+_ATTR_VALUE_RE_CACHE: dict[str, re.Pattern[str]] = {}
+
+# Page assets that are structurally never the product photo. Dropping them
+# matters because the per-page candidate budget is small: on a real page
+# the first ``<img>`` tags are the site logo, an icon sprite and analytics
+# beacons, which would otherwise consume the whole budget (and, worse,
+# become the "main image" master since the first ACCEPTED candidate wins).
+_JUNK_URL_TOKENS = (
+    "logo",
+    "sprite",
+    "icon",
+    "favicon",
+    "placeholder",
+    "no-photo",
+    "nophoto",
+    "no_photo",
+    "noimage",
+    "no-image",
+    "spacer",
+    "blank",
+    "pixel",
+    "captcha",
+    "counter",
+    "loader",
+    "preloader",
+    "/watch/",
+    "google-analytics",
+    "googletagmanager",
+    "mc.yandex",
+    "top-fwz1",
+    "vk.com/rtrg",
+)
+_JUNK_URL_SUFFIXES = (".svg", ".gif", ".ico")
 
 MAX_IMAGE_CANDIDATES_PER_PAGE = 3
 MAX_MEDIA_CANDIDATES_PER_RUN = 8
 
 
+def _attr_value(tag: str, attribute: str) -> str:
+    pattern = _ATTR_VALUE_RE_CACHE.get(attribute)
+    if pattern is None:
+        pattern = re.compile(rf'{re.escape(attribute)}\s*=\s*["\']([^"\']*)["\']', re.IGNORECASE)
+        _ATTR_VALUE_RE_CACHE[attribute] = pattern
+    match = pattern.search(tag)
+    return match.group(1).strip() if match else ""
+
+
+def _first_srcset_url(value: str) -> str:
+    for entry in value.split(","):
+        url = entry.strip().split(" ")[0].strip()
+        if url:
+            return url
+    return ""
+
+
+def _is_junk_image_url(url: str) -> bool:
+    lowered = url.casefold()
+    path = lowered.split("?", 1)[0].split("#", 1)[0]
+    if path.endswith(_JUNK_URL_SUFFIXES):
+        return True
+    return any(token in lowered for token in _JUNK_URL_TOKENS)
+
+
+def _image_urls_in_markup(html_text: str) -> list[str]:
+    """Every image URL the page itself declares, in preference order:
+    page-declared canonical/product metadata first, then ``<img>`` tags in
+    document order (each tag's real, lazy-loaded source before its
+    placeholder ``src``)."""
+    urls: list[str] = []
+    for pattern in _DECLARED_IMAGE_RES:
+        for match in pattern.finditer(html_text):
+            urls.append(match.group(1).strip())
+    for tag_match in _IMG_TAG_RE.finditer(html_text):
+        tag = tag_match.group(0)
+        for attribute in _IMG_URL_ATTRS:
+            value = _attr_value(tag, attribute)
+            if value:
+                urls.append(value)
+        for attribute in _IMG_SRCSET_ATTRS:
+            value = _first_srcset_url(_attr_value(tag, attribute))
+            if value:
+                urls.append(value)
+    return urls
+
+
 def extract_image_candidate_urls(html_text: str, *, base_url: str) -> tuple[str, ...]:
     """Best-effort, non-hallucinating extraction of product-image URLs
     embedded in one fetched page. Relative URLs are resolved against
-    ``base_url``; ``data:`` URIs and anything that fails to resolve to an
-    absolute ``http(s)`` URL are dropped (they can never be handed to
-    ``GovernedImageFetcher`` anyway). Bounded to
-    ``MAX_IMAGE_CANDIDATES_PER_PAGE`` per page (cost control)."""
+    ``base_url``; ``data:`` URIs, non-product page assets (logos, icon
+    sprites, analytics beacons -- see ``_JUNK_URL_TOKENS``) and anything
+    that fails to resolve to an absolute ``http(s)`` URL are dropped (they
+    can never be handed to ``GovernedImageFetcher`` anyway, or would waste
+    the budget below). Bounded to ``MAX_IMAGE_CANDIDATES_PER_PAGE`` per
+    page (cost control)."""
     if not html_text:
         return ()
     found: list[str] = []
-    for pattern in (_OG_IMAGE_RE, _IMG_TAG_RE):
-        for match in pattern.finditer(html_text):
-            raw = match.group(1).strip()
-            if not raw or raw.startswith("data:"):
-                continue
-            try:
-                resolved = urljoin(base_url, raw)
-            except ValueError:
-                continue
-            if not resolved.lower().startswith(("http://", "https://")):
-                continue
-            if resolved in found:
-                continue
-            found.append(resolved)
-            if len(found) >= MAX_IMAGE_CANDIDATES_PER_PAGE:
-                return tuple(found)
+    for raw in _image_urls_in_markup(html_text):
+        if not raw or raw.startswith("data:"):
+            continue
+        try:
+            resolved = urljoin(base_url, raw)
+        except ValueError:
+            continue
+        if not resolved.lower().startswith(("http://", "https://")):
+            continue
+        if resolved in found or _is_junk_image_url(resolved):
+            continue
+        found.append(resolved)
+        if len(found) >= MAX_IMAGE_CANDIDATES_PER_PAGE:
+            return tuple(found)
     return tuple(found)
 
 
@@ -240,9 +343,17 @@ async def research_product(
 
         domain = source_domain(url)
         accepted_any = False
+        # ONE fact per characteristic per source: real pages repeat the
+        # same characteristic in several blocks (summary + full spec
+        # table) and sometimes carry near-variants under the same
+        # canonical key (e.g. "Количество USB 2.0" and "Количество USB
+        # 3.0"). Without this, a single page could disagree with ITSELF
+        # and ``merge_facts_into_characteristics`` would fail closed to a
+        # conflict, dropping a characteristic the source stated plainly.
+        keys_from_this_source: set[str] = set()
         for label, raw_value in extract_spec_lines(page_text):
             key = match_canonical_key(label)
-            if key is None:
+            if key is None or key in keys_from_this_source:
                 continue
             page_conflict = detect_variant_conflict(identity, text=raw_value)
             if page_conflict:
@@ -250,6 +361,7 @@ async def research_product(
             normalized_value, unit = normalize_characteristic_value(key, raw_value)
             if not normalized_value:
                 continue
+            keys_from_this_source.add(key)
             facts.append(
                 SourceFact(
                     characteristic_key=key,

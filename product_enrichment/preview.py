@@ -74,7 +74,9 @@ def enrichment_preview_dict(result: EnrichmentResult) -> dict:
         "classification_source": {"category": identity.category, "subcategory": identity.subcategory},
         "content": {
             "short_description": result.content.short_description,
+            "detailed_description": result.content.detailed_description,
             "detailed_description_status": "prepared" if result.content.detailed_description else "missing",
+            "detailed_description_facts_used": list(result.content.facts_used),
             "seo_title": result.content.seo_title,
             "seo_description": result.content.seo_description,
             "seo_keywords": list(result.content.seo_keywords),
@@ -88,6 +90,10 @@ def enrichment_preview_dict(result: EnrichmentResult) -> dict:
             "main_image_prepared": main_image_prepared,
             "gallery_image_count": gallery_count,
             "rejected_count": len(media.rejected_candidates),
+            # Why no image was prepared is otherwise invisible to the user
+            # (and to production diagnostics): every candidate rejection
+            # already carries a stable reason code, so surface them.
+            "rejected_reasons": sorted({r.reason for r in media.rejected_candidates}),
             "status": media.status,
         },
         "seo": {
@@ -118,7 +124,15 @@ def format_enrichment_preview_text(result: EnrichmentResult) -> str:
     content = data["content"]
     if content["short_description"]:
         lines.append(f"Короткое описание: {content['short_description']}")
-    lines.append(f"Подробное описание: {content['detailed_description_status']}")
+    if content["detailed_description"]:
+        # The generated text itself, never just the word "prepared": it is
+        # composed strictly from the verified facts listed above, so the
+        # user must be able to read (and approve) exactly what would be
+        # written to Bitrix.
+        lines.append("Подробное описание:")
+        lines.extend(f"  {line}" for line in content["detailed_description"].splitlines())
+    else:
+        lines.append(f"Подробное описание: {content['detailed_description_status']}")
     if content["seo_title"]:
         lines.append(f"SEO заголовок: {content['seo_title']}")
 
@@ -136,6 +150,8 @@ def format_enrichment_preview_text(result: EnrichmentResult) -> str:
         + ("да" if media["main_image_prepared"] else "нет")
         + f"; изображений в галерее: {media['gallery_image_count']}"
     )
+    if not media["main_image_prepared"] and media["rejected_reasons"]:
+        lines.append(f"Изображения отклонены: {', '.join(media['rejected_reasons'])}")
 
     lines.append(f"READY TO WRITE: {', '.join(data['ready_to_write']) or '(нет)'}")
     lines.append(f"NOT WRITABLE / UNRESOLVED: {', '.join(data['not_writable_or_unresolved']) or '(нет)'}")

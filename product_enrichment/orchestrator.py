@@ -154,6 +154,12 @@ async def enrich_product(
         cache_hit=False,
     )
     observer.emit(STAGE_PREVIEW_READY, cache_hit=False)
-    if cache is not None:
+    # Only a result research actually contributed to is worth reusing. A
+    # run where research was available but produced nothing is degraded,
+    # not deterministic -- caching it would pin that failure onto every
+    # later request for the same product in this process (the cache has no
+    # TTL), so the user could never get a complete card by retrying.
+    cacheable = bool(facts) or not research_available
+    if cache is not None and cacheable:
         cache.put(tenant_id=tenant_id, identity_key=identity.identity_key, result=result)
     return result

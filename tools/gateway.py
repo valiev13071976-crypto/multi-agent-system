@@ -50,6 +50,7 @@ from tools.models import (
     MAX_TOOL_ARGUMENT_STRING_LEN,
     MAX_TOOL_RESULT_DATA_BYTES,
     MAX_TOTAL_SEARCH_RESULTS,
+    RESULT_DATA_BOUND_METADATA_KEY,
     SEARCH_TOOL_ID,
     TOOL_STATUS_APPROVAL_REQUIRED,
     TOOL_STATUS_DENIED,
@@ -150,11 +151,26 @@ def validate_tool_arguments(arguments: dict | None) -> dict:
     return sanitize_metadata(data)
 
 
-def bound_result_data(data: dict | None) -> dict:
+def bound_result_data(data: dict | None, *, max_bytes: int = MAX_TOOL_RESULT_DATA_BYTES) -> dict:
     cleaned = sanitize_metadata(data or {})
-    if _json_size(cleaned) <= MAX_TOOL_RESULT_DATA_BYTES:
+    limit = int(max_bytes) if int(max_bytes or 0) > 0 else MAX_TOOL_RESULT_DATA_BYTES
+    if _json_size(cleaned) <= limit:
         return cleaned
     return {"truncated": True, "keys": sorted(cleaned.keys())[:32]}
+
+
+def result_data_bound_for(descriptor) -> int:
+    """The result-data bound a tool declares for itself, defaulting to the
+    generic ``MAX_TOOL_RESULT_DATA_BYTES``. A tool whose result payload IS
+    bulk content (a fetched page body) declares a larger bound rather than
+    having its entire payload collapsed into a stub -- see
+    ``tools.models.MAX_TOOL_PAGE_RESULT_DATA_BYTES``."""
+    metadata = getattr(descriptor, "metadata", None) or {}
+    try:
+        declared = int(metadata.get(RESULT_DATA_BOUND_METADATA_KEY) or 0)
+    except (TypeError, ValueError):
+        declared = 0
+    return declared if declared > 0 else MAX_TOOL_RESULT_DATA_BYTES
 
 
 def action_fingerprint_for_tool(
@@ -671,7 +687,7 @@ class ToolGateway:
             operation=request.operation,
             status=TOOL_STATUS_SUCCEEDED,
             success=True,
-            data=bound_result_data(payload),
+            data=bound_result_data(payload, max_bytes=result_data_bound_for(descriptor)),
             trust_level=descriptor.trust_level,
             side_effect=False,
             duration_ms=duration,

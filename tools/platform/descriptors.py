@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Mapping
+
 from autonomy.capabilities import (
     CAP_BROWSER_READ,
     CAP_BROWSER_WRITE,
@@ -34,6 +36,8 @@ from autonomy.models import ACTION_READ, ACTION_WRITE
 from tools.adapters import schema_hash_for
 from tools.models import (
     DEFAULT_SEARCH_TIMEOUT_SECONDS,
+    MAX_TOOL_PAGE_RESULT_DATA_BYTES,
+    RESULT_DATA_BOUND_METADATA_KEY,
     RETRY_NONE,
     RETRY_TRANSIENT,
     RETRY_WORKFLOW,
@@ -226,8 +230,10 @@ def _read_desc(
     enabled: bool = False,
     timeout: float = 15.0,
     network: bool = False,
+    metadata: Mapping[str, object] | None = None,
 ) -> ToolDescriptor:
     return ToolDescriptor(
+        metadata=dict(metadata or {}),
         tool_id=tool_id,
         name=name,
         description=description,
@@ -1388,6 +1394,12 @@ def scrape_fetch_descriptor(*, enabled: bool = False) -> ToolDescriptor:
         enabled=enabled,
         timeout=45.0,
         network=True,
+        # This tool's result IS the fetched page, already bounded by the
+        # adapter itself (WebFetchAdapter's max_response_bytes). Without a
+        # matching result-data bound, the gateway's generic 64 KB cap
+        # collapsed every real (100 KB+) page into a body-less stub and the
+        # caller saw a successful fetch with no content at all.
+        metadata={RESULT_DATA_BOUND_METADATA_KEY: MAX_TOOL_PAGE_RESULT_DATA_BYTES},
     )
 
 
