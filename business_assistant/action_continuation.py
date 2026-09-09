@@ -96,6 +96,15 @@ CALL_CONTROLLED_BITRIX_WRITE = "CALL_CONTROLLED_BITRIX_WRITE"
 # is invoked directly by ``WorkflowPandaConversationGateway``, exactly like
 # ``CALL_CONTROLLED_BITRIX_WRITE``).
 CALL_PRODUCT_ENRICHMENT = "CALL_PRODUCT_ENRICHMENT"
+# Production defect closure: read-only follow-up question about an ALREADY
+# prepared complete card -- "Покажи точно, какие данные будут записаны в
+# Bitrix/Aspro, если я подтвержу запись ... Ничего не записывай". Answers
+# from the enrichment state the prior CALL_PRODUCT_ENRICHMENT turn already
+# persisted on the active task, through the EXISTING read-only
+# ``prepare_single_product_write`` preview. Never a write (no approval
+# marker -- see ``is_bitrix_write_plan_question``) and never a re-run of the
+# enrichment pipeline.
+EXPLAIN_BITRIX_WRITE_PLAN = "EXPLAIN_BITRIX_WRITE_PLAN"
 
 STATUS_DRAFT = "DRAFT"
 STATUS_WAITING_FOR_INPUT = "WAITING_FOR_INPUT"
@@ -675,6 +684,49 @@ def is_explicit_product_enrichment_request(text: str) -> bool:
     return _has_stem(blob, _ENRICHMENT_TARGET_STEMS)
 
 
+# Production defect closure (read-only "what exactly would be written?"
+# follow-up): three independent signals, ALL required in the same message --
+# a "show/explain" ask, a Bitrix/Aspro target and an explicit "будет
+# записано"/"would be written" phrase. "если я подтвержу запись" alone can
+# never turn this into a write: the caller checks
+# ``is_explicit_bitrix_write_confirmation`` first and this predicate
+# additionally refuses any message that satisfies it.
+_WRITE_PLAN_ASK_STEMS = ("покаж", "показать", "объясн", "перечисл", "show", "list", "explain")
+# Deliberately a phrase, not a bare "запис" stem: "...покажи подготовленную
+# карточку и план действий перед записью" (Block 5.5's own row-preview
+# request) must keep routing exactly as it does today.
+_WRITE_PLAN_RE = re.compile(
+    r"(буд(ет|ут)\s+записан|что\s+именно\s+(будет\s+)?запис|(would|will)\s+be\s+written)",
+    re.I,
+)
+
+
+def is_bitrix_write_plan_question(text: str) -> bool:
+    """True only for a read-only question about WHAT the already prepared
+    product card would write to Bitrix/Aspro -- e.g. "Покажи точно, какие
+    данные из этой карточки товара будут записаны в Bitrix/Aspro, если я
+    подтвержу запись ... Ничего в Bitrix не записывай.". Requires a
+    show/explain ask + a Bitrix/Aspro target + an explicit "будет
+    записано"/"would be written" phrase in the SAME message, and never
+    matches an actual write confirmation."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if is_explicit_bitrix_write_confirmation(blob):
+        return False
+    # An enrichment request ("Подготовь полную карточку ... Ничего в Bitrix
+    # не записывай. Покажи полный предпросмотр...") satisfies all three
+    # groups below but must keep running the enrichment pipeline -- there is
+    # no prepared card to explain yet.
+    if is_explicit_product_enrichment_request(blob):
+        return False
+    if not _has_stem(blob, _WRITE_PLAN_ASK_STEMS):
+        return False
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+        return False
+    return bool(_WRITE_PLAN_RE.search(blob))
+
+
 def _extract_confirmed_retail_price(text: str) -> str:
     match = _CONFIRMED_RETAIL_PRICE_RE.search(text or "")
     if not match:
@@ -1252,6 +1304,42 @@ def resolve_bitrix_write_confirmation(
     )
 
 
+def resolve_bitrix_write_plan_question(
+    text: str,
+    *,
+    active: ActiveTask | None,
+    store: ActiveTaskStore,
+    request_id: str = "",
+) -> ActionDecision:
+    """Deterministic routing for the read-only "покажи, что именно будет
+    записано в Bitrix" follow-up (production defect closure). Answers ONLY
+    from the enrichment state the prior ``CALL_PRODUCT_ENRICHMENT`` turn
+    persisted on this same active task -- never re-runs enrichment, never
+    writes. Without that state there is nothing to explain, so this asks
+    for the card to be prepared first (same fail-closed shape as
+    ``resolve_bitrix_write_confirmation``)."""
+    if active is None or not dict(active.parameters.get("bitrix_enrichment_write_request") or {}):
+        return _bitrix_missing_context_decision(active)
+
+    args = {
+        "write_request": dict(active.parameters.get("bitrix_enrichment_write_request") or {}),
+        "characteristic_status": dict(active.parameters.get("bitrix_enrichment_characteristic_status") or {}),
+        "enrichment_preview": dict(active.parameters.get("bitrix_enrichment_preview") or {}),
+        "retail_price": str(active.parameters.get("bitrix_retail_price_preview") or ""),
+    }
+    return ActionDecision(
+        decision=EXPLAIN_BITRIX_WRITE_PLAN,
+        readiness=READY_TO_EXECUTE,
+        continuation=CONTINUE_ACTIVE_TASK,
+        task=active,
+        arguments=args,
+        operation="prepare_single_product_write",
+        extra_llm=False,
+        capability_status=CAPABILITY_AVAILABLE_AND_AUTHORIZED,
+        idempotency_key=_idempotency_key(request_id, "bitrix.write_plan_explain", args),
+    )
+
+
 def resolve_action_turn(
     text: str,
     *,
@@ -1331,6 +1419,22 @@ def resolve_action_turn(
             )
             return replace(excel_first, chain_to_enrichment_text=current)
         return resolve_product_enrichment_request(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
+
+    # Production defect closure: read-only "Покажи точно, какие данные будут
+    # записаны в Bitrix/Aspro, если я подтвержу запись ... Ничего не
+    # записывай" follow-up on an ALREADY prepared card. Checked after both
+    # Bitrix branches above (an actual confirmation always wins, and this
+    # predicate refuses a confirmation anyway) and before the generic
+    # follow-up/continuation heuristics, which would otherwise hand this
+    # question to the model/business-workflow path that merely echoed the
+    # instruction back instead of answering from the prepared state.
+    if is_bitrix_write_plan_question(current):
+        return resolve_bitrix_write_plan_question(
             current,
             active=active,
             store=store,

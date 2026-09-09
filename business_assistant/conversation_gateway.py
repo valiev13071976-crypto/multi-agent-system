@@ -547,6 +547,8 @@ class WorkflowPandaConversationGateway:
                         # content/media) leak into this one's later write
                         # confirmation.
                         task.parameters.pop("bitrix_enrichment_write_request", None)
+                        task.parameters.pop("bitrix_enrichment_characteristic_status", None)
+                        task.parameters.pop("bitrix_enrichment_preview", None)
                     task.parameters["bitrix_product_fields"] = dict(product_fields)
                     changed = True
                 retail_preview = str(data.get("retail_price_preview") or "")
@@ -743,7 +745,11 @@ class WorkflowPandaConversationGateway:
         the existing, read-only ``prepare_single_product_write`` for a
         resolved-section preview."""
         from business_assistant.action_continuation import CALL_PRODUCT_ENRICHMENT, mark_executed
-        from business_assistant.product_enrichment_bridge import prepare_complete_card, serialize_write_request
+        from business_assistant.product_enrichment_bridge import (
+            prepare_complete_card,
+            serialize_characteristic_status,
+            serialize_write_request,
+        )
 
         task = action.task
         idem = str(action.idempotency_key or request.request_id or "")
@@ -798,6 +804,16 @@ class WorkflowPandaConversationGateway:
             # and the later confirmation turn would fall back to the
             # bare, un-enriched XLSX row.
             task.parameters["bitrix_enrichment_write_request"] = serialize_write_request(result["write_request"])
+            # Production defect closure: the read-only "покажи точно, что
+            # именно будет записано в Bitrix" follow-up must answer from
+            # THIS turn's already computed state (per-characteristic
+            # verified/probable status and the rendered preview payload)
+            # instead of re-running enrichment -- see
+            # ``_explain_bitrix_write_plan``.
+            task.parameters["bitrix_enrichment_characteristic_status"] = serialize_characteristic_status(
+                result["enrichment"]
+            )
+            task.parameters["bitrix_enrichment_preview"] = dict(result["enrichment_preview"])
             self._action_store.put(task)
             mark_executed(self._action_store, task, failed=False)
 
@@ -808,6 +824,60 @@ class WorkflowPandaConversationGateway:
                 "action_decision": CALL_PRODUCT_ENRICHMENT,
                 "artifacts": [],
                 "enrichment_preview": result["enrichment_preview"],
+            },
+        )
+
+    async def _explain_bitrix_write_plan(
+        self, request: ConversationRequest, action
+    ) -> ConversationResult:
+        """Production defect closure: answers the read-only follow-up
+        "Покажи точно, какие данные из этой карточки будут записаны в
+        Bitrix/Aspro, если я подтвержу запись ... Ничего не записывай" from
+        the state the prior ``CALL_PRODUCT_ENRICHMENT`` turn persisted on
+        the active task. Zero Bitrix mutation: the only Bitrix call here is
+        the EXISTING, read-only ``prepare_single_product_write`` -- the same
+        one the enrichment preview already uses -- and enrichment itself is
+        never re-run."""
+        from business_assistant.action_continuation import EXPLAIN_BITRIX_WRITE_PLAN
+        from business_assistant.controlled_bitrix_write import prepare_single_product_write
+        from business_assistant.product_enrichment_bridge import (
+            deserialize_write_request,
+            format_write_plan_text,
+        )
+
+        task = action.task
+        args = dict(action.arguments or {})
+        write_request = deserialize_write_request(dict(args.get("write_request") or {}))
+        if not write_request.retail_price and args.get("retail_price"):
+            import dataclasses
+
+            write_request = dataclasses.replace(write_request, retail_price=str(args.get("retail_price")))
+
+        write_preview: dict = {}
+        if self._bitrix_bridge is not None and write_request.retail_price:
+            try:
+                write_preview = prepare_single_product_write(
+                    self._bitrix_bridge,
+                    tenant_id=str(request.tenant_id or ""),
+                    request=write_request,
+                )
+            except Exception:  # noqa: BLE001 -- a read-only explanation must never fail on the preview call
+                write_preview = {}
+
+        text = format_write_plan_text(
+            write_request=write_request,
+            write_preview=write_preview,
+            characteristic_status=dict(args.get("characteristic_status") or {}),
+            enrichment_preview=dict(args.get("enrichment_preview") or {}),
+        )
+        return ConversationResult(
+            text=text,
+            task_id=getattr(task, "task_id", None),
+            metadata={
+                "action_decision": EXPLAIN_BITRIX_WRITE_PLAN,
+                "artifacts": [],
+                "bitrix_write_preview": write_preview,
+                "mutated": False,
             },
         )
 
@@ -893,6 +963,7 @@ class WorkflowPandaConversationGateway:
             CALL_CONTROLLED_BITRIX_WRITE,
             CALL_PRODUCT_ENRICHMENT,
             CALL_TOOL,
+            EXPLAIN_BITRIX_WRITE_PLAN,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
             resolve_action_turn,
@@ -966,6 +1037,18 @@ class WorkflowPandaConversationGateway:
             chain_text = str(getattr(action, "chain_to_enrichment_text", "") or "")
             if chain_text:
                 result = await self._maybe_chain_to_enrichment(request, chain_text, result)
+            self._record_latency(t0, follow_up_ms)
+            meta = dict(result.metadata or {})
+            meta["follow_up_kind"] = resolution.kind
+            meta["follow_up_target"] = resolution.target
+            return ConversationResult(
+                text=result.text,
+                workflow_id=result.workflow_id,
+                task_id=result.task_id or task_id,
+                metadata=meta,
+            )
+        if action.decision == EXPLAIN_BITRIX_WRITE_PLAN:
+            result = await self._explain_bitrix_write_plan(request, action)
             self._record_latency(t0, follow_up_ms)
             meta = dict(result.metadata or {})
             meta["follow_up_kind"] = resolution.kind

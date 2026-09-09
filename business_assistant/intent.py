@@ -210,9 +210,24 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     # result instead of the enrichment preview. Local import avoids a
     # circular import (action_continuation already imports
     # requires_business_integration from this module).
-    from business_assistant.action_continuation import is_explicit_product_enrichment_request
+    from business_assistant.action_continuation import (
+        is_bitrix_write_plan_question,
+        is_explicit_product_enrichment_request,
+    )
 
     if is_explicit_product_enrichment_request(raw):
+        return True
+
+    # Production defect closure (same misrouting, read-only follow-up
+    # variant): "Покажи точно, какие данные из этой карточки товара будут
+    # записаны в Bitrix/Aspro, если я подтвержу запись ... Ничего в Bitrix
+    # не записывай." also mentions "Bitrix" plus an action verb, so
+    # requires_business_integration below sent it to the same degraded
+    # recipe engine, whose reply merely echoed the instruction text back.
+    # It must reach WorkflowPandaConversationGateway, which answers it from
+    # the prepared card state (EXPLAIN_BITRIX_WRITE_PLAN). Never a write:
+    # the predicate refuses any explicit write confirmation.
+    if is_bitrix_write_plan_question(raw):
         return True
 
     if requires_business_integration(raw):

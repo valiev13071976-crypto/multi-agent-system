@@ -161,6 +161,121 @@ def format_combined_preview_text(enrichment: EnrichmentResult, write_preview: Ma
     return "\n".join(lines)
 
 
+def serialize_characteristic_status(enrichment: EnrichmentResult) -> dict:
+    """Dict-safe per-characteristic status for persisting across turns
+    (``ActiveTask.parameters``), so the read-only "what exactly would be
+    written?" follow-up can report each characteristic's ALREADY computed
+    confidence and Bitrix destination without re-running enrichment. Pure
+    projection -- confidence is never recomputed here."""
+    return {
+        key: {
+            "value": c.value,
+            "unit": c.unit,
+            "confidence": c.confidence,
+            "bitrix_property_id": c.bitrix_property_id,
+            "bitrix_writable": bool(c.bitrix_writable),
+        }
+        for key, c in enrichment.characteristics.items()
+    }
+
+
+def format_write_plan_text(
+    *,
+    write_request: SingleProductWriteRequest,
+    write_preview: Mapping | None,
+    characteristic_status: Mapping | None = None,
+    enrichment_preview: Mapping | None = None,
+) -> str:
+    """Renders the read-only answer to "покажи точно, что именно будет
+    записано в Bitrix/Aspro, если я подтвержу запись" from the ALREADY
+    prepared card state (production defect closure). Reports the EXISTING
+    write path's own verdict -- ``write_preview`` is whatever the unchanged,
+    read-only ``prepare_single_product_write`` returned -- plus each
+    characteristic's already-computed verified/probable status. Decides
+    nothing itself and writes nothing."""
+    status_map = dict(characteristic_status or {})
+    preview = dict(enrichment_preview or {})
+    write_preview = dict(write_preview or {})
+
+    lines = [
+        "ЧТО БУДЕТ ЗАПИСАНО В BITRIX/ASPRO ПРИ ПОДТВЕРЖДЕНИИ (сейчас ничего не записано):",
+        f"Товар: {write_request.title}",
+        f"Артикул: {write_request.sku}",
+    ]
+    if write_request.brand:
+        lines.append(f"Бренд: {write_request.brand}")
+    if write_request.retail_price:
+        lines.append(f"Розничная цена: {write_request.retail_price} {write_request.currency}")
+
+    written = dict(write_request.characteristics or {})
+    lines.append(f"ХАРАКТЕРИСТИКИ, КОТОРЫЕ БУДУТ ЗАПИСАНЫ: {len(written)}")
+    for key in sorted(written):
+        info = dict(status_map.get(key) or {})
+        confidence = str(info.get("confidence") or "")
+        status = "verified" if confidence == "verified" else (confidence or "probable")
+        prop = info.get("bitrix_property_id")
+        prop_text = f", свойство Bitrix {prop}" if prop else ""
+        lines.append(f"  - {key}: {written[key]} ({status}{prop_text})")
+
+    skipped = [key for key in sorted(status_map) if key not in written]
+    lines.append(f"ХАРАКТЕРИСТИКИ, КОТОРЫЕ НЕ БУДУТ ЗАПИСАНЫ: {len(skipped)}")
+    for key in skipped:
+        info = dict(status_map.get(key) or {})
+        confidence = str(info.get("confidence") or "")
+        if not info.get("bitrix_writable"):
+            reason = "нет проверенного свойства в Bitrix" if not info.get("bitrix_property_id") else "не подтверждено для записи"
+        else:
+            reason = f"статус {confidence or 'не подтверждён'}"
+        lines.append(f"  - {key}: {info.get('value', '')} ({confidence or 'не подтверждено'}) — {reason}")
+
+    preview_picture = dict(write_request.preview_picture or {})
+    detail_picture = dict(write_request.detail_picture or {})
+    lines.append("ИЗОБРАЖЕНИЯ, КОТОРЫЕ БУДУТ ЗАПИСАНЫ:")
+    if preview_picture.get("filename"):
+        lines.append(f"  - превью: {preview_picture['filename']} (файл загружается в Bitrix, не ссылка)")
+    if detail_picture.get("filename"):
+        lines.append(f"  - детальное: {detail_picture['filename']} (файл загружается в Bitrix, не ссылка)")
+    if not preview_picture.get("filename") and not detail_picture.get("filename"):
+        lines.append("  - нет подготовленных изображений")
+    gallery_count = int((preview.get("media") or {}).get("gallery_image_count") or 0)
+    if gallery_count:
+        lines.append(
+            f"  - галерея: {gallery_count} — НЕ будет записана (для галереи нет поддерживаемого назначения в этом пути записи)"
+        )
+
+    lines.append("ОПИСАНИЕ, КОТОРОЕ БУДЕТ ЗАПИСАНО:")
+    lines.append(f"  Короткое (previewText): {write_request.short_description or '(нет)'}")
+    detailed = write_request.detailed_description or "(нет)"
+    lines.append("  Подробное (detailText):")
+    for line in detailed.splitlines() or [detailed]:
+        lines.append(f"    {line}")
+
+    if write_preview.get("status") == "REQUIRES_APPROVAL":
+        target = write_preview.get("target_product") or {}
+        if target.get("resolved_section_id") is not None:
+            lines.append(f"Раздел каталога (Bitrix): ID {target.get('resolved_section_id')}")
+        will_write = write_preview.get("will_write") or []
+        if will_write:
+            lines.append(f"Поля записи (по текущей политике записи): {', '.join(str(i) for i in will_write)}")
+        for item in write_preview.get("will_not_write") or []:
+            lines.append(f"НЕ будет записано: {item.get('field')} = {item.get('value')} — {item.get('reason')}")
+    elif write_preview.get("status"):
+        lines.append(
+            f"Статус подготовки записи в Bitrix: {write_preview.get('status')} ({write_preview.get('reason', '')})".rstrip(" ()")
+        )
+    else:
+        lines.append(
+            "Предпросмотр записи Bitrix недоступен (нет розничной цены или интеграция не настроена) — "
+            "состав полей выше взят из подготовленной карточки."
+        )
+
+    lines.append(
+        "Ничего в Bitrix не записано: это только предпросмотр. Запись выполняется "
+        "только после отдельного явного подтверждения."
+    )
+    return "\n".join(lines)
+
+
 async def prepare_complete_card(
     *,
     tenant_id: str,
