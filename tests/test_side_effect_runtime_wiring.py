@@ -15,6 +15,9 @@ from tests.test_mode_routing import env_for, mock_provider_runs
 from tests.test_smoke import CONTRACT_KEYS, load_app
 from tools.gateway import ToolGateway
 from tools.models import TOOL_TRUST_READ_ONLY_EXTERNAL
+from tools.search.brave_provider import BraveSearchProvider
+from tools.search.factory import _FailClosedSearchProvider
+from tools.search.null_provider import NullSearchProvider
 
 
 class SideEffectRuntimeWiringTests(unittest.TestCase):
@@ -129,3 +132,44 @@ class SideEffectRuntimeWiringTests(unittest.TestCase):
         blob = str(runtime.health()) + repr(runtime.config) + str(runtime.health().metadata)
         self.assertNotIn("ghs_secret_value", blob)
         self.assertNotIn("Authorization", blob)
+
+
+class ToolGatewaySearchProviderWiringTests(unittest.TestCase):
+    """build_tool_gateway (side_effects.runtime) must wire ToolGateway's
+    search_provider from SEARCH_PROVIDER/SEARCH_API_KEY -- previously it
+    never passed a search_provider at all, so production ToolGateway.
+    search() always silently resolved to NullSearchProvider regardless of
+    configuration."""
+
+    def test_no_search_config_wires_null_provider_unchanged(self):
+        runtime = compose_side_effect_runtime(secrets=DictSecrets(), env={})
+        self.assertIsInstance(runtime.tool_gateway._provider, NullSearchProvider)
+
+    def test_search_provider_brave_with_key_wires_real_brave_provider(self):
+        runtime = compose_side_effect_runtime(
+            secrets=DictSecrets(),
+            env={"SEARCH_PROVIDER": "brave", "SEARCH_API_KEY": "real-railway-key-123"},
+        )
+        self.assertIsInstance(runtime.tool_gateway._provider, BraveSearchProvider)
+
+    def test_search_provider_brave_without_key_fails_safe_not_crash(self):
+        runtime = compose_side_effect_runtime(
+            secrets=DictSecrets(),
+            env={"SEARCH_PROVIDER": "brave"},
+        )
+        self.assertIsInstance(runtime.tool_gateway._provider, _FailClosedSearchProvider)
+
+    def test_unsupported_search_provider_fails_safe_not_crash(self):
+        runtime = compose_side_effect_runtime(
+            secrets=DictSecrets(),
+            env={"SEARCH_PROVIDER": "not-a-real-vendor"},
+        )
+        self.assertIsInstance(runtime.tool_gateway._provider, _FailClosedSearchProvider)
+
+    def test_search_api_key_never_appears_in_health_or_config_blob(self):
+        runtime = compose_side_effect_runtime(
+            secrets=DictSecrets(),
+            env={"SEARCH_PROVIDER": "brave", "SEARCH_API_KEY": "super-secret-brave-key"},
+        )
+        blob = str(runtime.health()) + repr(runtime.config) + str(runtime.health().metadata)
+        self.assertNotIn("super-secret-brave-key", blob)
