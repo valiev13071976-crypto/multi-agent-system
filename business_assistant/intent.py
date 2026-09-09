@@ -193,6 +193,28 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     ):
         return True
 
+    # Production defect closure (product-card enrichment request routed to
+    # the degraded generic business-workflow recipe engine instead of
+    # WorkflowPandaConversationGateway's CALL_PRODUCT_ENRICHMENT): an
+    # explicit "Подготовь полную карточку товара ... для Bitrix/Aspro ..."
+    # request mentions a domain term ("Bitrix"/"Aspro") and an action verb
+    # ("подготовь"), so requires_business_integration() below returns True
+    # for it whenever this turn has no artifact_refs attached (e.g. the
+    # file was uploaded on an EARLIER turn, per "из загруженного прайса").
+    # That routed it into BusinessAssistantService.execute()'s fixture
+    # SUPPLIER_PRICE recipe, which immediately blocks on Bitrix
+    # integration capabilities it never needed (product_enrichment never
+    # writes to Bitrix by itself -- see is_explicit_product_enrichment_
+    # request's own docstring), producing the reported
+    # BA_CAPABILITY_UNAVAILABLE/dependency_not_ready-degraded generic
+    # result instead of the enrichment preview. Local import avoids a
+    # circular import (action_continuation already imports
+    # requires_business_integration from this module).
+    from business_assistant.action_continuation import is_explicit_product_enrichment_request
+
+    if is_explicit_product_enrichment_request(raw):
+        return True
+
     if requires_business_integration(raw):
         return False
 
