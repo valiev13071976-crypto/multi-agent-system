@@ -165,12 +165,19 @@ class PriceSeparationTests(unittest.TestCase):
         self.assertEqual(read["result"]["price"]["amount"], TARGET_RETAIL_PRICE)
         self.assertEqual(read["result"]["price_type"], "RETAIL")
 
-    def test_canonical_payload_never_carries_a_purchase_price_key(self):
+    def test_purchase_price_never_appears_inside_the_retail_price_dict(self):
+        """Structural separation: purchase price must never be nested inside
+        (or substitutable for) the ``price``/selling-price dict a write path
+        reads for the retail price -- it lives in its own sibling
+        ``purchase_price`` key instead (Block 5.6 follow-up defect
+        closure -- purchase price now has a verified native Bitrix
+        destination, see integrations.bitrix.schema)."""
         bridge, _, _ = _bridge()
         preview = prepare_single_product_write(bridge, tenant_id="tenant-a", request=_request())
         canonical = preview["canonical_payload"]
         self.assertNotIn("purchase_price", canonical.get("price", {}))
-        self.assertNotIn("purchase_price", canonical)
+        self.assertEqual(canonical["purchase_price"], {"amount": TARGET_PURCHASE_PRICE, "currency": "RUB"})
+        self.assertEqual(canonical["price"]["selling_price"], TARGET_RETAIL_PRICE)
 
 
 class NoGuessedPropertiesTests(unittest.TestCase):

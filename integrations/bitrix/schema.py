@@ -17,6 +17,22 @@ from this table. This table only says: *if* property 100 appears on a
 product, its Bitrix CODE is ``BRAND`` and Panda owns writing it; it never
 asserts that any particular product has that property populated.
 
+IMPORTANT -- this table is intentionally NOT a complete inventory of the
+live IBLOCK 14/15 property set. A follow-up LIVE READ-ONLY discovery pass
+(direct read-only ``catalog.product.list``/``catalog.product.offer.list``
+calls against the real webhook) found this installation actually exposes
+roughly 179 distinct custom property IDs on IBLOCK 14 (97 through 277) and
+up to property 298 on IBLOCK 15 -- far more than the ~20 entries below.
+Only properties whose semantic meaning has actually been verified are
+listed here; every other live property id (137-277 on IBLOCK 14, 298 on
+IBLOCK 15, and any future addition) correctly falls through
+``property_ownership()``'s conservative default of ``UNMANAGED_PRESERVE``
+below -- never assumed writable, never guessed a CODE/name. Bitrix's REST
+surface for this installation has no working ``iblock.property.list``
+(returns ``ERROR_METHOD_NOT_FOUND``), so CODE names for those undocumented
+properties cannot currently be verified via REST at all; adding entries
+for them would mean guessing, which this binding deliberately never does.
+
 Ownership classification (spec sections 16/31/32/Acceptance W) is
 authoritative here and reused verbatim -- no separate/weaker taxonomy:
 
@@ -59,13 +75,80 @@ NOT expose IPROPERTY-style *inherited/effective* SEO (the section->iblock
 Only explicit product-level SEO overrides -- if this installation's schema
 ever exposes one as an ordinary property -- would be readable this way; the
 *effective* value is a genuine, currently-unresolved REST-surface gap, not a
-missing scope. ``seo_effective_status`` below reports this precisely instead
+missing scope. A follow-up LIVE READ-ONLY discovery pass confirmed this is
+even stronger than originally documented: this installation's real
+``catalog.product.list``/``catalog.product.offer.list`` responses carry no
+seo/meta/title/description/keyword-shaped key at all (not even present as
+``null``) -- there is currently no writable REST destination for SEO
+title/description/keywords here, explicit or inherited.
+``seo_effective_status`` below reports this precisely instead
 of fabricating a value (spec section 10: "classify the exact limitation").
+
+Purchase price note (Block 5.6 follow-up defect closure): unlike EAN/GTIN
+(which still has NO verified Bitrix destination on this installation --
+never invented), the same LIVE discovery pass confirmed
+``catalog.product.list``/``catalog.product.offer.list`` responses include
+two NATIVE, first-class Bitrix catalog fields -- ``purchasingPrice`` and
+``purchasingCurrency`` -- distinct from the custom ``propertyN`` table
+above (they are ordinary top-level REST fields, not IBLOCK properties, so
+they intentionally have no ``PropertyBinding`` entry). They were observed
+present but unpopulated (``null``) on every sampled live product -- this
+installation has never used them yet, but the destination itself is real
+and verified. See ``PURCHASING_PRICE_FIELD``/``PURCHASING_CURRENCY_FIELD``
+below and ``LiveBitrixAdapter._write_product_create_live`` for the write
+mapping. Purchase price remains structurally independent from the retail
+selling price (``catalog.price.add``/``BITRIX_RETAIL_PRICE_TYPE_ID``) --
+neither can ever substitute for the other.
+
+Property-value envelope note (Block 5.6 follow-up defect closure): LIVE
+``catalog.product.list``/``catalog.product.offer.list`` responses wrap
+most non-boolean custom property values as ``{"value": ..., "valueId":
+...}`` (or an array of such envelopes for multi-value properties) rather
+than a bare scalar -- confirmed for BRAND (property 100), ARTICLE
+(property 283), and the CML2_LINK/``parentId`` relationship itself.
+``unwrap_property_value`` below centralizes extracting the real value from
+either shape (envelope or already-scalar, for backward compatibility
+with older/fixture responses); every mapping function in this module
+routes through it instead of each doing its own ad-hoc unwrap.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+
+
+def unwrap_property_value(raw):
+    """Extract the real value from Bitrix's custom-property envelope shape.
+
+    LIVE ``catalog.product.list``/``catalog.product.offer.list`` responses
+    wrap most non-boolean custom properties as ``{"value": ..., "valueId":
+    ...}`` for a single value, or a list of such envelopes for a
+    multi-value property (e.g. MORE_PHOTO/280, STORES_FILTER/278). Older
+    fixtures/tests and boolean/checkbox-type properties (e.g. IN_STOCK/101)
+    instead carry a bare scalar directly -- this function is backward
+    compatible with that shape too, returning it unchanged.
+
+    Detection is deliberately narrow (a ``dict`` containing a ``"value"``
+    key) so it never mistakes an unrelated dict for this envelope -- e.g.
+    image/file reference objects such as ``previewPicture``/``detailPicture``
+    (``{"id": ..., "url": ..., "urlMachine": ...}``) have no ``"value"``
+    key and pass through untouched, exactly as before.
+    """
+    if isinstance(raw, dict) and "value" in raw:
+        return raw["value"]
+    if isinstance(raw, list):
+        return [unwrap_property_value(item) for item in raw]
+    return raw
+
+
+# Native (non-custom-property) Bitrix ``catalog.product``/``catalog.product
+# .offer`` REST fields -- confirmed present (though unpopulated) on this
+# installation's real LIVE responses. Ordinary top-level fields, not
+# IBLOCK custom properties, so they deliberately have no ``PropertyBinding``
+# entry in the tables below; see the module docstring's "Purchase price
+# note" for the LIVE evidence and ``LiveBitrixAdapter`` for the write path.
+PURCHASING_PRICE_FIELD = "purchasingPrice"
+PURCHASING_CURRENCY_FIELD = "purchasingCurrency"
 
 PANDA_MANAGED = "PANDA_MANAGED"
 BITRIX_MANAGED = "BITRIX_MANAGED"
@@ -216,7 +299,7 @@ def map_catalog_product(item: dict) -> dict:
             {
                 "property_id": pid,
                 "code": binding.code if binding else "",
-                "value": value,
+                "value": unwrap_property_value(value),
                 "ownership": binding.ownership if binding else UNMANAGED_PRESERVE,
                 "known": binding is not None,
             }
@@ -293,12 +376,18 @@ def map_offer(item: dict, *, parent_product_id: int | str | None = None) -> dict
             {
                 "property_id": pid,
                 "code": binding.code if binding else "",
-                "value": value,
+                "value": unwrap_property_value(value),
                 "ownership": binding.ownership if binding else UNMANAGED_PRESERVE,
                 "known": binding is not None,
             }
         )
-    parent_id = item.get(CML2_LINK_REST_FIELD)
+    # LIVE discovery follow-up: ``parentId`` itself comes back wrapped in
+    # the exact same ``{"value": ..., "valueId": ...}`` envelope as any
+    # other custom property (it is backed by CML2_LINK/279 under the
+    # hood) -- never a bare scalar on this installation. Unwrapping here
+    # keeps ``matches_queried_parent`` comparing real ids instead of a
+    # dict against a string (which could never match).
+    parent_id = unwrap_property_value(item.get(CML2_LINK_REST_FIELD))
     return {
         "identity": {
             "id": item.get("id"),

@@ -53,7 +53,7 @@ Rules:
 | `BITRIX_VERIFY_TLS` | TLS verification (default true) |
 | `BITRIX_CATALOG_ID` | Products IBLOCK ID (this installation: `14`) |
 | `BITRIX_OFFERS_IBLOCK_ID` | Offers/SKU IBLOCK ID (this installation: `15`) — required for `offer_read` and any offer/SKU CREATE |
-| `BITRIX_RETAIL_PRICE_TYPE_ID` | `catalogGroupId` for this installation's RETAIL selling price (see `catalog.priceType.list`) — required for any real retail-price CREATE/write; fails closed (never guesses e.g. `1`) if unset |
+| `BITRIX_RETAIL_PRICE_TYPE_ID` | `catalogGroupId` for this installation's RETAIL selling price (see `catalog.priceType.list`) — required for any real retail-price CREATE/write; fails closed (never guesses e.g. `1`) if unset. **For panda.msk.ru, the business owner has explicitly confirmed the value is `1` (`catalogGroupId 1` / price type name `BASE`) is the intended retail/base selling price** — this is a per-installation configuration fact, not hardcoded into the general integration logic, which remains entirely environment-driven |
 | `BITRIX_SITE_ID` | Site identifier |
 | `ASPRO_PREMIER_ENABLED` | Enable Aspro field mapping |
 | `ASPRO_PREMIER_FIELD_MAPPINGS` | Optional mapping config reference |
@@ -140,6 +140,28 @@ second connector/architecture:
   (`PANDA_MANAGED` / `BITRIX_MANAGED` / `ASPRO_MANAGED` / `DERIVED` /
   `READ_ONLY` / `UNMANAGED_PRESERVE`). Any property NOT in this table is
   conservatively treated as `UNMANAGED_PRESERVE` — never assumed writable.
+  **This table is intentionally NOT a complete inventory of the live
+  IBLOCK.** A follow-up LIVE READ-ONLY discovery pass found this
+  installation actually exposes roughly 179 distinct custom property IDs
+  on IBLOCK 14 (97–277) and up to property 298 on IBLOCK 15 — far more
+  than are enumerated above. `iblock.property.list` (the REST method that
+  would resolve their CODE names) returns `ERROR_METHOD_NOT_FOUND` on this
+  installation, so those extra property IDs' semantic meaning cannot
+  currently be verified via REST — only properties actually verified are
+  listed here; every other one correctly falls through to
+  `UNMANAGED_PRESERVE` and is left untouched (existing unmanaged
+  Aspro/custom properties are never guessed at or mutated).
+- **Property value envelopes are unwrapped centrally.** LIVE
+  `catalog.product.list`/`catalog.product.offer.list` responses wrap most
+  non-boolean custom property values (including BRAND/`property100`,
+  ARTICLE/`property283`, and the CML2_LINK/`parentId` relationship itself)
+  as `{"value": ..., "valueId": ...}` — or a list of such envelopes for a
+  multi-value property — rather than a bare scalar.
+  `schema.unwrap_property_value()` centralizes extracting the real value
+  from either shape (envelope or already-scalar, for backward
+  compatibility with older/fixture responses); every mapping function in
+  `integrations/bitrix/schema.py` routes through it instead of each doing
+  its own ad-hoc unwrap.
 - **CML2_LINK (property 279)** models the offer → parent-product
   relationship. The REST method `catalog.product.offer.list` exposes this
   same relationship as a `parentId` filter/select field, not a raw
@@ -154,7 +176,25 @@ second connector/architecture:
 - **SEO**: `seo_effective_status()` reports explicit per-product SEO
   overrides when present, and explicitly classifies *inherited/effective*
   IPROPERTY SEO as unavailable via `catalog.product.list` (a genuine
-  REST-surface gap, not a missing scope) — it is never fabricated.
+  REST-surface gap, not a missing scope) — it is never fabricated. A
+  follow-up LIVE READ-ONLY discovery pass confirmed this installation's
+  real responses carry no seo/meta/title/description/keyword-shaped key
+  at all — there is currently no writable REST destination for SEO here,
+  explicit or inherited; SEO write remains unresolved/deferred.
+- **Purchase price** (Block 5.6 follow-up defect closure): the same LIVE
+  discovery pass confirmed `catalog.product.list`/`catalog.product.offer
+  .list` responses include two NATIVE, first-class Bitrix catalog fields
+  — `purchasingPrice` and `purchasingCurrency` — distinct from the custom
+  `propertyN` table above. They were observed present but unpopulated
+  (`null`) on every sampled live product; this installation has never
+  used them yet, but the destination itself is real and verified (this
+  corrects earlier documentation that claimed purchase price had no
+  verified destination). `LiveBitrixAdapter._write_product_create_live`
+  now maps a supplied purchase price onto these fields on the SAME
+  `catalog.product.add` call as the base product, structurally
+  independent of the retail selling price (`catalog.price.add`) — neither
+  can ever substitute for the other. EAN/GTIN still has **no** verified
+  Bitrix destination on this installation and is never written.
 - `LiveBitrixAdapter.read()` supports `product_lookup`, `section_read` /
   `category_read`, `offer_read`, and `price_read` operations against the
   real self-hosted REST surface (`catalog.product.list`,
@@ -209,7 +249,7 @@ client/architecture):
 | Step | REST method | Purpose |
 |------|-------------|---------|
 | idempotency check | `catalog.product.list` (filter `xmlId`) | has this idempotency key already created a product? |
-| product create | `catalog.product.add` | base product: `name`, `active`, BRAND (`property100`); response nests the created product under `"element"` (per Bitrix's documented contract — NOT `"product"`) |
+| product create | `catalog.product.add` | base product: `name`, `active`, BRAND (`property100`), and (if supplied) purchase price via `purchasingPrice`/`purchasingCurrency`; response nests the created product under `"element"` (per Bitrix's documented contract — NOT `"product"`) |
 | idempotency check | `catalog.product.offer.list` (filter `parentId`) | does this product already have an offer? |
 | offer create | `catalog.product.offer.add` | SKU/article (`property283`) linked via `parentId` |
 | idempotency check | `catalog.price.list` (filter `productId`+`catalogGroupId`) | is the retail price already recorded? |
@@ -225,11 +265,46 @@ never a guessed property ID/code):
   requires creating one offer per product here
 - brand → catalog property 100 (`BRAND`, IBLOCK 14)
 - retail selling price → `catalog.price.add` against `BITRIX_RETAIL_PRICE_TYPE_ID`
+- purchase price (optional; Block 5.6 follow-up defect closure) → native
+  `purchasingPrice`/`purchasingCurrency` fields on the SAME
+  `catalog.product.add` call as the base product — structurally
+  independent of retail selling price, never substitutable for it.
+  Validated up front (a positive number); malformed purchase price data
+  fails closed (`invalid_purchase_price`, no write attempted) rather than
+  being guessed or silently dropped. Currently implemented on the LIVE
+  adapter only — the FIXTURE adapter/store does not yet persist it, so
+  `prepare_single_product_write` only reports it under `will_write` for a
+  LIVE-environment bridge.
 
-**Never written**: EAN, purchase price, category/section — no verified
-destination exists for these on this installation; `controlled_bitrix_write`
-never includes them in the payload this adapter reads, so there is nothing
-to guess.
+**Never written**: EAN, category/section — no verified destination exists
+for these on this installation; `controlled_bitrix_write` never includes
+them in the payload this adapter reads, so there is nothing to guess.
+
+**Example — controlled create for a real LG test product**, given
+title `"Телевизор LG 32LQ63006LA.ARUG"`, SKU `32LQ63006LA.ARUG`, brand
+`LG`, purchase price `22513.70 RUB`, and retail price `29990 RUB`:
+
+```
+catalog.product.add fields (IBLOCK 14):
+  name              = "Телевизор LG 32LQ63006LA.ARUG"
+  active            = "N"
+  property100       = "LG"                # BRAND
+  purchasingPrice   = "22513.70"
+  purchasingCurrency = "RUB"
+  xmlId             = <deterministic idempotency-key-derived id>
+
+catalog.product.offer.add fields (IBLOCK 15):
+  parentId    = <id returned by the product create above>
+  name        = "Телевизор LG 32LQ63006LA.ARUG"
+  active      = "N"
+  property283 = "32LQ63006LA.ARUG"        # ARTICLE
+
+catalog.price.add fields:
+  productId      = <id returned by the product create above>
+  catalogGroupId = <BITRIX_RETAIL_PRICE_TYPE_ID; = 1 on panda.msk.ru>
+  price          = "29990"
+  currency       = "RUB"
+```
 
 **Product visibility**: created `active="N"` unless the caller explicitly
 passes `active=True` — `controlled_bitrix_write` always passes `active=False`

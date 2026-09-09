@@ -19,22 +19,35 @@ the already-existing, already-governed Block 5.4/5.6 machinery:
 
 No new HTTP client, no second write path, no bypass of
 ``IntegrationActivationService``'s approval/idempotency gate, and no
-invented Bitrix/Aspro property codes: only the fields with a schema-verified
+invented Bitrix/Aspro property codes: only fields with a schema-verified
 destination (``integrations.bitrix.schema.CATALOG_PRODUCT_PROPERTIES`` /
-``OFFER_PROPERTIES``) are ever written. Fields this production installation
-has no verified destination for (EAN/GTIN, purchase/wholesale price -- see
-module docstring in ``integrations/bitrix/schema.py``: neither IBLOCK 14 nor
-15's known real properties include one) are reported to the user as
-*sourced from the file* but explicitly **not written**, never guessed onto
-an invented property id.
+``OFFER_PROPERTIES``, plus the native ``purchasingPrice``/
+``purchasingCurrency`` product fields -- see below) are ever written.
+Fields this production installation has no verified destination for
+(EAN/GTIN, category -- see module docstring in
+``integrations/bitrix/schema.py``) are reported to the user as *sourced
+from the file* but explicitly **not written**, never guessed onto an
+invented property id.
 
 Purchase price and retail price are kept structurally separate: the
-canonical payload built here never carries a ``purchase_price`` key
-anywhere a write path could read it, so the known
-``BitrixFixtureAdapter._write_product_create`` fallback (selling_price ->
-purchase_price when selling_price is blank) can never trigger -- retail
-price is a required field for this flow and is validated non-empty before
-any write is attempted.
+canonical payload built here carries any purchase price under its own,
+dedicated top-level ``purchase_price`` key (``{"amount", "currency"}``) --
+never inside the ``price`` dict a write path reads for the retail selling
+price, so the known ``BitrixFixtureAdapter._write_product_create`` fallback
+(selling_price -> purchase_price when selling_price is blank, which only
+ever looks *inside* the ``price`` dict) can never trigger, and purchase
+price can never be substituted for retail price. Retail price remains a
+required field for this flow and is validated non-empty before any write
+is attempted; purchase price is optional, but validated (fails closed --
+``invalid_purchase_price``, no write attempted) whenever it is present but
+not a valid positive number. Purchase price is a real LIVE production
+Bitrix write via the native ``purchasingPrice``/``purchasingCurrency``
+fields on ``catalog.product.add`` (Block 5.6 follow-up defect closure --
+see ``integrations.bitrix.live_adapter.LiveBitrixAdapter
+._write_product_create_live``); it is not yet persisted by the FIXTURE
+adapter/store, so ``prepare_single_product_write`` only reports it under
+``will_write`` for a LIVE-environment bridge, and still reports it under
+``will_not_write``/``not_written`` otherwise.
 
 The created product is always written **inactive** (``active=False``): a
 controlled first production write must not go live on the storefront
@@ -58,6 +71,7 @@ from data_intel.contracts import (
     ROLE_PURCHASE_PRICE,
     ROLE_SKU,
 )
+from integrations.activation.models import ENV_LIVE
 from integrations.bitrix.product_bridge import (
     SYNC_AMBIGUOUS,
     SYNC_CREATE,
@@ -85,10 +99,15 @@ _NO_EAN_DESTINATION = (
     "no_verified_bitrix_property_for_ean_on_this_installation "
     "(neither IBLOCK 14 nor 15's known real properties include one)"
 )
-_NO_PURCHASE_PRICE_DESTINATION = (
-    "no_verified_bitrix_destination_for_purchase_price_on_this_installation "
-    "(catalog.price.list rows are regional selling prices, not a wholesale/"
-    "purchase price type -- see integrations.bitrix.schema)"
+# Purchase price DOES have a verified native Bitrix destination
+# (purchasingPrice/purchasingCurrency -- see integrations.bitrix.schema's
+# module docstring and LiveBitrixAdapter._write_product_create_live), but
+# only the LIVE adapter implements writing it so far -- the FIXTURE
+# adapter/store this reason is used for still does not persist it.
+_PURCHASE_PRICE_ENV_UNSUPPORTED = (
+    "purchasing_price_has_a_verified_native_bitrix_destination_"
+    "(purchasingPrice/purchasingCurrency)_but_this_environment's_adapter_"
+    "does_not_yet_persist_it_(fixture/sandbox_only;_live_writes_it)"
 )
 _NO_CATEGORY_MAPPING = (
     "no_established_category_name_to_bitrix_section_mapping_for_this_tenant "
@@ -281,11 +300,13 @@ def _default_idempotency_key(tenant_id: str, request: SingleProductWriteRequest)
     return "cbw-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
 
 
-def _canonical_payload(request: SingleProductWriteRequest, *, retail_amount: str) -> dict:
-    # Deliberately NEVER includes a ``purchase_price`` key anywhere in this
-    # payload -- retail (selling) price is the only price value a write can
-    # ever read, structurally preventing purchase price from leaking into
-    # the public selling-price field.
+def _canonical_payload(
+    request: SingleProductWriteRequest, *, retail_amount: str, purchase_price_amount: str | None = None
+) -> dict:
+    # ``price.selling_price`` is the ONLY key any write path reads for the
+    # retail price. Any purchase price lives in its own, sibling
+    # ``purchase_price`` key (never nested inside ``price``), so it can
+    # never be substituted for -- or read as -- the retail selling price.
     canonical: dict = {
         "product_id": request.product_id or f"panda-controlled:{request.sku}",
         "title": request.title,
@@ -298,6 +319,11 @@ def _canonical_payload(request: SingleProductWriteRequest, *, retail_amount: str
         # not a guessed property; the fixture/live create path already
         # merges any ``properties`` dict supplied on the canonical product.
         canonical["properties"] = {"brand": request.brand}
+    if purchase_price_amount is not None:
+        # Native purchasingPrice/purchasingCurrency destination (Block 5.6
+        # follow-up defect closure) -- structurally separate top-level key,
+        # never read by the retail-price write path above.
+        canonical["purchase_price"] = {"amount": purchase_price_amount, "currency": request.currency}
     return canonical
 
 
@@ -318,7 +344,24 @@ def prepare_single_product_write(
     if retail_amount is None:
         return {"status": STATUS_UNRESOLVED, "reason": "missing_or_invalid_retail_price"}
 
-    canonical = _canonical_payload(request, retail_amount=retail_amount)
+    # Purchase price is optional, but if the source data supplied one it
+    # must be a valid positive number -- fail closed (never write a
+    # malformed/guessed value, never silently drop it either) rather than
+    # proceeding with bad data.
+    purchase_price_amount = None
+    if request.purchase_price:
+        purchase_price_amount = _normalize_price(request.purchase_price)
+        if purchase_price_amount is None:
+            return {"status": STATUS_UNRESOLVED, "reason": "invalid_purchase_price"}
+
+    # Purchase price's native destination (purchasingPrice/purchasingCurrency)
+    # is only implemented on the LIVE adapter so far (see
+    # LiveBitrixAdapter._write_product_create_live) -- the FIXTURE
+    # adapter/store does not yet persist it, so the preview must not claim
+    # a write that will not actually happen for a non-LIVE bridge.
+    purchase_price_has_destination = bridge.environment == ENV_LIVE and purchase_price_amount is not None
+
+    canonical = _canonical_payload(request, retail_amount=retail_amount, purchase_price_amount=purchase_price_amount)
     plan = bridge.plan_sync(tenant_id=tenant_id, canonical_product=canonical)
     action = plan.get("action")
     if action == SYNC_AMBIGUOUS:
@@ -350,8 +393,8 @@ def prepare_single_product_write(
         {"field": "ean", "value": request.ean, "reason": _NO_EAN_DESTINATION}
         if request.ean
         else None,
-        {"field": "purchase_price", "value": request.purchase_price, "reason": _NO_PURCHASE_PRICE_DESTINATION}
-        if request.purchase_price
+        {"field": "purchase_price", "value": request.purchase_price, "reason": _PURCHASE_PRICE_ENV_UNSUPPORTED}
+        if request.purchase_price and not purchase_price_has_destination
         else None,
         {"field": "category", "value": request.category_source, "reason": _NO_CATEGORY_MAPPING}
         if request.category_source
@@ -362,6 +405,10 @@ def prepare_single_product_write(
     will_write = ["name", "article/sku", "retail_selling_price"]
     if request.brand:
         will_write.append("brand (property 100 / BRAND, verified PANDA_MANAGED)")
+    if purchase_price_has_destination:
+        will_write.append(
+            "purchase_price (native purchasingPrice/purchasingCurrency fields, verified -- LIVE only)"
+        )
 
     return {
         "status": STATUS_REQUIRES_APPROVAL,
@@ -464,6 +511,7 @@ def execute_single_product_write(
             "sku": request.sku,
             "failed_step": write_result.get("failed_step"),
             "error": write_result.get("error"),
+            "purchase_price_written": bool(created_product.get("purchase_price_written")),
             "idempotency_key": key,
         }
 
@@ -483,7 +531,7 @@ def execute_single_product_write(
         "category_source": request.category_source or None,
         "retail_price": preview["retail_price"],
         "purchase_price_source": request.purchase_price or None,
-        "purchase_price_written": False,
+        "purchase_price_written": bool(created_product.get("purchase_price_written")),
         "active": False,
         "published": False,
         "not_written": preview["will_not_write"],
@@ -543,6 +591,8 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
         ]
         if result.get("brand"):
             lines.append(f"Бренд: {result.get('brand')}")
+        if result.get("purchase_price_written"):
+            lines.append(f"Закупочная цена: {result.get('purchase_price_source')} {retail.get('currency')}")
         not_written = result.get("not_written") or []
         if not_written:
             fields = ", ".join(str(item.get("field")) for item in not_written)
