@@ -15,6 +15,7 @@ Bitrix property for a characteristic it cannot verify.
 
 from __future__ import annotations
 
+import html as html_module
 import re
 from typing import Iterable, Mapping, Sequence
 
@@ -68,6 +69,20 @@ _LABEL_LOOKUP: tuple[tuple[str, str], ...] = tuple(
 # never gets shadowed by a shorter one appearing earlier in iteration order.
 _LABEL_LOOKUP = tuple(sorted(_LABEL_LOOKUP, key=lambda item: -len(item[0])))
 
+# Unit tokens that are SYNONYMS of a canonical key's own declared unit --
+# a value like "120 Гц" for ``refresh_rate_hz`` (declared unit ``Hz``)
+# already states that unit, so keeping the token duplicated it downstream
+# ("частота обновления 120 Гц Гц"). Stripping a synonym token is not a
+# conversion: the number is unchanged and stays in its declared unit.
+_UNIT_SYNONYMS: Mapping[str, tuple[str, ...]] = {
+    "Hz": ("гц", "hz"),
+    "W": ("вт", "w"),
+    "kg": ("кг", "kg"),
+    "cm": ("см", "cm"),
+    "mm": ("мм", "mm"),
+}
+_NUMBER_WITH_UNIT_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([^\d\s]{1,3})?\.?$", re.UNICODE)
+
 _INCH_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\"|inch|inches|дюйм)", re.I)
 _CM_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:cm|см)", re.I)
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
@@ -81,6 +96,9 @@ _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
 # "label: value" spec line by ``extract_spec_lines`` below.
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _HTML_TAG_RE = re.compile(r"<[^>]+>")
+_HTML_TAG_SPLIT_RE = re.compile(r"(<[^>]+>)")
+_ANCHOR_OPEN_RE = re.compile(r"<a\b", re.IGNORECASE)
+_WHITESPACE_RE = re.compile(r"[\s\u00a0]+")
 
 
 def _strip_html_markup(text: str) -> str:
@@ -92,18 +110,68 @@ def _strip_html_markup(text: str) -> str:
     return _HTML_TAG_RE.sub(" ", without_scripts)
 
 
+def html_text_nodes(text: str) -> tuple[tuple[str, bool], ...]:
+    """Splits a page body into its ordered, non-empty TEXT NODES, each
+    paired with whether it is anchor (``<a>``) text.
+
+    A tag boundary is a text-node boundary: real product pages put a
+    characteristic's label and its value in SEPARATE elements (table
+    cells, ``<dt>``/``<dd>``, or nested ``<div>``/``<span>`` pairs), so
+    markup must SPLIT the two, never glue them into one string. Character
+    entities are decoded and whitespace (including ``&nbsp;``) collapsed,
+    so values such as ``55&quot;`` / ``120&nbsp;Гц`` are the literal text
+    a reader sees. Plain-text pages simply come back as their own lines."""
+    without_scripts = _SCRIPT_STYLE_RE.sub(" ", str(text or ""))
+    nodes: list[tuple[str, bool]] = []
+    in_anchor = False
+    for chunk in _HTML_TAG_SPLIT_RE.split(without_scripts):
+        if not chunk:
+            continue
+        if chunk.startswith("<") and chunk.endswith(">"):
+            if _ANCHOR_OPEN_RE.match(chunk):
+                in_anchor = True
+            elif chunk.casefold().startswith("</a"):
+                in_anchor = False
+            continue
+        for raw_line in html_module.unescape(chunk).splitlines():
+            line = _WHITESPACE_RE.sub(" ", raw_line).strip()
+            if line:
+                nodes.append((line, in_anchor))
+    return tuple(nodes)
+
+
+# A recognized alias must actually BE the label, not merely occur
+# somewhere inside a long unrelated string. Real catalog pages are full of
+# marketing/cross-sell text that happens to contain a characteristic word
+# (e.g. a related-product line 'Телевизор LG 65" OLED65G5RLA.ARUG (Цвет'
+# followed by its price) -- accepting those as a "Цвет" label produced
+# garbage facts which then collided with the real value and got dropped as
+# a conflict, leaving zero characteristics.
+_SHORT_LABEL_MAX_CHARS = 24
+_MIN_ALIAS_COVERAGE = 0.4
+
+
+def _alias_is_significant(alias: str, label: str) -> bool:
+    return len(label) <= _SHORT_LABEL_MAX_CHARS or len(alias) >= _MIN_ALIAS_COVERAGE * len(label)
+
+
 def match_canonical_key(raw_label: str) -> str | None:
     """Substring match against the alias table -- never a fuzzy/guessed
     key. Returns None for any label this table has no verified mapping
     for (the caller must keep it out of the characteristics contract, per
     the "unknown characteristic: preserve source data, do not write it"
     requirement -- callers upstream of this module are responsible for
-    keeping raw source data elsewhere if they want to retain it)."""
+    keeping raw source data elsewhere if they want to retain it).
+
+    A match additionally requires the alias to be significant relative to
+    the whole label (``_alias_is_significant``), so a characteristic word
+    buried in a long sentence is not mistaken for that characteristic's
+    label."""
     blob = str(raw_label or "").strip().casefold()
     if not blob:
         return None
     for alias, key in _LABEL_LOOKUP:
-        if alias in blob:
+        if alias in blob and _alias_is_significant(alias, blob):
             return key
     return None
 
@@ -129,6 +197,11 @@ def normalize_characteristic_value(key: str, raw_value: str) -> tuple[str, str]:
             # table's declared unit (cm) -- never re-interpreted as inches.
             return number_match.group(0).replace(",", "."), "cm"
         return text, unit
+    synonyms = _UNIT_SYNONYMS.get(unit)
+    if synonyms:
+        match = _NUMBER_WITH_UNIT_RE.match(text)
+        if match and (match.group(2) or "").casefold() in ("", *synonyms):
+            return match.group(1).replace(",", "."), unit
     return text, unit
 
 
@@ -239,24 +312,78 @@ def merge_facts_into_characteristics(
     return resolved, tuple(conflicts)
 
 
+_MAX_INLINE_LINE_CHARS = 200
+_MAX_STRUCTURAL_LABEL_CHARS = 60
+_MAX_STRUCTURAL_VALUE_CHARS = 120
+_LABEL_TRAILING_CHARS = " \t:\u2014\u2013-\u00a0"
+
+
+def _inline_pair(line: str) -> tuple[str, str] | None:
+    for sep in (":", "\u2014", "-", "\u2013"):
+        if sep in line:
+            label, _, value = line.partition(sep)
+            label = label.strip()
+            value = value.strip()
+            if label and value and len(label) < 80:
+                return label, value
+    return None
+
+
+def _plausible_structural_value(value: str) -> bool:
+    if not value or len(value) > _MAX_STRUCTURAL_VALUE_CHARS:
+        return False
+    if not any(ch.isalnum() for ch in value):
+        return False
+    # A trailing separator marks the text as the NEXT label (a value-less
+    # label, e.g. one whose value is a colour swatch), never as a value.
+    if value.endswith((":", "\u2014", "\u2013")):
+        return False
+    # A second recognized LABEL is never the first one's value (e.g. a
+    # column of labels followed by a column of values).
+    return match_canonical_key(value.strip(_LABEL_TRAILING_CHARS)) is None
+
+
 def extract_spec_lines(page_text: str) -> Iterable[tuple[str, str]]:
-    """Best-effort extraction of ``label: value`` / ``label — value`` spec
-    lines from plain page text (manufacturer/distributor spec pages
-    commonly render one characteristic per line in this shape). Never
-    invents a label/value that is not literally present in the text --
-    lines that do not match the pattern are simply skipped. Markup is
-    stripped first (see ``_strip_html_markup``) so raw HTML page bodies
-    never leak tag/attribute/CSS/JS colons into the result."""
-    plain_text = _strip_html_markup(page_text)
-    for raw_line in plain_text.splitlines():
-        line = raw_line.strip()
-        if not line or len(line) > 200:
+    """Best-effort extraction of ``(label, value)`` characteristic pairs
+    from one fetched page, in the two shapes real sources actually use:
+
+    1. ``label: value`` / ``label — value`` on a single line -- plain-text
+       spec sheets and pages that render a characteristic as one string;
+    2. STRUCTURAL pairs -- a text node whose text is a recognized
+       characteristic label (``match_canonical_key``) immediately followed
+       by the next text node, which is its value. This is how every real
+       catalog page renders specifications: ``<th>label</th><td>value</td>``,
+       ``<dt>label</dt><dd>value</dd>`` or nested ``<div>``/``<span>``
+       pairs. Before this, only shape 1 was supported, so a real product
+       page (whose markup carries no colon between label and value, and
+       whose minified body has no line breaks either) produced ZERO
+       characteristics.
+
+    Never invents a label/value that is not literally present in the page:
+    labels must match the verified alias table and values are the adjacent
+    text node verbatim. Text rendered as link text is skipped in both
+    shapes (site navigation and cross-sell blocks, e.g. a
+    "HDMI-кабели" category link, are never specifications)."""
+    nodes = html_text_nodes(page_text)
+    inline_pair_indexes: set[int] = set()
+    for index, (line, in_anchor) in enumerate(nodes):
+        if in_anchor or len(line) > _MAX_INLINE_LINE_CHARS:
             continue
-        for sep in (":", "\u2014", "-", "\u2013"):
-            if sep in line:
-                label, _, value = line.partition(sep)
-                label = label.strip()
-                value = value.strip()
-                if label and value and len(label) < 80:
-                    yield label, value
-                    break
+        pair = _inline_pair(line)
+        if pair is not None:
+            inline_pair_indexes.add(index)
+            yield pair
+
+    for index, (line, in_anchor) in enumerate(nodes):
+        if index in inline_pair_indexes or in_anchor:
+            continue
+        if len(line) > _MAX_STRUCTURAL_LABEL_CHARS:
+            continue
+        label = line.strip(_LABEL_TRAILING_CHARS)
+        if not label or match_canonical_key(label) is None:
+            continue
+        if index + 1 >= len(nodes):
+            continue
+        value = nodes[index + 1][0].strip()
+        if _plausible_structural_value(value):
+            yield label, value
