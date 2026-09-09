@@ -485,6 +485,36 @@ _BITRIX_CREATE_VERB_STEMS = (
     "create",
     "publish",
     "write it",
+    # Production defect closure: an owner confirming an ALREADY prepared
+    # card most often names the ACTION as a noun ("подтверждаю запись",
+    # "выполни запись") rather than using an imperative create verb. Without
+    # these, such a turn matched no Bitrix branch at all and fell through to
+    # the FAMILY_EXCEL continuation, which simply re-printed the prepared
+    # product-card preview instead of performing the governed write.
+    # Multi-word phrases (never a bare "запис" stem) so an unrelated mention
+    # of "запись" cannot satisfy this on its own.
+    "подтверждаю запись",
+    "подтверждаю эту запись",
+    "выполни запись",
+    "выполнить запись",
+    "выполняй запись",
+    "сделай запись",
+    "записать",
+    "записывай",
+    "запишите",
+    "perform the write",
+    "do the write",
+    "write this product",
+    "write the product",
+    "write this prepared product",
+)
+# Fail closed: an explicit "do NOT write" in the same message always wins
+# over a confirmation phrase above (the enrichment/preview replies this
+# conversation flow produces routinely end with "Ничего в Bitrix не
+# записывай"-style wording).
+_BITRIX_NO_WRITE_RE = re.compile(
+    r"(не\s+запис|без\s+записи|don'?t\s+write|do\s+not\s+write|nothing\s+to\s+bitrix)",
+    re.I,
 )
 _CONFIRMED_RETAIL_PRICE_RE = re.compile(
     r"(розничн\w*|продажн\w*|retail|selling)\D{0,20}?(\d[\d\s]*(?:[.,]\d+)?)", re.I
@@ -653,9 +683,16 @@ def is_explicit_bitrix_write_confirmation(text: str) -> bool:
     цена 29990 ₽.'. Requires all three signals (confirmation marker +
     Bitrix target + create/write verb); a bare 'да'/'ок'/'давай'/'продолжай'/
     'делай дальше' -- with or without an active task -- can never satisfy
-    this, so approval is never inferred from a vague continuation phrase."""
+    this, so approval is never inferred from a vague continuation phrase.
+    An explicit "do not write" or a read-only "what would be written?"
+    question (see ``is_bitrix_write_plan_question``) always wins over the
+    confirmation phrases -- approval must be unambiguous."""
     blob = _norm(text)
     if not blob:
+        return False
+    if _BITRIX_NO_WRITE_RE.search(blob):
+        return False
+    if _is_write_plan_ask(blob):
         return False
     if not _has_stem(blob, _BITRIX_APPROVAL_MARKER_STEMS):
         return False
@@ -699,6 +736,15 @@ _WRITE_PLAN_RE = re.compile(
     r"(буд(ет|ут)\s+записан|что\s+именно\s+(будет\s+)?запис|(would|will)\s+be\s+written)",
     re.I,
 )
+
+
+def _is_write_plan_ask(text: str) -> bool:
+    """The "show me what WOULD be written" shape shared by
+    ``is_bitrix_write_plan_question`` (which routes it) and
+    ``is_explicit_bitrix_write_confirmation`` (which must never mistake it
+    for approval)."""
+    blob = _norm(text)
+    return _has_stem(blob, _WRITE_PLAN_ASK_STEMS) and bool(_WRITE_PLAN_RE.search(blob))
 
 
 def is_bitrix_write_plan_question(text: str) -> bool:
