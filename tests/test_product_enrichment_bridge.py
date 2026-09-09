@@ -60,7 +60,12 @@ class _FakeToolGateway:
     async def search(self, query, max_results=5):
         return self._search_results[:max_results]
 
-    async def invoke(self, request):
+    async def invoke(self, request, **_kwargs):
+        # ``ToolGatewayResearchAdapter.fetch_text`` passes ``capabilities=``
+        # (a real ``CapabilitySet``) so a REAL, capability-enforcing
+        # ``ToolGateway.invoke`` actually authorizes ``scrape.fetch`` --
+        # accepted and ignored here since this double never enforces
+        # capabilities itself.
         from types import SimpleNamespace
 
         url = str(request.arguments.get("url") or "")

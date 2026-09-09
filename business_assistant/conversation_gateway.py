@@ -272,6 +272,7 @@ class WorkflowPandaConversationGateway:
         tool_capabilities=None,
         artifact_service=None,
         bitrix_product_bridge=None,
+        media_fetcher=None,
     ):
         self._workflow_engine = workflow_engine
         self._run_router = run_router
@@ -304,6 +305,20 @@ class WorkflowPandaConversationGateway:
         from product_enrichment.cache import EnrichmentCache
 
         self._enrichment_cache = EnrichmentCache()
+        # Product enrichment "MEDIA GAP" closure: the EXISTING, unchanged
+        # product_enrichment.media_fetch.GovernedImageFetcher (SSRF-safe
+        # raw binary download -- see its own module docstring) is the one
+        # capability this conversational path previously never
+        # constructed/passed at all, so image candidates research
+        # discovers had nowhere to go. None-safe injection point for
+        # tests (a FakeImageFetcher/mocked-transport instance); defaults
+        # to a real fetcher in production -- construction itself makes no
+        # network call.
+        if media_fetcher is None:
+            from product_enrichment.media_fetch import GovernedImageFetcher
+
+            media_fetcher = GovernedImageFetcher()
+        self._media_fetcher = media_fetcher
         self.last_action_decision = None
 
     def _record_latency(self, t0: float, follow_up_ms: int) -> None:
@@ -717,6 +732,7 @@ class WorkflowPandaConversationGateway:
                 retail_price=retail_price,
                 bitrix_bridge=self._bitrix_bridge,
                 tool_gateway=self._tool_gateway,
+                media_fetcher=self._media_fetcher,
                 cache=self._enrichment_cache,
             )
         except Exception:

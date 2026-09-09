@@ -104,13 +104,18 @@ def _bitrix_bridge() -> tuple[BitrixProductBridge, BitrixCatalogStore]:
     return bridge, store
 
 
-def _panda(*, bitrix_bridge=None):
+def _panda(*, bitrix_bridge=None, search_provider=None, scrape_fetch_handler=None, media_fetcher=None):
     svc = DataIntelligenceService(InMemoryDatasetStore())
     artifact_service = ArtifactService(store=InMemoryArtifactStore())
     svc.artifact_service = artifact_service
     registry = ToolRegistry()
     register_platform_tools(registry, data_intelligence=svc)
-    gateway = ToolGateway(registry=registry, register_search=False)
+    if scrape_fetch_handler is not None:
+        import httpx
+
+        adapters = {row.descriptor.tool_id: row.adapter for row in registry._items.values()}  # noqa: SLF001
+        adapters["scrape.fetch"]._transport = httpx.MockTransport(scrape_fetch_handler)  # noqa: SLF001
+    gateway = ToolGateway(registry=registry, register_search=False, search_provider=search_provider)
     panda = WorkflowPandaConversationGateway(
         workflow_engine=object(),
         run_router=object(),
@@ -118,6 +123,7 @@ def _panda(*, bitrix_bridge=None):
         tool_gateway=gateway,
         artifact_service=artifact_service,
         bitrix_product_bridge=bitrix_bridge,
+        media_fetcher=media_fetcher,
     )
     return panda, artifact_service
 
@@ -206,6 +212,119 @@ class EnrichmentPreviewDoesNotMutateBitrixTests(unittest.IsolatedAsyncioTestCase
         )
         self.assertTrue(second.metadata.get("duplicate"))
         self.assertEqual(len(store.catalog("tenant-a")), before)
+
+
+class EnrichmentResearchAndMediaCandidatePropagationTests(unittest.IsolatedAsyncioTestCase):
+    """Brave-search-shaped end-to-end coverage (PR #49 follow-up): a real
+    ToolGateway.search() result feeds product_enrichment's research,
+    scrape.fetch (mocked transport, never live network) supplies page
+    text, an image URL embedded in that SAME page is auto-discovered and
+    propagated -- with NO explicit media_candidates -- into the EXISTING
+    GovernedImageFetcher/MediaAcquisitionService path, and NEVER causes
+    any Bitrix mutation or bypasses the separate explicit confirmation
+    gate."""
+
+    RESEARCH_URL = "https://www.lg.com/ru/55MRGB86B6A.ARUG-review"
+    IMAGE_URL = "https://www.lg.com/ru/photos/55mrgb86b6a-hero.png"
+
+    def _png_bytes(self) -> bytes:
+        import io
+
+        from PIL import Image
+
+        img = Image.new("RGB", (400, 400), (10, 20, 30))
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+    def _scrape_fetch_handler(self):
+        import httpx
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if str(request.url) == self.RESEARCH_URL:
+                html = (
+                    f'<html><head><meta property="og:image" content="{self.IMAGE_URL}">'
+                    "</head><body>Цвет: черный</body></html>"
+                )
+                return httpx.Response(200, headers={"content-type": "text/html"}, text=html)
+            return httpx.Response(404)
+
+        return handler
+
+    async def test_media_candidate_from_research_reaches_governed_image_fetcher_with_zero_mutation(self):
+        from product_enrichment.media_fetch import FakeImageFetcher
+        from tools.search.fake_provider import FakeSearchProvider, fake_result
+
+        search_provider = FakeSearchProvider(
+            {
+                f"{TARGET_BRAND} {TARGET_SKU}": [
+                    fake_result(self.RESEARCH_URL, title=f"{TARGET_BRAND} {TARGET_SKU} review")
+                ]
+            }
+        )
+        media_fetcher = FakeImageFetcher({self.IMAGE_URL: self._png_bytes()})
+
+        bridge, store = _bitrix_bridge()
+        panda, artifact_service = _panda(
+            bitrix_bridge=bridge,
+            search_provider=search_provider,
+            scrape_fetch_handler=self._scrape_fetch_handler(),
+            media_fetcher=media_fetcher,
+        )
+        ref = await _register_upload(
+            artifact_service, tenant="tenant-a", owner="u1", conv="c1", filename="LG.xlsx", content=_price_list_bytes()
+        )
+        await panda.respond(
+            ConversationRequest(
+                text=PREVIEW_TURN_TEXT,
+                tenant_id="tenant-a",
+                user_id="u1",
+                request_id="r1",
+                conversation_id="c1",
+                attachment_refs=(ref,),
+            )
+        )
+        before = len(store.catalog("tenant-a"))
+
+        result = await panda.respond(
+            ConversationRequest(
+                text=ENRICHMENT_TURN_TEXT,
+                tenant_id="tenant-a",
+                user_id="u1",
+                request_id="r2",
+                conversation_id="c1",
+            )
+        )
+
+        # Zero Bitrix mutation from enrichment alone -- unchanged approval boundary.
+        self.assertEqual(result.metadata.get("action_decision"), CALL_PRODUCT_ENRICHMENT)
+        self.assertEqual(len(store.catalog("tenant-a")), before)
+
+        preview = result.metadata.get("enrichment_preview") or {}
+        media_preview = preview.get("media") or {}
+        self.assertEqual(media_preview.get("status"), "ready")
+
+        # The raw external image URL must never leak into the write
+        # request's picture payloads -- only filename/base64.
+        task = panda._action_store.get(tenant_id="tenant-a", owner_id="u1", conversation_id="c1")  # noqa: SLF001
+        self.assertIsNotNone(task)
+        write_request = task.parameters["bitrix_enrichment_write_request"]
+        preview_picture = write_request.get("preview_picture") or {}
+        self.assertTrue(preview_picture.get("base64"))
+        self.assertNotIn(self.IMAGE_URL, str(preview_picture))
+        self.assertNotIn(self.IMAGE_URL, result.text)
+
+    async def test_no_media_fetcher_configured_still_produces_preview_without_hotlink(self):
+        """A conversational gateway constructed WITHOUT an explicit
+        media_fetcher must default to a real (production-shaped)
+        GovernedImageFetcher -- never crash, never silently skip the
+        MEDIA GAP closure -- even though this test's own fake search/
+        fetch capabilities never trigger a real network call."""
+        bridge, _store = _bitrix_bridge()
+        panda, _artifact_service = _panda(bitrix_bridge=bridge)
+        from product_enrichment.media_fetch import GovernedImageFetcher
+
+        self.assertIsInstance(panda._media_fetcher, GovernedImageFetcher)  # noqa: SLF001
 
 
 class EnrichmentMissingContextTests(unittest.IsolatedAsyncioTestCase):

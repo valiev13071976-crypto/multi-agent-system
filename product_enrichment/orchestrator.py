@@ -88,15 +88,32 @@ async def enrich_product(
 
     facts: tuple[SourceFact, ...] = tuple(extra_facts)
     research_available = search_port is not None and fetch_port is not None
+    # Requirement 7 (the "MEDIA GAP"): image/product-page candidates
+    # discovered from the SAME identity-verified, non-conflicting pages
+    # research already fetched for characteristics -- research_product()
+    # appends into this list, never replacing the caller's own explicit
+    # ``media_candidates``. Zero new fetch/search infrastructure; this is
+    # purely the missing hookup between the two EXISTING capabilities.
+    discovered_media_candidates: list[MediaCandidateInput] = []
     if research_available:
         observer.emit(STAGE_RESEARCH_STARTED, identity_key=identity.identity_key)
         try:
-            researched = await research_product(identity, search_port=search_port, fetch_port=fetch_port, observer=observer)
+            researched = await research_product(
+                identity,
+                search_port=search_port,
+                fetch_port=fetch_port,
+                observer=observer,
+                media_sink=discovered_media_candidates,
+            )
         except Exception as exc:  # noqa: BLE001 -- a research failure degrades, never aborts enrichment
             observer.emit(STAGE_FAILED, component="research", reason=type(exc).__name__)
             researched = ()
         facts = facts + researched
-        observer.emit(STAGE_RESEARCH_COMPLETED, fact_count=len(researched))
+        observer.emit(
+            STAGE_RESEARCH_COMPLETED,
+            fact_count=len(researched),
+            media_candidate_count=len(discovered_media_candidates),
+        )
 
     characteristics, conflicts = merge_facts_into_characteristics(facts)
     characteristics = bridge_characteristics_to_bitrix(characteristics)
@@ -105,11 +122,19 @@ async def enrich_product(
     content = generate_content(identity, characteristics)
     observer.emit(STAGE_CONTENT_PREPARED, facts_used=len(content.facts_used))
 
+    # Caller-supplied candidates (e.g. a future explicit "use this exact
+    # photo" input) always take priority in ordering; auto-discovered ones
+    # from research fill in behind them, deduplicated by URL.
+    existing_urls = {c.url for c in media_candidates}
+    combined_media_candidates = tuple(media_candidates) + tuple(
+        c for c in discovered_media_candidates if c.url not in existing_urls
+    )
+
     media_result = MediaResult()
-    if media_fetcher is not None and media_candidates:
+    if media_fetcher is not None and combined_media_candidates:
         media_service = MediaAcquisitionService(fetcher=media_fetcher)
         try:
-            media_result = await media_service.acquire(media_candidates, identity=identity)
+            media_result = await media_service.acquire(combined_media_candidates, identity=identity)
         except Exception as exc:  # noqa: BLE001 -- media failures degrade to "unresolved", never abort enrichment
             observer.emit(STAGE_FAILED, component="media", reason=type(exc).__name__)
             media_result = MediaResult()

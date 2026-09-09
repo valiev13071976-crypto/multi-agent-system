@@ -111,6 +111,90 @@ class EnrichProductTests(unittest.TestCase):
         self.assertIn("product_identity_resolved", observer.stages())
         self.assertIn("enrichment_preview_ready", observer.stages())
 
+    def test_media_candidates_auto_discovered_from_research_without_explicit_candidates(self):
+        """Requirement 7 (the "MEDIA GAP"): with NO explicit media_candidates
+        supplied at all, an image URL discovered in the SAME
+        identity-verified, non-conflicting page research already fetched
+        for characteristics must still reach GovernedImageFetcher /
+        MediaAcquisitionService and produce a real processed asset."""
+        url = "https://www.lg.com/ru/55MRGB86B6A.ARUG-review"
+        image_url = "https://www.lg.com/ru/photos/hero.png"
+        search = FakeSearchProvider({"LG 55MRGB86B6A.ARUG": [fake_result(url, title="LG 55MRGB86B6A.ARUG review")]})
+        html = f'<html><head><meta property="og:image" content="{image_url}"></head><body>Цвет: черный</body></html>'
+        fetch = _FakeFetchPort({url: html})
+        media_fetcher = FakeImageFetcher({image_url: _png()})
+
+        result = _run(
+            enrich_product(
+                tenant_id="t1",
+                query=_query(),
+                search_port=search,
+                fetch_port=fetch,
+                media_fetcher=media_fetcher,
+                # Deliberately NOT passing media_candidates.
+            )
+        )
+        self.assertTrue(any(a.role == "preview" for a in result.media.assets))
+        self.assertEqual(result.media.status, result.media.STATUS_READY)
+        preview_asset = next(a for a in result.media.assets if a.role == "preview")
+        # The external URL is retained only as provenance -- never the
+        # thing actually handed downstream (that's base64_content).
+        self.assertEqual(preview_asset.source_url, image_url)
+        self.assertTrue(preview_asset.base64_content)
+        self.assertNotIn(image_url, preview_asset.base64_content)
+
+    def test_explicit_media_candidates_take_priority_over_discovered_ones(self):
+        research_url = "https://www.lg.com/ru/55MRGB86B6A.ARUG-review"
+        discovered_image = "https://www.lg.com/ru/photos/discovered.png"
+        explicit_image = "https://www.lg.com/ru/photos/explicit.png"
+        search = FakeSearchProvider(
+            {"LG 55MRGB86B6A.ARUG": [fake_result(research_url, title="LG 55MRGB86B6A.ARUG review")]}
+        )
+        html = f'<html><head><meta property="og:image" content="{discovered_image}"></head><body>Цвет: черный</body></html>'
+        fetch = _FakeFetchPort({research_url: html})
+        media_fetcher = FakeImageFetcher({discovered_image: _png(500, 500), explicit_image: _png(300, 300)})
+
+        result = _run(
+            enrich_product(
+                tenant_id="t1",
+                query=_query(),
+                search_port=search,
+                fetch_port=fetch,
+                media_fetcher=media_fetcher,
+                media_candidates=(MediaCandidateInput(url=explicit_image, source_type=SOURCE_MANUFACTURER),),
+            )
+        )
+        preview_asset = next(a for a in result.media.assets if a.role == "preview")
+        # The explicit candidate is master (accepted[0]); the discovered
+        # one is still kept, just ordered behind it (gallery).
+        self.assertEqual(preview_asset.source_url, explicit_image)
+        self.assertTrue(any(a.source_url == discovered_image for a in result.media.assets))
+
+    def test_no_media_fetcher_configured_never_downloads_discovered_candidates(self):
+        """No hotlink/download must ever be attempted when the caller has
+        not wired a media_fetcher at all -- discovery alone must never
+        cause an implicit network call."""
+        research_url = "https://www.lg.com/ru/55MRGB86B6A.ARUG-review"
+        discovered_image = "https://www.lg.com/ru/photos/discovered.png"
+        search = FakeSearchProvider(
+            {"LG 55MRGB86B6A.ARUG": [fake_result(research_url, title="LG 55MRGB86B6A.ARUG review")]}
+        )
+        html = f'<html><head><meta property="og:image" content="{discovered_image}"></head><body>Цвет: черный</body></html>'
+        fetch = _FakeFetchPort({research_url: html})
+
+        result = _run(
+            enrich_product(
+                tenant_id="t1",
+                query=_query(),
+                search_port=search,
+                fetch_port=fetch,
+                # No media_fetcher at all.
+            )
+        )
+        from product_enrichment.models import MediaResult
+
+        self.assertEqual(result.media, MediaResult())
+
     def test_research_exception_degrades_gracefully_never_raises(self):
         class BrokenSearch:
             async def search(self, query, max_results=5):
