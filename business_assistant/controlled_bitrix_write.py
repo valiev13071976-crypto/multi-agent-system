@@ -52,6 +52,14 @@ adapter/store, so ``prepare_single_product_write`` only reports it under
 The created product is always written **inactive** (``active=False``): a
 controlled first production write must not go live on the storefront
 without a further, separate, explicit publish decision.
+
+Product enrichment pipeline follow-up (``product_enrichment`` package):
+``SingleProductWriteRequest`` also carries ``preview_picture``/
+``detail_picture`` (each ``{"filename", "base64"}`` -- ALREADY downloaded/
+validated/processed bytes, never a bare external URL/hotlink -- see
+``product_enrichment.media``) so the enrichment pipeline's output can flow
+straight into this same, unchanged write/approval/read-back path via
+``business_assistant.product_enrichment_bridge``.
 """
 
 from __future__ import annotations
@@ -254,6 +262,16 @@ class SingleProductWriteRequest:
     short_description: str = ""
     detailed_description: str = ""
     characteristics: Mapping[str, str] = field(default_factory=dict)
+    # Product enrichment pipeline follow-up: verified Bitrix write shape for
+    # both picture fields is ``{"filename": str, "base64": str}`` (see
+    # ``integrations.bitrix.live_adapter.LiveBitrixAdapter._media_fields``
+    # / ``integrations.bitrix.schema.PICTURE_FILE_DATA_KEY``). This module
+    # never fetches/encodes an image itself -- callers (e.g.
+    # ``business_assistant.product_enrichment_bridge``) must already have
+    # downloaded, validated and base64-encoded the exact bytes to send;
+    # an empty dict here means "no image supplied", never a guessed one.
+    preview_picture: Mapping[str, str] = field(default_factory=dict)
+    detail_picture: Mapping[str, str] = field(default_factory=dict)
 
 
 def _first_column_value(row: dict, columns, role: str) -> str:
@@ -333,7 +351,19 @@ def build_write_request_from_fields(
         short_description=str(fields.get("short_description") or ""),
         detailed_description=str(fields.get("detailed_description") or ""),
         characteristics={str(k): str(v) for k, v in dict(raw_characteristics).items() if v not in (None, "")},
+        preview_picture=_clean_picture_field(fields.get("preview_picture")),
+        detail_picture=_clean_picture_field(fields.get("detail_picture")),
     )
+
+
+def _clean_picture_field(raw) -> dict:
+    if not isinstance(raw, Mapping):
+        return {}
+    filename = str(raw.get("filename") or "")
+    base64_content = str(raw.get("base64") or "")
+    if not filename or not base64_content:
+        return {}
+    return {"filename": filename, "base64": base64_content}
 
 
 def _normalize_price(raw: str) -> str | None:
@@ -386,6 +416,26 @@ def _normalize_physical_fields(request: SingleProductWriteRequest) -> tuple[dict
     return fields, None
 
 
+def _normalize_media_fields(request: SingleProductWriteRequest) -> tuple[dict, str | None]:
+    """Fail-closed validation for the two picture fields (schema.py items
+    E/F): each, if supplied at all, MUST already carry both ``filename``
+    and non-empty ``base64`` content -- this module never fetches/encodes
+    an image itself, so a malformed/partial entry can only mean a caller
+    bug, and is refused (no write attempted) rather than silently dropped
+    or sent half-formed."""
+    fields: dict = {}
+    for attr, media_key in (("preview_picture", "preview_picture"), ("detail_picture", "detail_picture")):
+        entry = getattr(request, attr) or {}
+        if not entry:
+            continue
+        filename = str(entry.get("filename") or "")
+        base64_content = str(entry.get("base64") or "")
+        if not filename or not base64_content:
+            return {}, f"invalid_{attr}"
+        fields[media_key] = {"filename": filename, "base64": base64_content}
+    return fields, None
+
+
 def _canonical_payload(
     request: SingleProductWriteRequest,
     *,
@@ -394,6 +444,7 @@ def _canonical_payload(
     section_id=None,
     physical_fields: dict | None = None,
     characteristics: Mapping[str, str] | None = None,
+    media_fields: dict | None = None,
 ) -> dict:
     # ``price.selling_price`` is the ONLY key any write path reads for the
     # retail price. Any purchase price lives in its own, sibling
@@ -437,6 +488,13 @@ def _canonical_payload(
         # unrecognized one) is ``schema.map_characteristics_to_properties``,
         # invoked by the LIVE adapter itself; never duplicated here.
         canonical["characteristics"] = dict(characteristics)
+    if media_fields:
+        # Native previewPicture/detailPicture destination (schema.py items
+        # E/F) -- ALREADY validated/base64-encoded by the caller (e.g. the
+        # product enrichment pipeline's downloaded/processed media, never
+        # a bare external URL/hotlink); this module never fetches an image
+        # itself, it only passes the already-prepared bytes through.
+        canonical["media"] = media_fields
     return canonical
 
 
@@ -482,6 +540,13 @@ def prepare_single_product_write(
     physical_fields, physical_error = _normalize_physical_fields(request)
     if physical_error:
         return {"status": STATUS_UNRESOLVED, "reason": physical_error}
+
+    # Preview/detail pictures (schema.py items E/F, product enrichment
+    # pipeline follow-up) -- fail closed on a malformed supplied entry,
+    # before any sync/write, same as physical dimensions above.
+    media_fields, media_error = _normalize_media_fields(request)
+    if media_error:
+        return {"status": STATUS_UNRESOLVED, "reason": media_error}
 
     # Category/section (schema.py module docstring item A) -- resolving
     # WHICH section requires a real ``catalog.section.list`` read, which
@@ -540,6 +605,7 @@ def prepare_single_product_write(
         section_id=section_id,
         physical_fields=physical_fields or None,
         characteristics=request.characteristics,
+        media_fields=media_fields or None,
     )
     plan = bridge.plan_sync(tenant_id=tenant_id, canonical_product=canonical)
     action = plan.get("action")
@@ -601,6 +667,10 @@ def prepare_single_product_write(
         will_write.append(f"physical ({', '.join(sorted(physical_fields))}, native fields, no unit conversion)")
     if request.short_description or request.detailed_description:
         will_write.append("content (previewText/detailText, native fields)")
+    if media_fields:
+        will_write.append(
+            f"media ({', '.join(sorted(media_fields))}, native previewPicture/detailPicture fileData fields, uploaded bytes -- never a hotlink)"
+        )
     written_characteristics = [k for k in request.characteristics if k not in unmapped_characteristics]
     if written_characteristics and characteristics_have_destination:
         will_write.append(f"characteristics ({', '.join(sorted(written_characteristics))}, verified -- LIVE only)")
@@ -711,6 +781,7 @@ def execute_single_product_write(
             "purchase_price_written": bool(created_product.get("purchase_price_written")),
             "section_id_written": created_product.get("section_id_written"),
             "characteristics_written": created_product.get("characteristics_written") or [],
+            "media_written": created_product.get("media_written") or [],
             "idempotency_key": key,
         }
 
@@ -742,6 +813,7 @@ def execute_single_product_write(
         "purchase_price_written": bool(created_product.get("purchase_price_written")),
         "section_id_written": created_product.get("section_id_written"),
         "characteristics_written": created_product.get("characteristics_written") or [],
+        "media_written": created_product.get("media_written") or [],
         "active": False,
         "published": False,
         "not_written": preview["will_not_write"],
@@ -807,6 +879,8 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
             lines.append(f"Раздел каталога: ID {result.get('section_id_written')}")
         if result.get("characteristics_written"):
             lines.append(f"Характеристики записаны: {', '.join(result.get('characteristics_written'))}")
+        if result.get("media_written"):
+            lines.append(f"Изображения загружены (не hotlink): {', '.join(result.get('media_written'))}")
         not_written = result.get("not_written") or []
         if not_written:
             fields = ", ".join(str(item.get("field")) for item in not_written)
