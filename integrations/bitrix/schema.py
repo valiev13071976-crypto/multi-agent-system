@@ -110,6 +110,114 @@ than a bare scalar -- confirmed for BRAND (property 100), ARTICLE
 either shape (envelope or already-scalar, for backward compatibility
 with older/fixture responses); every mapping function in this module
 routes through it instead of each doing its own ad-hoc unwrap.
+
+Complete-product-card follow-up pass (second Block 5.6 follow-up defect
+closure -- "skeleton product card" defect, real products 992/993): a
+second bounded LIVE READ-ONLY discovery pass (real webhook, read-only
+``catalog.section.list``/``catalog.product(.offer).list`` explicit-select
+calls, and -- newly discovered this pass -- ``catalog.productProperty.list``/
+``.get``, which DOES work on this installation and was not tried before)
+resolved most of the still-missing product-card data:
+
+  A. SECTION ("Телевизоры") -- ``catalog.section.list`` (filter
+     ``iblockId=14``) confirms exactly one section named "Телевизоры":
+     id 70, code ``televizory``, parent ``iblockSectionId=61`` (section 61
+     = "Электроника", a root section with no parent). Chain: Электроника
+     (61) -> Телевизоры (70). Three sub-sections exist under it (71 FULL
+     HD, 72 Смарт-телевизоры, 73 "с изогнутым экраном" -- the section the
+     real verification product 477 happens to live in) but "Телевизоры"
+     itself (70) is the unambiguous top-level match for the literal name.
+     ``iblockSectionId`` is a documented, real ``catalog.product.add``
+     field (Bitrix's own REST reference lists it directly in the ``fields``
+     example) and is exactly the same field this module already reads
+     (``map_catalog_product``'s ``category.section_id``) -- a genuinely
+     symmetric read/write destination. See ``SECTION_FIELD``,
+     ``resolve_section_id`` below; the *resolution* (Panda category/
+     subcategory name -> this id) is intentionally never hardcoded here
+     (no "TV products always get id 70") -- callers must resolve
+     dynamically against a live/fixture ``catalog.section.list`` snapshot
+     and fail closed on an ambiguous/missing match, never guess or default
+     to catalog root.
+
+  B. EAN/BARCODE -- still NO verified destination. This pass additionally
+     ruled out several plausible REST method names (all confirmed
+     ``ERROR_METHOD_NOT_FOUND``/404 on this installation's granted webhook
+     scopes): ``catalog.productBarcode.list/.get``, ``catalog.barcode.list``,
+     ``catalog.product.barcode.list``, ``catalog.storeBarcode.list``,
+     ``catalog.document.barcode.list``, ``crm.product.list``/``.fields``
+     (the Bitrix24 CRM catalog does not exist on this self-hosted
+     install). An explicit ``select=["barcode"]`` on both
+     ``catalog.product.list`` and ``catalog.product.offer.list`` is
+     silently dropped (not a real field on either entity). The only
+     barcode-shaped thing found is ``WB_BARCODE`` (offer-adjacent IBLOCK 14
+     property 273, "WB: Штрих-код номенклатуры") -- explicitly scoped to a
+     Wildberries marketplace-sync integration (properties 268-274 are all
+     "WB: ..." prefixed), not a general-purpose EAN field; using it for
+     Panda's own EAN would be exactly the kind of arbitrary-property
+     misuse this binding refuses to do. EAN remains sourced-but-unwritten.
+
+  C. CHARACTERISTICS -- ``catalog.productProperty.list``/``.get`` (a
+     DIFFERENT REST method family from the previously-tried and still-
+     unavailable ``iblock.property.list``) works on this installation and
+     returns full property metadata: real Russian admin ``name``,
+     ``propertyType`` (``S``/``N``/``L``/``E``/``F``), ``multiple``,
+     ``userType``, for all 181 IBLOCK 14 + 21 IBLOCK 15 properties. Cross-
+     referencing the requested example characteristics against that real
+     metadata found exactly five with an unambiguous, verified semantic
+     match (see ``CATALOG_CHARACTERISTICS`` below); "display technology",
+     "refresh rate" and "model/year" have no matching property on this
+     installation and are deliberately left unmapped (Panda may still
+     carry that source data, it is just never written to a guessed
+     property). Every OTHER live property not listed in
+     ``CATALOG_CHARACTERISTICS``/``CATALOG_PRODUCT_PROPERTIES`` remains
+     ``UNMANAGED_PRESERVE`` exactly as before -- this pass does not attempt
+     to manage all 181 properties, only the ones a real admin-panel label
+     unambiguously confirms.
+
+  D. WEIGHT/DIMENSIONS -- ``weight``/``width``/``length``/``height`` are
+     confirmed REAL, selectable, native (non-property) fields on both
+     ``catalog.product.list``/``.get`` and ``catalog.product.offer.list``
+     (present, though null on every sampled live row, only when explicitly
+     named in ``select`` -- like ``id``/``iblockId``, they are NOT included
+     by a bare ``"*"`` wildcard select). Bitrix's own official REST
+     reference (``catalog.product.add``/data-types pages) lists all four
+     as real, documented, writable fields but -- confirmed by directly
+     reading that reference text -- does NOT state their unit anywhere
+     (just "double"/"float", "Weight of the product"). No non-null live
+     value exists on this installation to cross-check empirically either.
+     This is a genuine, confirmed documentation gap, not a guess: the
+     mapping below passes these through as opaque numbers with ZERO
+     conversion (never silently converts a unit), and the Panda-facing
+     contract makes the assumed unit explicit in the field name itself
+     (``weight_g``/``length_mm``/``width_mm``/``height_mm``, following
+     Bitrix's long-standing legacy catalog convention of grams/
+     millimeters) rather than asserting it silently inside this module.
+
+  E/F. PREVIEW/DETAIL CONTENT -- ``previewText``/``previewTextType``/
+     ``detailText``/``detailTextType`` are already confirmed real read+
+     write fields (present on every live read; explicitly listed in
+     Bitrix's ``catalog.product.add`` reference). ``previewPicture``/
+     ``detailPicture`` READ as ``{"id","url","urlMachine"}``; Bitrix's own
+     ``catalog.product.add`` reference additionally documents the WRITE
+     shape for both: ``{"fileData": ["<filename>", "<base64 content>"]}``.
+     No confirmed write-format example exists for generic multi-value FILE
+     properties (e.g. MORE_PHOTO/124 on IBLOCK 14, MORE_PHOTO/280 on
+     IBLOCK 15 -- the Aspro gallery) beyond these two dedicated top-level
+     fields, so gallery/additional-image writing remains deferred rather
+     than guessed.
+
+  G. SEO -- still no verified writable mechanism. This pass additionally
+     ruled out ``iblock.element.get``, ``iblock.elementproperty.list``
+     (``ERROR_METHOD_NOT_FOUND``) and ``lists.element.get``
+     (``insufficient_scope`` -- exists but this webhook's granted scopes
+     do not include it). SEO remains entirely deferred, exactly as before.
+
+See ``SECTION_FIELD``, ``resolve_section_id``, ``CharacteristicBinding``/
+``CATALOG_CHARACTERISTICS``/``map_characteristics_to_properties``, and the
+native physical/content field constants below for the concrete bindings;
+``LiveBitrixAdapter._write_product_create_live`` for the write mapping;
+``docs/bitrix-aspro-premier-integration.md`` for the full verification
+narrative.
 """
 
 from __future__ import annotations
@@ -149,6 +257,99 @@ def unwrap_property_value(raw):
 # note" for the LIVE evidence and ``LiveBitrixAdapter`` for the write path.
 PURCHASING_PRICE_FIELD = "purchasingPrice"
 PURCHASING_CURRENCY_FIELD = "purchasingCurrency"
+
+# Native section-assignment field -- confirmed both readable (this module's
+# own ``map_catalog_product`` already reads it as ``category.section_id``)
+# and writable (listed directly in Bitrix's own ``catalog.product.add``
+# REST reference). See the module docstring's item A and
+# ``resolve_section_id`` below -- the id itself is NEVER hardcoded/guessed.
+SECTION_FIELD = "iblockSectionId"
+
+# Native physical dimension fields -- confirmed real/selectable (module
+# docstring item D) but with NO confirmed unit from Bitrix's own REST
+# reference or from any non-null live value on this installation. Passed
+# through verbatim, never converted; the assumed unit (Bitrix's long-
+# standing legacy grams/millimeter convention) is only ever expressed in
+# the Panda-facing attribute name (``weight_g``/``length_mm``/etc. on
+# ``SingleProductWriteRequest``), never silently assumed inside this
+# module.
+WEIGHT_FIELD = "weight"
+LENGTH_FIELD = "length"
+WIDTH_FIELD = "width"
+HEIGHT_FIELD = "height"
+
+# Native preview/detail content + media fields (module docstring items
+# E/F) -- all confirmed real read+write fields on ``catalog.product.add``.
+PREVIEW_TEXT_FIELD = "previewText"
+PREVIEW_TEXT_TYPE_FIELD = "previewTextType"
+PREVIEW_PICTURE_FIELD = "previewPicture"
+DETAIL_TEXT_FIELD = "detailText"
+DETAIL_TEXT_TYPE_FIELD = "detailTextType"
+DETAIL_PICTURE_FIELD = "detailPicture"
+# Confirmed WRITE shape for both picture fields (Bitrix's own
+# catalog.product.add REST reference: ``{"fileData": [name, base64]}``).
+PICTURE_FILE_DATA_KEY = "fileData"
+
+
+class SectionResolutionError(Exception):
+    """Raised when a Panda category/subcategory name cannot be resolved to
+    EXACTLY ONE existing live/fixture Bitrix section -- callers must fail
+    closed (require clarification) rather than ever defaulting to catalog
+    root or guessing among ambiguous candidates (module docstring item A)."""
+
+    def __init__(self, code: str, message: str = ""):
+        self.code = code
+        super().__init__(message or code)
+
+
+def resolve_section_id(*, category: str = "", subcategory: str = "", sections: list) -> dict:
+    """Deterministically resolve a Panda category/subcategory pair to one
+    EXISTING Bitrix section id, from an already-fetched live/fixture
+    ``catalog.section.list`` snapshot (``sections``: an iterable of
+    ``{"id", "name", ...}`` dicts) -- never a live call itself, so it stays
+    a pure function like ``resolve_section_ancestors``.
+
+    Uses ``subcategory`` (more specific -- e.g. "Телевизоры") WHENEVER it
+    was supplied, falling back to ``category`` ONLY if no subcategory was
+    supplied at all -- if a subcategory WAS supplied but does not match
+    any existing section, this fails closed immediately rather than
+    silently falling back to the broader category and landing the product
+    in an unintended parent section. Matching is an EXACT (trimmed, case-
+    insensitive) name match -- no fuzzy/partial matching, which would risk
+    a wrong section silently. Zero or more than one section sharing that
+    exact name both fail closed via ``SectionResolutionError`` instead of
+    ever returning a best guess.
+    """
+    candidate = subcategory.strip() if subcategory and subcategory.strip() else (
+        category.strip() if category and category.strip() else ""
+    )
+    if not candidate:
+        raise SectionResolutionError("section_name_not_supplied", "no category/subcategory supplied to resolve")
+
+    by_name: dict[str, list] = {}
+    for section in sections:
+        name = str(section.get("name") or "").strip().casefold()
+        if name:
+            by_name.setdefault(name, []).append(section)
+
+    matches = by_name.get(candidate.casefold()) or []
+    if len(matches) == 1:
+        match = matches[0]
+        return {
+            "section_id": match.get("id"),
+            "name": match.get("name"),
+            "code": match.get("code"),
+            "matched_on": candidate,
+        }
+    if len(matches) > 1:
+        raise SectionResolutionError(
+            "ambiguous_section_name",
+            f"{len(matches)} existing Bitrix sections are named {candidate!r}; refusing to guess which one",
+        )
+    raise SectionResolutionError(
+        "no_matching_section_found",
+        f"no existing Bitrix section is named {candidate!r}",
+    )
 
 PANDA_MANAGED = "PANDA_MANAGED"
 BITRIX_MANAGED = "BITRIX_MANAGED"
@@ -207,6 +408,16 @@ CATALOG_PRODUCT_PROPERTIES: tuple[PropertyBinding, ...] = (
     PropertyBinding(114, "BUTTON1CLASS", ASPRO_MANAGED, "Aspro Premier banner button content."),
     PropertyBinding(115, "BUTTON1COLOR", ASPRO_MANAGED, "Aspro Premier banner button content."),
     PropertyBinding(136, "LINK_TIZERS", ASPRO_MANAGED, "Aspro Premier teaser/banner links."),
+    # Follow-up "complete product card" pass -- verified via
+    # catalog.productProperty.list (module docstring item C), which
+    # surfaces the real Russian admin-panel label; see
+    # CATALOG_CHARACTERISTICS below for the Panda-facing semantic key each
+    # one is exposed under.
+    PropertyBinding(154, "PROP_2053", PANDA_MANAGED, "Screen diagonal, cm ('Диагональ дисплея, см'); see CATALOG_CHARACTERISTICS['screen_diagonal_cm']."),
+    PropertyBinding(156, "PROP_2054", PANDA_MANAGED, "Screen resolution, px ('Разрешение экрана, пикс'); see CATALOG_CHARACTERISTICS['screen_resolution']."),
+    PropertyBinding(206, "PROP_301", PANDA_MANAGED, "Operating system ('Операционная система'); see CATALOG_CHARACTERISTICS['operating_system']."),
+    PropertyBinding(209, "PROP_304", PANDA_MANAGED, "Smart TV support ('Поддержка Smart TV'); see CATALOG_CHARACTERISTICS['smart_tv_support']."),
+    PropertyBinding(246, "COLOR_REF2", PANDA_MANAGED, "Product color, directory-referenced ('Цвет'); see CATALOG_CHARACTERISTICS['color']."),
 )
 
 # IBLOCK 15 -- offers/SKU properties (spec section 4). property 279
@@ -235,6 +446,73 @@ OFFER_PROPERTIES: tuple[PropertyBinding, ...] = (
     PropertyBinding(296, "SIZES2", UNMANAGED_PRESERVE, "Category-specific sizing variant outside current scope."),
     PropertyBinding(297, "SIZES3", UNMANAGED_PRESERVE, "Category-specific sizing variant outside current scope."),
 )
+
+@dataclass(frozen=True)
+class CharacteristicBinding:
+    """A verified Panda-semantic-key -> IBLOCK 14 property binding for
+    product characteristics/specifications (module docstring item C).
+
+    ``key`` is the stable, Panda-facing semantic name (e.g.
+    ``"screen_diagonal_cm"``) that a canonical product's ``characteristics``
+    dict is keyed by; ``property_id``/``bitrix_code`` are this
+    installation's real destination (cross-referenced in
+    ``CATALOG_PRODUCT_PROPERTIES`` above); ``bitrix_name`` is the exact
+    admin-panel label ``catalog.productProperty.list`` returned, kept here
+    as the verification evidence for why this mapping is safe (not
+    guessed). ``unit`` is only ever descriptive metadata -- this module
+    never converts a value's unit; the caller is responsible for supplying
+    it in whatever unit ``bitrix_name`` states.
+    """
+
+    key: str
+    property_id: int
+    bitrix_code: str
+    bitrix_name: str
+    unit: str = ""
+
+
+# Only characteristics with an unambiguous, verified semantic match
+# (module docstring item C) -- "display technology", "refresh rate" and
+# "model/year" (all requested examples) have NO matching property on this
+# installation and are deliberately absent; Panda may still carry that
+# source data, it is simply never written to a guessed property.
+CATALOG_CHARACTERISTICS: tuple[CharacteristicBinding, ...] = (
+    CharacteristicBinding("screen_diagonal_cm", 154, "PROP_2053", "Диагональ дисплея, см", unit="cm"),
+    CharacteristicBinding("screen_resolution", 156, "PROP_2054", "Разрешение экрана, пикс", unit="px (WxH)"),
+    CharacteristicBinding("operating_system", 206, "PROP_301", "Операционная система"),
+    CharacteristicBinding("smart_tv_support", 209, "PROP_304", "Поддержка Smart TV"),
+    CharacteristicBinding("color", 246, "COLOR_REF2", "Цвет"),
+)
+
+_CHARACTERISTIC_BY_KEY = {c.key: c for c in CATALOG_CHARACTERISTICS}
+
+
+def characteristic_binding(key: str) -> CharacteristicBinding | None:
+    return _CHARACTERISTIC_BY_KEY.get(key)
+
+
+def map_characteristics_to_properties(characteristics) -> tuple[dict, list[str]]:
+    """Deterministically resolve a Panda ``{key: value}`` characteristics
+    mapping to verified ``propertyN`` Bitrix write fields (module docstring
+    item C). Returns ``(fields, unmapped_keys)``: ``fields`` only ever
+    contains keys from ``CATALOG_CHARACTERISTICS`` above -- an unrecognized
+    key is NEVER written to a guessed property, it is only reported back
+    in ``unmapped_keys`` so a caller can report it as sourced-but-unwritten
+    (Panda still preserves it, this function just refuses to invent a
+    destination for it). Empty/``None`` values are skipped entirely
+    (never written as an empty/zero value)."""
+    fields: dict = {}
+    unmapped: list[str] = []
+    for key, value in dict(characteristics or {}).items():
+        if value in (None, ""):
+            continue
+        binding = characteristic_binding(key)
+        if binding is None:
+            unmapped.append(key)
+            continue
+        fields[f"property{binding.property_id}"] = value
+    return fields, unmapped
+
 
 _CATALOG_BY_ID = {p.property_id: p for p in CATALOG_PRODUCT_PROPERTIES}
 _CATALOG_BY_CODE = {p.code: p for p in CATALOG_PRODUCT_PROPERTIES}
@@ -271,8 +549,11 @@ def catalog_select_fields() -> list[str]:
     ``catalog.product.get`` reads of this installation's IBLOCK 14."""
     base = ["id", "iblockId", "name", "active", "code", "xmlId", "iblockSectionId", "quantity"]
     content = ["previewText", "previewPicture", "detailText", "detailPicture"]
+    # Native physical fields (module docstring item D) -- explicit select
+    # required, exactly like "id"/"iblockId"; never included by a bare "*".
+    physical = [WEIGHT_FIELD, LENGTH_FIELD, WIDTH_FIELD, HEIGHT_FIELD]
     props = [p.select_key for p in CATALOG_PRODUCT_PROPERTIES]
-    return base + content + props
+    return base + content + physical + props
 
 
 def offer_select_fields() -> list[str]:
@@ -281,8 +562,9 @@ def offer_select_fields() -> list[str]:
     relationship is carried by the ``parentId`` field itself, not a
     ``propertyN`` select key)."""
     base = ["id", "iblockId", "name", "active", "code", "xmlId", "quantity", CML2_LINK_REST_FIELD]
+    physical = [WEIGHT_FIELD, LENGTH_FIELD, WIDTH_FIELD, HEIGHT_FIELD]
     props = [p.select_key for p in OFFER_PROPERTIES if p.property_id != CML2_LINK_PROPERTY_ID]
-    return base + props
+    return base + physical + props
 
 
 def map_catalog_product(item: dict) -> dict:
@@ -329,6 +611,16 @@ def map_catalog_product(item: dict) -> dict:
             "preview_picture": item.get("previewPicture"),
             "detail_text": item.get("detailText"),
             "detail_picture": item.get("detailPicture"),
+        },
+        # Native physical fields (module docstring item D) -- present only
+        # when the caller's ``select`` actually requested them (see
+        # ``catalog_select_fields``); a key genuinely absent from the raw
+        # response stays ``None`` here rather than becoming a fabricated 0.
+        "physical": {
+            "weight": item.get(WEIGHT_FIELD),
+            "length": item.get(LENGTH_FIELD),
+            "width": item.get(WIDTH_FIELD),
+            "height": item.get(HEIGHT_FIELD),
         },
         "brand": {"value": brand, "ownership": PANDA_MANAGED if brand is not None else None},
         "characteristics": characteristics,
