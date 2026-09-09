@@ -30,6 +30,15 @@ from integrations.bitrix.fixture_adapter import BitrixFixtureAdapter
 _BRAND_PROPERTY = schema.catalog_property(code="BRAND")
 _ARTICLE_PROPERTY = schema.offer_property(code="ARTICLE")
 
+# Complete-product-card follow-up pass (module docstring in
+# integrations/bitrix/schema.py, second Block 5.6 follow-up defect
+# closure): section assignment, weight/dimensions, preview/detail content
+# + pictures, and a small set of verified characteristics all now have a
+# confirmed real destination too -- see ``_optional_product_fields`` below.
+# EAN/GTIN, SEO, and gallery/additional-image writing still have none and
+# remain unwritten, exactly as before.
+_PHYSICAL_DIMENSION_KEYS = (schema.WEIGHT_FIELD, schema.LENGTH_FIELD, schema.WIDTH_FIELD, schema.HEIGHT_FIELD)
+
 
 class LiveBitrixAdapter(BitrixFixtureAdapter):
     """Production Bitrix adapter — fail closed without LIVE webhook/OAuth config."""
@@ -239,6 +248,119 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             capability=capability, payload=payload, idempotency_key=idempotency_key, credential_ref=credential_ref
         )
 
+    # --- Complete-product-card follow-up pass: optional verified fields ---
+    # (module docstring in integrations/bitrix/schema.py, item A/C/D/E/F).
+    # Every helper below is validated fail-closed BEFORE any HTTP call,
+    # same discipline as the existing purchase-price validation; a field
+    # the caller did not supply is simply omitted (never forced to 0/None
+    # on the wire).
+
+    def _section_field(self, product_in: dict) -> dict:
+        """Native ``iblockSectionId`` assignment (item A). The id itself is
+        ALREADY resolved -- never guessed here -- by
+        ``business_assistant.controlled_bitrix_write.
+        prepare_single_product_write`` against a live
+        ``catalog.section.list`` snapshot, via ``schema.resolve_section_id``,
+        before the user ever approves the write. This only sanity-checks
+        that a supplied id looks like a real positive Bitrix id."""
+        section_id = (product_in.get("classification") or {}).get("section_id")
+        if section_id in (None, ""):
+            return {}
+        text = str(section_id).strip()
+        if not text.lstrip("-").isdigit() or int(text) <= 0:
+            raise BitrixValidationError("section_id_invalid")
+        return {schema.SECTION_FIELD: int(text)}
+
+    def _physical_fields(self, product_in: dict) -> dict:
+        """Native weight/length/width/height pass-through (item D) -- no
+        unit conversion, ever (see schema.py module docstring for why the
+        unit itself could not be independently verified)."""
+        physical = product_in.get("physical") or {}
+        if not isinstance(physical, dict):
+            raise BitrixValidationError("physical_fields_invalid")
+        fields: dict = {}
+        for key in _PHYSICAL_DIMENSION_KEYS:
+            raw = physical.get(key)
+            if raw in (None, ""):
+                continue
+            try:
+                value = Decimal(str(raw))
+            except (InvalidOperation, ValueError, TypeError):
+                raise BitrixValidationError(f"physical_{key}_invalid")
+            if value <= 0:
+                raise BitrixValidationError(f"physical_{key}_invalid")
+            fields[key] = str(raw)
+        return fields
+
+    def _content_fields(self, product_in: dict) -> dict:
+        """Native previewText/previewTextType/detailText/detailTextType
+        pass-through (items E/F) -- Panda supplies already-prepared
+        content; this never fabricates marketing copy."""
+        content = product_in.get("content") or {}
+        if not isinstance(content, dict):
+            raise BitrixValidationError("content_fields_invalid")
+        fields: dict = {}
+        short = content.get("short_description")
+        if short:
+            fields[schema.PREVIEW_TEXT_FIELD] = str(short)
+            fields[schema.PREVIEW_TEXT_TYPE_FIELD] = str(content.get("short_description_type") or "text")
+        detailed = content.get("detailed_description")
+        if detailed:
+            fields[schema.DETAIL_TEXT_FIELD] = str(detailed)
+            fields[schema.DETAIL_TEXT_TYPE_FIELD] = str(content.get("detailed_description_type") or "text")
+        return fields
+
+    def _media_fields(self, product_in: dict) -> dict:
+        """Native previewPicture/detailPicture write mapping (items E/F):
+        the CONFIRMED Bitrix write shape is ``{"fileData": [filename,
+        base64_content]}`` -- never a bare URL. Panda must supply already-
+        encoded ``base64`` content plus a ``filename``; this never
+        fetches/encodes an image itself, and no LIVE upload is ever
+        exercised by this repository's tests (mocked HTTP only)."""
+        media = product_in.get("media") or {}
+        if not isinstance(media, dict):
+            raise BitrixValidationError("media_fields_invalid")
+        fields: dict = {}
+        for bitrix_field, media_key in (
+            (schema.PREVIEW_PICTURE_FIELD, "preview_picture"),
+            (schema.DETAIL_PICTURE_FIELD, "detail_picture"),
+        ):
+            entry = media.get(media_key)
+            if not entry:
+                continue
+            if not isinstance(entry, dict) or not entry.get("filename") or not entry.get("base64"):
+                raise BitrixValidationError(f"{media_key}_invalid")
+            fields[bitrix_field] = {schema.PICTURE_FILE_DATA_KEY: [str(entry["filename"]), str(entry["base64"])]}
+        return fields
+
+    def _optional_product_fields(self, product_in: dict) -> tuple[dict, list[str]]:
+        """Merge every verified-but-optional complete-card field (section,
+        physical, content, media, characteristics) into one Bitrix
+        ``fields`` dict. Returns ``(fields, characteristics_written_keys)``
+        -- the latter is only for observability/read-back reporting, never
+        used to change write behavior. Unrecognized characteristic keys
+        are never written (``schema.map_characteristics_to_properties``
+        already drops them) -- Panda still owns/preserves that source data,
+        it is just never sent to a guessed property."""
+        fields: dict = {}
+        fields.update(self._section_field(product_in))
+        fields.update(self._physical_fields(product_in))
+        fields.update(self._content_fields(product_in))
+        fields.update(self._media_fields(product_in))
+        characteristic_fields, _unmapped = schema.map_characteristics_to_properties(
+            product_in.get("characteristics")
+        )
+        fields.update(characteristic_fields)
+        written_property_ids = {
+            int(wire_key[len("property"):]) for wire_key in characteristic_fields if wire_key.startswith("property")
+        }
+        characteristics_written = []
+        for key in dict(product_in.get("characteristics") or {}):
+            binding = schema.characteristic_binding(key)
+            if binding is not None and binding.property_id in written_property_ids:
+                characteristics_written.append(key)
+        return fields, characteristics_written
+
     # --- LIVE governed product create (first controlled production write) --
 
     def _write_product_create_live(
@@ -311,6 +433,11 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             # malformed input -- fail closed rather than silently ignoring it.
             raise BitrixValidationError("purchase_price_invalid")
 
+        # Complete-product-card follow-up pass: section/physical/content/
+        # media/characteristics -- every one validated fail-closed here,
+        # before any HTTP call, same as purchase_price above.
+        optional_fields, characteristics_written = self._optional_product_fields(product_in)
+
         xml_id = self._idempotency_xml_id(idempotency_key)
 
         existing = self._find_product_by_xml_id(xml_id, credential_ref=credential_ref)
@@ -332,6 +459,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 credential_ref=credential_ref,
                 purchase_price=purchase_price_amount,
                 purchase_price_currency=purchase_price_currency,
+                extra_fields=optional_fields,
             )
             resolved_active = active
             resolved_name = name
@@ -343,6 +471,20 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         # separate update call; mirrors ``article_written``'s existing
         # "confirmed present, regardless of which branch created it" style.
         purchase_price_written = bool(purchase_price_amount)
+        # Same "set on the very create call above, regardless of which
+        # branch created it" reasoning as purchase_price_written -- these
+        # are all base-product fields, sent (or not) before the offer/
+        # price steps below that can still fail.
+        section_id_written = optional_fields.get(schema.SECTION_FIELD)
+        physical_written = [k for k in _PHYSICAL_DIMENSION_KEYS if k in optional_fields]
+        content_written = [
+            k
+            for k in (schema.PREVIEW_TEXT_FIELD, schema.DETAIL_TEXT_FIELD)
+            if k in optional_fields
+        ]
+        media_written = [
+            k for k in (schema.PREVIEW_PICTURE_FIELD, schema.DETAIL_PICTURE_FIELD) if k in optional_fields
+        ]
 
         article_written = ""
         if sku:
@@ -362,6 +504,8 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     exc=exc,
                     idempotent=idempotent_replay,
                     purchase_price_written=purchase_price_written,
+                    section_id_written=section_id_written,
+                    characteristics_written=characteristics_written,
                 )
             article_written = sku
 
@@ -387,6 +531,8 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     exc=exc,
                     idempotent=idempotent_replay,
                     purchase_price_written=purchase_price_written,
+                    section_id_written=section_id_written,
+                    characteristics_written=characteristics_written,
                 )
 
         return {
@@ -410,6 +556,15 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 "article": article_written,
                 "properties": {"brand": brand} if brand else {},
                 "purchase_price_written": purchase_price_written,
+                # Complete-product-card follow-up pass -- all base-product
+                # fields, so (like purchase_price_written) always reflect
+                # what was actually sent on the create call above,
+                # regardless of whether a later offer/price step failed.
+                "section_id_written": section_id_written,
+                "physical_written": physical_written,
+                "content_written": content_written,
+                "media_written": media_written,
+                "characteristics_written": characteristics_written,
                 "mode": "LIVE",
                 "live": True,
             },
@@ -427,6 +582,8 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         exc: Exception,
         idempotent: bool,
         purchase_price_written: bool = False,
+        section_id_written=None,
+        characteristics_written: list[str] | None = None,
     ) -> dict:
         return {
             "status": "PARTIAL_FAILURE",
@@ -440,11 +597,14 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 "name": name,
                 "active": bool(active),
                 "article": article,
-                # The base product (including purchasingPrice/Currency, if
-                # any) is always created BEFORE the offer/price steps that
-                # can fail here -- so this reflects a real, already-sent
-                # value, never a guess about a step that hasn't run yet.
+                # The base product (including purchasingPrice/Currency,
+                # section, physical/content/characteristics, if any) is
+                # always created BEFORE the offer/price steps that can fail
+                # here -- so this reflects a real, already-sent value,
+                # never a guess about a step that hasn't run yet.
                 "purchase_price_written": purchase_price_written,
+                "section_id_written": section_id_written,
+                "characteristics_written": characteristics_written or [],
             },
             "mapping": {"bitrix_id": str(product_id)},
             "failed_step": failed_step,
@@ -523,6 +683,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         credential_ref: str,
         purchase_price: str = "",
         purchase_price_currency: str = "",
+        extra_fields: dict | None = None,
     ):
         fields: dict = {
             "iblockId": self._require_catalog_iblock_id(),
@@ -540,6 +701,13 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             # which is only ever written via ``catalog.price.add`` below.
             fields[schema.PURCHASING_PRICE_FIELD] = purchase_price
             fields[schema.PURCHASING_CURRENCY_FIELD] = purchase_price_currency or "RUB"
+        if extra_fields:
+            # Complete-product-card follow-up pass: section/physical/
+            # content/media/characteristics -- already validated fail-
+            # closed by ``_optional_product_fields`` before this was ever
+            # called; merged last so it can never silently clobber the
+            # base identity fields above (none of these keys overlap).
+            fields.update(extra_fields)
         data = self.client.call(
             "catalog.product.add", credential_ref=credential_ref, params={"fields": fields}, idempotent=False
         )

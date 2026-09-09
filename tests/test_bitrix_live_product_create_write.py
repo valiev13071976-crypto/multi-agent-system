@@ -116,6 +116,7 @@ class _RecordingTransport:
         price_should_fail: bool = False,
         product_error: dict | None = None,
         product_add_response_key: str | None = None,
+        sections: list | None = None,
     ):
         self.calls: list[tuple[str, dict]] = []
         self.offer_should_fail = offer_should_fail
@@ -126,6 +127,12 @@ class _RecordingTransport:
         # key, e.g. the pre-fix adapter's own "product" assumption) without
         # ever needing a genuine Bitrix error envelope.
         self.product_add_response_key = product_add_response_key
+        # Scripted ``catalog.section.list`` result (complete-product-card
+        # follow-up pass, item A) -- a list of ``{"id", "name", ...}``
+        # dicts, exactly the shape ``schema.resolve_section_id`` expects.
+        # Left empty by default so any test that does not care about
+        # section resolution never needs to know about this.
+        self.sections = sections if sections is not None else []
         self.product_add_count = 0
         self.offer_add_count = 0
         self.price_add_count = 0
@@ -173,23 +180,19 @@ class _RecordingTransport:
                 return httpx.Response(200, json={"result": {"products": [match] if match else []}})
             if filt.get("id") is not None:
                 match = next((p for p in self._products_by_xml_id.values() if p["id"] == filt["id"]), None)
+                observed = None
+                if match:
+                    observed = {
+                        "id": match["id"],
+                        "iblockId": 14,
+                        "name": match["name"],
+                        "active": match["active"],
+                        "property100": match.get("property100"),
+                    }
+                    if match.get(schema.SECTION_FIELD) is not None:
+                        observed[schema.SECTION_FIELD] = match[schema.SECTION_FIELD]
                 return httpx.Response(
-                    200,
-                    json={
-                        "result": {
-                            "products": [
-                                {
-                                    "id": match["id"],
-                                    "iblockId": 14,
-                                    "name": match["name"],
-                                    "active": match["active"],
-                                    "property100": match.get("property100"),
-                                }
-                            ]
-                            if match
-                            else []
-                        }
-                    },
+                    200, json={"result": {"products": [observed] if observed else []}}
                 )
             return httpx.Response(200, json={"result": {"products": list(self._products_by_xml_id.values())}})
 
@@ -199,7 +202,13 @@ class _RecordingTransport:
                 return httpx.Response(200, json=self.product_error)
             product_id = self._next_id
             self._next_id += 1
-            record = {"id": product_id, "name": body["fields"]["name"], "active": body["fields"]["active"], "property100": body["fields"].get("property100")}
+            record = {
+                "id": product_id,
+                "name": body["fields"]["name"],
+                "active": body["fields"]["active"],
+                "property100": body["fields"].get("property100"),
+                schema.SECTION_FIELD: body["fields"].get(schema.SECTION_FIELD),
+            }
             self._products_by_xml_id[body["fields"]["xmlId"]] = record
             # Real Bitrix REST contract (apidocs.bitrix24.com/api-reference/
             # catalog/product/catalog-product-add.html): catalog.product.add
@@ -227,6 +236,9 @@ class _RecordingTransport:
             parent_id = body["fields"]["parentId"]
             self._offers_by_parent[parent_id] = {"id": offer_id, schema.CML2_LINK_REST_FIELD: parent_id}
             return httpx.Response(200, json={"result": {"offer": {"id": offer_id, "parentId": parent_id}}})
+
+        if rest_method == "catalog.section.list":
+            return httpx.Response(200, json={"result": {"sections": self.sections}})
 
         if rest_method == "catalog.price.list":
             key = (filt.get("productId"), filt.get("catalogGroupId"))
@@ -258,7 +270,15 @@ def _request(**overrides) -> SingleProductWriteRequest:
         sku=TARGET_SKU,
         retail_price=TARGET_RETAIL_PRICE,
         ean=TARGET_EAN,
-        category_source=TARGET_CATEGORY,
+        # Deliberately NOT supplied by default any more: category/section
+        # now has a real, resolvable-or-fail-closed LIVE destination (see
+        # SectionAssignmentTests below) -- an arbitrary placeholder like
+        # the old "CE" would now correctly fail closed (no matching
+        # section) rather than silently landing in ``not_written``, which
+        # would make every other, unrelated test below (offer/price/
+        # purchase-price/partial-failure mechanics) also have to mock
+        # catalog.section.list for no reason. Tests that care about
+        # category/section pass it explicitly.
         brand=TARGET_BRAND,
         purchase_price=TARGET_PURCHASE_PRICE,
     )
@@ -332,18 +352,21 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         self.assertTrue(result["purchase_price_written"])
 
     def test_fields_without_verified_destination_are_reported_not_written(self):
-        """EAN and category still have no verified Bitrix destination on
-        this installation and are never written. Purchase price now DOES
-        have one (native purchasingPrice/purchasingCurrency fields, Block
-        5.6 follow-up defect closure) and is written on this LIVE bridge --
-        it must no longer be reported as unwritten."""
+        """EAN still has no verified Bitrix destination on this
+        installation and is never written. Purchase price now DOES have
+        one (native purchasingPrice/purchasingCurrency fields, Block 5.6
+        follow-up defect closure) and is written on this LIVE bridge -- it
+        must no longer be reported as unwritten. (Category/section is
+        covered separately below -- see SectionAssignmentTests -- since it
+        now has a real, resolve-or-fail-closed destination instead of
+        always being unwritten.)"""
         transport = _RecordingTransport()
         with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
             bridge, _ = _bridge_and_activation()
             result = execute_single_product_write(bridge, tenant_id=TARGET_TENANT, request=_request(), approved=True)
 
         not_written_fields = {item["field"] for item in result["not_written"]}
-        self.assertEqual(not_written_fields, {"ean", "category"})
+        self.assertEqual(not_written_fields, {"ean"})
         self.assertEqual(result["purchase_price_written"], True)
         self.assertEqual(result["active"], False)
         self.assertEqual(result["published"], False)
@@ -839,6 +862,206 @@ class DirectAdapterLevelTests(unittest.TestCase):
                         idempotency_key=f"k-{operation}",
                     )
                 self.assertEqual(ctx.exception.code, "bitrix_live_write_blocked_engineering")
+
+
+def _direct_write(product_extra: dict, *, idempotency_key: str = "k-complete-card", transport=None):
+    """Direct, isolated ``LiveBitrixAdapter.write()`` call for one
+    ``product_create`` -- bypasses ``controlled_bitrix_write``/
+    ``BitrixProductBridge`` entirely (same pattern as
+    ``DirectAdapterLevelTests`` above), so these tests exercise exactly
+    the adapter-level field construction/validation without needing to
+    also mock ``catalog.section.list`` (section RESOLUTION happens one
+    layer up, in ``business_assistant.controlled_bitrix_write`` -- see
+    ``tests/test_bitrix_complete_product_card_followup.py`` for that)."""
+    from integrations.bitrix.live_adapter import LiveBitrixAdapter
+
+    transport = transport or _RecordingTransport()
+    with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+        adapter = LiveBitrixAdapter(secret_resolver=lambda ref: os.environ.get("BITRIX_WEBHOOK_URL"))
+        product = {"title": TARGET_TITLE, "sku": TARGET_SKU, "price": {"currency": "RUB", "selling_price": TARGET_RETAIL_PRICE}}
+        product.update(product_extra)
+        result = adapter.write(
+            capability="cms.bitrix.catalog.write",
+            payload={"operation": "product_create", "product": product, "active": False},
+            idempotency_key=idempotency_key,
+        )
+    return result, transport
+
+
+class SectionAssignmentTests(unittest.TestCase):
+    """Native ``iblockSectionId`` assignment (schema.py module docstring
+    item A). The adapter never resolves a name -> id itself (that already
+    happened one layer up); it only writes an already-resolved id and
+    sanity-checks it before any HTTP call."""
+
+    def test_supplied_section_id_is_written_as_iblockSectionId(self):
+        result, transport = _direct_write({"classification": {"section_id": 70}})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"][schema.SECTION_FIELD], 70)
+        self.assertEqual(result["product"]["section_id_written"], 70)
+
+    def test_no_section_supplied_omits_the_field_entirely(self):
+        result, transport = _direct_write({})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertNotIn(schema.SECTION_FIELD, product_body["fields"])
+        self.assertIsNone(result["product"]["section_id_written"])
+
+    def test_non_numeric_section_id_fails_closed_before_any_http_call(self):
+        transport = _RecordingTransport()
+        with self.assertRaises(Exception):
+            _direct_write({"classification": {"section_id": "not-a-number"}}, transport=transport)
+        self.assertEqual(transport.calls, [])
+
+    def test_zero_or_negative_section_id_fails_closed_before_any_http_call(self):
+        for bad_id in (0, -5):
+            transport = _RecordingTransport()
+            with self.assertRaises(Exception):
+                _direct_write({"classification": {"section_id": bad_id}}, transport=transport)
+            self.assertEqual(transport.calls, [])
+
+
+class PhysicalDimensionsTests(unittest.TestCase):
+    """Native weight/length/width/height pass-through (schema.py module
+    docstring item D) -- verbatim, no unit conversion; malformed values
+    fail closed before any HTTP call; missing ones are omitted, never
+    forced to 0."""
+
+    def test_supplied_dimensions_are_written_verbatim(self):
+        physical = {"weight": "12000", "length": "720", "width": "420", "height": "60"}
+        result, transport = _direct_write({"physical": physical})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        for key, value in physical.items():
+            self.assertEqual(product_body["fields"][key], value)
+        self.assertEqual(sorted(result["product"]["physical_written"]), sorted(physical))
+
+    def test_missing_dimensions_are_omitted_never_forced_to_zero(self):
+        result, transport = _direct_write({"physical": {"weight": "12000"}})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertIn("weight", product_body["fields"])
+        for key in ("length", "width", "height"):
+            self.assertNotIn(key, product_body["fields"])
+        self.assertEqual(result["product"]["physical_written"], ["weight"])
+
+    def test_no_physical_data_supplied_writes_nothing_physical(self):
+        _result, transport = _direct_write({})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        for key in ("weight", "length", "width", "height"):
+            self.assertNotIn(key, product_body["fields"])
+
+    def test_non_numeric_dimension_fails_closed_before_any_http_call(self):
+        transport = _RecordingTransport()
+        with self.assertRaises(Exception):
+            _direct_write({"physical": {"weight": "heavy"}}, transport=transport)
+        self.assertEqual(transport.calls, [])
+
+    def test_negative_dimension_fails_closed_before_any_http_call(self):
+        transport = _RecordingTransport()
+        with self.assertRaises(Exception):
+            _direct_write({"physical": {"length": "-10"}}, transport=transport)
+        self.assertEqual(transport.calls, [])
+
+
+class ContentAndMediaFieldsTests(unittest.TestCase):
+    """Native previewText/previewTextType/detailText/detailTextType
+    (schema.py module docstring items E/F) and the confirmed
+    ``{"fileData": [name, base64]}`` write shape for previewPicture/
+    detailPicture."""
+
+    def test_preview_and_detail_text_are_written(self):
+        content = {"short_description": "Короткое описание", "detailed_description": "Подробное описание"}
+        result, transport = _direct_write({"content": content})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"][schema.PREVIEW_TEXT_FIELD], content["short_description"])
+        self.assertEqual(product_body["fields"][schema.PREVIEW_TEXT_TYPE_FIELD], "text")
+        self.assertEqual(product_body["fields"][schema.DETAIL_TEXT_FIELD], content["detailed_description"])
+        self.assertEqual(product_body["fields"][schema.DETAIL_TEXT_TYPE_FIELD], "text")
+        self.assertEqual(sorted(result["product"]["content_written"]), sorted([schema.PREVIEW_TEXT_FIELD, schema.DETAIL_TEXT_FIELD]))
+
+    def test_missing_content_omits_the_fields_entirely(self):
+        _result, transport = _direct_write({})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        for key in (schema.PREVIEW_TEXT_FIELD, schema.DETAIL_TEXT_FIELD):
+            self.assertNotIn(key, product_body["fields"])
+
+    def test_preview_and_detail_picture_use_the_confirmed_filedata_base64_shape(self):
+        media = {
+            "preview_picture": {"filename": "preview.jpg", "base64": "QUJD"},
+            "detail_picture": {"filename": "detail.jpg", "base64": "WFla"},
+        }
+        result, transport = _direct_write({"media": media})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(
+            product_body["fields"][schema.PREVIEW_PICTURE_FIELD],
+            {schema.PICTURE_FILE_DATA_KEY: ["preview.jpg", "QUJD"]},
+        )
+        self.assertEqual(
+            product_body["fields"][schema.DETAIL_PICTURE_FIELD],
+            {schema.PICTURE_FILE_DATA_KEY: ["detail.jpg", "WFla"]},
+        )
+        self.assertEqual(
+            sorted(result["product"]["media_written"]), sorted([schema.PREVIEW_PICTURE_FIELD, schema.DETAIL_PICTURE_FIELD])
+        )
+
+    def test_missing_media_omits_the_fields_entirely(self):
+        _result, transport = _direct_write({})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        for key in (schema.PREVIEW_PICTURE_FIELD, schema.DETAIL_PICTURE_FIELD):
+            self.assertNotIn(key, product_body["fields"])
+
+    def test_media_entry_missing_base64_or_filename_fails_closed(self):
+        transport = _RecordingTransport()
+        with self.assertRaises(Exception):
+            _direct_write({"media": {"preview_picture": {"filename": "x.jpg"}}}, transport=transport)
+        self.assertEqual(transport.calls, [])
+
+
+class CharacteristicsWriteTests(unittest.TestCase):
+    """Generic SAFE characteristic mapping (schema.py module docstring
+    item C): only the verified ``CATALOG_CHARACTERISTICS`` keys are ever
+    written to a real ``propertyN`` field; any other key is silently
+    dropped by the adapter (Panda still owns the source value one layer
+    up -- see ``not_written``/``_UNVERIFIED_CHARACTERISTIC`` in
+    ``business_assistant.controlled_bitrix_write``)."""
+
+    def test_verified_characteristics_are_written_as_property_fields(self):
+        characteristics = {
+            "screen_diagonal_cm": "81",
+            "screen_resolution": "3840x2160",
+            "operating_system": "webOS",
+            "smart_tv_support": "Да",
+            "color": "Черный",
+        }
+        result, transport = _direct_write({"characteristics": characteristics})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"]["property154"], "81")
+        self.assertEqual(product_body["fields"]["property156"], "3840x2160")
+        self.assertEqual(product_body["fields"]["property206"], "webOS")
+        self.assertEqual(product_body["fields"]["property209"], "Да")
+        self.assertEqual(product_body["fields"]["property246"], "Черный")
+        self.assertEqual(sorted(result["product"]["characteristics_written"]), sorted(characteristics))
+
+    def test_unverified_characteristic_keys_are_never_written(self):
+        result, transport = _direct_write(
+            {"characteristics": {"refresh_rate_hz": "120", "display_technology": "OLED", "model_year": "2026"}}
+        )
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        # None of these keys have a verified property destination -- must
+        # never appear anywhere in the outgoing fields dict.
+        for key in list(product_body["fields"]):
+            self.assertFalse(key.startswith("property"), f"unexpected property field written: {key}={product_body['fields'][key]}")
+        self.assertEqual(result["product"]["characteristics_written"], [])
+
+    def test_no_characteristics_supplied_writes_no_property_fields(self):
+        _result, transport = _direct_write({})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        for key in list(product_body["fields"]):
+            self.assertFalse(key.startswith("property"))
+
+    def test_empty_characteristic_value_is_skipped_not_written(self):
+        result, transport = _direct_write({"characteristics": {"screen_diagonal_cm": ""}})
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertNotIn("property154", product_body["fields"])
+        self.assertEqual(result["product"]["characteristics_written"], [])
 
 
 if __name__ == "__main__":

@@ -57,7 +57,7 @@ without a further, separate, explicit publish decision.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from typing import Mapping, Sequence
 
@@ -72,6 +72,7 @@ from data_intel.contracts import (
     ROLE_SKU,
 )
 from integrations.activation.models import ENV_LIVE
+from integrations.bitrix import schema
 from integrations.bitrix.product_bridge import (
     SYNC_AMBIGUOUS,
     SYNC_CREATE,
@@ -114,6 +115,29 @@ _NO_CATEGORY_MAPPING = (
     "(unlike marketplaces' MarketplaceCategoryMap, Bitrix sections have no "
     "equivalent verified name->id table here -- resolving one would require "
     "guessing)"
+)
+# Category/section DOES have a verified native destination now
+# (``iblockSectionId`` -- see integrations.bitrix.schema's module
+# docstring item A and ``resolve_section_id``), but resolving *which*
+# section requires a real ``catalog.section.list`` read, which only the
+# LIVE bridge can do -- the FIXTURE store's section shape is unrelated
+# (deterministic slug ids derived from its own in-memory catalog, not a
+# real Bitrix section tree), so this reason is still used for a non-LIVE
+# bridge.
+_CATEGORY_ENV_UNSUPPORTED = (
+    "category/section_has_a_verified_native_bitrix_destination_"
+    "(iblockSectionId)_but_resolving_it_requires_a_real_catalog.section.list_"
+    "read,_which_only_the_LIVE_bridge_performs_(fixture/sandbox_only;_live_"
+    "resolves_and_writes_it)"
+)
+# Characteristics with no verified Bitrix property destination on this
+# installation (integrations.bitrix.schema.CATALOG_CHARACTERISTICS) --
+# Panda still keeps the source value, it is just never sent to a guessed
+# property.
+_UNVERIFIED_CHARACTERISTIC = (
+    "no_verified_bitrix_property_for_this_characteristic_key_on_this_"
+    "installation (see integrations.bitrix.schema.CATALOG_CHARACTERISTICS "
+    "for the currently verified set)"
 )
 
 # Human-readable hints for the raw error codes a failed write can surface,
@@ -210,6 +234,26 @@ class SingleProductWriteRequest:
     brand: str = ""
     purchase_price: str = ""
     product_id: str = ""
+    # Complete-product-card follow-up pass (integrations.bitrix.schema
+    # module docstring, items A/C/D/E/F). ``subcategory`` is tried first
+    # for section resolution (more specific -- e.g. "Телевизоры"),
+    # ``category_source`` above is the fallback. The four dimension
+    # fields are named with their assumed unit (grams/millimeters --
+    # Bitrix's own REST reference does not state one; see schema.py) so
+    # the unit is always explicit at the call site, never silently
+    # assumed deeper in the write path. ``characteristics`` is a flat
+    # ``{key: value}`` mapping keyed by the semantic keys in
+    # ``integrations.bitrix.schema.CATALOG_CHARACTERISTICS`` (e.g.
+    # ``"screen_diagonal_cm"``); unrecognized keys are reported
+    # sourced-but-unwritten, never guessed onto a property.
+    subcategory: str = ""
+    weight_g: str = ""
+    length_mm: str = ""
+    width_mm: str = ""
+    height_mm: str = ""
+    short_description: str = ""
+    detailed_description: str = ""
+    characteristics: Mapping[str, str] = field(default_factory=dict)
 
 
 def _first_column_value(row: dict, columns, role: str) -> str:
@@ -269,6 +313,7 @@ def build_write_request_from_fields(
     message. Mirrors ``build_write_request_from_row`` for the conversational
     approval path, which only has the persisted flat fields (from the
     ActiveTask), not the raw row + column schema objects."""
+    raw_characteristics = fields.get("characteristics") or {}
     return SingleProductWriteRequest(
         tenant_id=tenant_id,
         title=str(fields.get("title") or ""),
@@ -280,6 +325,14 @@ def build_write_request_from_fields(
         brand=str(fields.get("brand") or ""),
         purchase_price=str(fields.get("purchase_price") or ""),
         product_id=product_id,
+        subcategory=str(fields.get("subcategory") or ""),
+        weight_g=str(fields.get("weight_g") or ""),
+        length_mm=str(fields.get("length_mm") or ""),
+        width_mm=str(fields.get("width_mm") or ""),
+        height_mm=str(fields.get("height_mm") or ""),
+        short_description=str(fields.get("short_description") or ""),
+        detailed_description=str(fields.get("detailed_description") or ""),
+        characteristics={str(k): str(v) for k, v in dict(raw_characteristics).items() if v not in (None, "")},
     )
 
 
@@ -300,8 +353,47 @@ def _default_idempotency_key(tenant_id: str, request: SingleProductWriteRequest)
     return "cbw-" + hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
 
 
+# Panda-facing (unit-suffixed) SingleProductWriteRequest attribute -> native
+# Bitrix wire field name (integrations.bitrix.schema.WEIGHT_FIELD etc.).
+# The unit itself is never converted here or anywhere downstream -- see
+# schema.py's module docstring item D for why the unit could not be
+# independently verified beyond Bitrix's own long-standing convention.
+_PHYSICAL_DIMENSION_ATTRS: tuple[tuple[str, str], ...] = (
+    ("weight_g", schema.WEIGHT_FIELD),
+    ("length_mm", schema.LENGTH_FIELD),
+    ("width_mm", schema.WIDTH_FIELD),
+    ("height_mm", schema.HEIGHT_FIELD),
+)
+
+
+def _normalize_physical_fields(request: SingleProductWriteRequest) -> tuple[dict, str | None]:
+    """Deterministic pass-through validation for the native weight/length/
+    width/height Bitrix fields (schema.py module docstring item D) -- a
+    positive-number check only, never a unit conversion. Returns
+    ``(fields, error_reason)``; a supplied-but-malformed value fails
+    closed (``error_reason`` set, ``fields`` empty) rather than being
+    written or silently dropped. A field the caller did not supply is
+    simply omitted (never forced to 0)."""
+    fields: dict = {}
+    for attr, wire_key in _PHYSICAL_DIMENSION_ATTRS:
+        raw = getattr(request, attr)
+        if not raw:
+            continue
+        normalized = _normalize_price(raw)  # same "positive decimal string" rule
+        if normalized is None:
+            return {}, f"invalid_{attr}"
+        fields[wire_key] = normalized
+    return fields, None
+
+
 def _canonical_payload(
-    request: SingleProductWriteRequest, *, retail_amount: str, purchase_price_amount: str | None = None
+    request: SingleProductWriteRequest,
+    *,
+    retail_amount: str,
+    purchase_price_amount: str | None = None,
+    section_id=None,
+    physical_fields: dict | None = None,
+    characteristics: Mapping[str, str] | None = None,
 ) -> dict:
     # ``price.selling_price`` is the ONLY key any write path reads for the
     # retail price. Any purchase price lives in its own, sibling
@@ -324,6 +416,27 @@ def _canonical_payload(
         # follow-up defect closure) -- structurally separate top-level key,
         # never read by the retail-price write path above.
         canonical["purchase_price"] = {"amount": purchase_price_amount, "currency": request.currency}
+    if section_id is not None:
+        # Native iblockSectionId destination (schema.py module docstring
+        # item A) -- ALREADY resolved deterministically against a live
+        # catalog.section.list snapshot in ``prepare_single_product_write``
+        # below; never re-resolved/guessed downstream.
+        canonical["classification"] = {"section_id": section_id}
+    if physical_fields:
+        canonical["physical"] = physical_fields
+    content: dict = {}
+    if request.short_description:
+        content["short_description"] = clean_text(request.short_description)
+    if request.detailed_description:
+        content["detailed_description"] = clean_text(request.detailed_description)
+    if content:
+        canonical["content"] = content
+    if characteristics:
+        # Raw Panda semantic-key characteristics -- the ONLY place that
+        # resolves a key to an actual ``propertyN`` (or drops an
+        # unrecognized one) is ``schema.map_characteristics_to_properties``,
+        # invoked by the LIVE adapter itself; never duplicated here.
+        canonical["characteristics"] = dict(characteristics)
     return canonical
 
 
@@ -332,9 +445,12 @@ def prepare_single_product_write(
     *,
     tenant_id: str,
     request: SingleProductWriteRequest,
+    connection_id: str | None = None,
 ) -> dict:
     """Read-only. Resolves the duplicate check and destination mapping and
-    returns a preview for OWNER approval. Never mutates anything."""
+    returns a preview for OWNER approval. Never mutates anything -- section
+    resolution below only ever performs a READ (``catalog.section.list``),
+    same governed READ path everything else in this module already uses."""
     title = clean_text(request.title) or ""
     sku = clean_text(request.sku) or ""
     if not title or not sku:
@@ -361,7 +477,70 @@ def prepare_single_product_write(
     # a write that will not actually happen for a non-LIVE bridge.
     purchase_price_has_destination = bridge.environment == ENV_LIVE and purchase_price_amount is not None
 
-    canonical = _canonical_payload(request, retail_amount=retail_amount, purchase_price_amount=purchase_price_amount)
+    # Weight/length/width/height (schema.py module docstring item D) --
+    # fail closed on a malformed supplied value, before any sync/write.
+    physical_fields, physical_error = _normalize_physical_fields(request)
+    if physical_error:
+        return {"status": STATUS_UNRESOLVED, "reason": physical_error}
+
+    # Category/section (schema.py module docstring item A) -- resolving
+    # WHICH section requires a real ``catalog.section.list`` read, which
+    # only the LIVE bridge can meaningfully do (the FIXTURE store's
+    # section shape is an unrelated, deterministic slug-id tree -- see
+    # ``_CATEGORY_ENV_UNSUPPORTED`` above). Panda must never guess a
+    # section id: if a category/subcategory WAS supplied but does not
+    # resolve to exactly one existing LIVE section, this fails closed
+    # (STATUS_UNRESOLVED) instead of ever proceeding to catalog root.
+    section_id = None
+    category_has_destination = False
+    if request.subcategory or request.category_source:
+        if bridge.environment == ENV_LIVE:
+            try:
+                # Idempotent, LIVE-only bootstrap (no-op if already active)
+                # -- section resolution below is the first governed
+                # operation this preview performs, and it needs an ACTIVE
+                # connection just as much as the later actual write does
+                # (``execute_single_product_write`` calls this again right
+                # before ``sync_product``; calling it twice is harmless).
+                # Without this, a preview-only call (before approval) would
+                # always fail closed with IntegrationNotConfiguredError on
+                # a tenant's very first request, even with correctly
+                # configured LIVE credentials.
+                bridge.ensure_live_connection_ready(tenant_id=tenant_id)
+                sections_result = bridge.read_sections(tenant_id=tenant_id, connection_id=connection_id)
+            except Exception as exc:  # noqa: BLE001 -- normalize, never leak a raw adapter exception from a preview
+                return {
+                    "status": STATUS_UNRESOLVED,
+                    "reason": "section_lookup_failed",
+                    "error": getattr(exc, "code", type(exc).__name__),
+                }
+            sections = sections_result.get("items") or sections_result.get("sections") or []
+            try:
+                resolved = schema.resolve_section_id(
+                    category=request.category_source, subcategory=request.subcategory, sections=sections
+                )
+            except schema.SectionResolutionError as exc:
+                return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
+            section_id = resolved["section_id"]
+            category_has_destination = True
+
+    # Characteristics (schema.py module docstring item C) -- only report/
+    # write the ones with a verified property destination; an
+    # unrecognized key is never guessed onto a property, only reported as
+    # sourced-but-unwritten below.
+    _mapped_characteristic_fields, unmapped_characteristics = schema.map_characteristics_to_properties(
+        request.characteristics
+    )
+    characteristics_have_destination = bridge.environment == ENV_LIVE and bool(request.characteristics)
+
+    canonical = _canonical_payload(
+        request,
+        retail_amount=retail_amount,
+        purchase_price_amount=purchase_price_amount,
+        section_id=section_id,
+        physical_fields=physical_fields or None,
+        characteristics=request.characteristics,
+    )
     plan = bridge.plan_sync(tenant_id=tenant_id, canonical_product=canonical)
     action = plan.get("action")
     if action == SYNC_AMBIGUOUS:
@@ -389,6 +568,7 @@ def prepare_single_product_write(
         }
     assert action == SYNC_CREATE
 
+    category_display = request.subcategory or request.category_source
     not_written = [
         {"field": "ean", "value": request.ean, "reason": _NO_EAN_DESTINATION}
         if request.ean
@@ -396,10 +576,14 @@ def prepare_single_product_write(
         {"field": "purchase_price", "value": request.purchase_price, "reason": _PURCHASE_PRICE_ENV_UNSUPPORTED}
         if request.purchase_price and not purchase_price_has_destination
         else None,
-        {"field": "category", "value": request.category_source, "reason": _NO_CATEGORY_MAPPING}
-        if request.category_source
+        {"field": "category", "value": category_display, "reason": _CATEGORY_ENV_UNSUPPORTED}
+        if category_display and not category_has_destination
         else None,
     ]
+    for key in unmapped_characteristics:
+        not_written.append(
+            {"field": f"characteristic:{key}", "value": request.characteristics.get(key), "reason": _UNVERIFIED_CHARACTERISTIC}
+        )
     not_written = [item for item in not_written if item]
 
     will_write = ["name", "article/sku", "retail_selling_price"]
@@ -409,6 +593,17 @@ def prepare_single_product_write(
         will_write.append(
             "purchase_price (native purchasingPrice/purchasingCurrency fields, verified -- LIVE only)"
         )
+    if category_has_destination:
+        will_write.append(
+            f"category/section (native iblockSectionId={section_id}, resolved from {category_display!r} -- LIVE only)"
+        )
+    if physical_fields:
+        will_write.append(f"physical ({', '.join(sorted(physical_fields))}, native fields, no unit conversion)")
+    if request.short_description or request.detailed_description:
+        will_write.append("content (previewText/detailText, native fields)")
+    written_characteristics = [k for k in request.characteristics if k not in unmapped_characteristics]
+    if written_characteristics and characteristics_have_destination:
+        will_write.append(f"characteristics ({', '.join(sorted(written_characteristics))}, verified -- LIVE only)")
 
     return {
         "status": STATUS_REQUIRES_APPROVAL,
@@ -419,6 +614,8 @@ def prepare_single_product_write(
             "sku": sku,
             "brand": request.brand or None,
             "category_source": request.category_source or None,
+            "subcategory": request.subcategory or None,
+            "resolved_section_id": section_id,
             "ean_source": request.ean or None,
             "purchase_price_source": request.purchase_price or None,
         },
@@ -453,7 +650,7 @@ def execute_single_product_write(
     if not approved:
         return {"status": STATUS_APPROVAL_REQUIRED, "mutated": False}
 
-    preview = prepare_single_product_write(bridge, tenant_id=tenant_id, request=request)
+    preview = prepare_single_product_write(bridge, tenant_id=tenant_id, request=request, connection_id=connection_id)
     if preview["status"] != STATUS_REQUIRES_APPROVAL:
         return {**preview, "mutated": False}
 
@@ -512,10 +709,20 @@ def execute_single_product_write(
             "failed_step": write_result.get("failed_step"),
             "error": write_result.get("error"),
             "purchase_price_written": bool(created_product.get("purchase_price_written")),
+            "section_id_written": created_product.get("section_id_written"),
+            "characteristics_written": created_product.get("characteristics_written") or [],
             "idempotency_key": key,
         }
 
+    # Read-back verification extended to cover the resolved section
+    # (native ``iblockSectionId``, schema.py module docstring item A) --
+    # only when this write actually resolved/sent one, so an
+    # already-existing product with no category data supplied is never
+    # false-mismatched against an unset expectation.
     expected = {"name": preview["target_product"]["title"], "active": False}
+    resolved_section_id = preview["target_product"].get("resolved_section_id")
+    if resolved_section_id is not None:
+        expected[schema.SECTION_FIELD] = resolved_section_id
     read_back = _read_back_and_compare(
         bridge, tenant_id=tenant_id, bitrix_id=bitrix_id, connection_id=connection_id, expected=expected
     )
@@ -529,9 +736,12 @@ def execute_single_product_write(
         "ean_source": request.ean or None,
         "brand": request.brand or None,
         "category_source": request.category_source or None,
+        "resolved_section_id": resolved_section_id,
         "retail_price": preview["retail_price"],
         "purchase_price_source": request.purchase_price or None,
         "purchase_price_written": bool(created_product.get("purchase_price_written")),
+        "section_id_written": created_product.get("section_id_written"),
+        "characteristics_written": created_product.get("characteristics_written") or [],
         "active": False,
         "published": False,
         "not_written": preview["will_not_write"],
@@ -593,6 +803,10 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
             lines.append(f"Бренд: {result.get('brand')}")
         if result.get("purchase_price_written"):
             lines.append(f"Закупочная цена: {result.get('purchase_price_source')} {retail.get('currency')}")
+        if result.get("section_id_written"):
+            lines.append(f"Раздел каталога: ID {result.get('section_id_written')}")
+        if result.get("characteristics_written"):
+            lines.append(f"Характеристики записаны: {', '.join(result.get('characteristics_written'))}")
         not_written = result.get("not_written") or []
         if not_written:
             fields = ", ".join(str(item.get("field")) for item in not_written)
