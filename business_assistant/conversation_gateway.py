@@ -697,6 +697,39 @@ class WorkflowPandaConversationGateway:
             },
         )
 
+    async def _maybe_chain_to_enrichment(
+        self, request: ConversationRequest, chain_text: str, tool_result: ConversationResult
+    ) -> ConversationResult:
+        """Production defect closure: uploaded XLSX + generic analyze-only
+        reply on the upload turn (no ROW_FOUND yet), followed by "Подготовь
+        полную карточку товара <SKU> из загруженного прайса..." on the NEXT
+        turn -- ``resolve_product_enrichment_request`` falls back to
+        re-running the SAME, unchanged ``data.excel_assistant`` row lookup
+        (dispatched as an ordinary CALL_TOOL by ``_invoke_tool`` above) with
+        THIS turn's text instead of giving up. If that lookup now resolves a
+        single row (ROW_FOUND, already persisted onto ``bitrix_product_
+        fields`` by ``_invoke_tool``'s existing FAMILY_EXCEL block), continue
+        straight into ``CALL_PRODUCT_ENRICHMENT`` in the SAME turn -- the
+        user should never have to repeat their enrichment request. If the
+        lookup still cannot resolve a row (e.g. the SKU genuinely is not in
+        the file), the original tool reply is returned unchanged."""
+        from business_assistant.action_continuation import CALL_PRODUCT_ENRICHMENT, resolve_product_enrichment_request
+
+        active = self._action_store.get(
+            tenant_id=str(request.tenant_id or ""),
+            owner_id=str(request.user_id or ""),
+            conversation_id=str(request.conversation_id or ""),
+        )
+        enrichment_action = resolve_product_enrichment_request(
+            chain_text,
+            active=active,
+            store=self._action_store,
+            request_id=str(request.request_id or request.correlation_id or ""),
+        )
+        if enrichment_action.decision != CALL_PRODUCT_ENRICHMENT:
+            return tool_result
+        return await self._invoke_product_enrichment(request, enrichment_action)
+
     async def _invoke_product_enrichment(
         self, request: ConversationRequest, action
     ) -> ConversationResult:
@@ -930,6 +963,9 @@ class WorkflowPandaConversationGateway:
 
         if action.decision == CALL_TOOL and self._tool_gateway is not None:
             result = await self._invoke_tool(request, action)
+            chain_text = str(getattr(action, "chain_to_enrichment_text", "") or "")
+            if chain_text:
+                result = await self._maybe_chain_to_enrichment(request, chain_text, result)
             self._record_latency(t0, follow_up_ms)
             meta = dict(result.metadata or {})
             meta["follow_up_kind"] = resolution.kind

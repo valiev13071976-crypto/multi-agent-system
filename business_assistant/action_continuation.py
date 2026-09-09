@@ -342,6 +342,17 @@ class ActionDecision:
     extra_llm: bool = False
     capability_status: str = CAPABILITY_UNAVAILABLE
     idempotency_key: str = ""
+    # Production defect closure: non-empty only for the CALL_TOOL fallback
+    # ``resolve_product_enrichment_request`` returns when a product-card
+    # enrichment turn names a SKU/EAN that was never resolved into
+    # ``bitrix_product_fields`` on a PRIOR turn. Tells
+    # ``WorkflowPandaConversationGateway.respond()`` to re-attempt
+    # ``resolve_product_enrichment_request`` with this text (the original
+    # enrichment turn's text, not the CALL_TOOL's own follow-up wording)
+    # immediately after the row-lookup tool call, and chain straight into
+    # CALL_PRODUCT_ENRICHMENT if it now resolves. Every other decision
+    # leaves this at its default "" and is completely unaffected.
+    chain_to_enrichment_text: str = ""
 
 
 class ActiveTaskStore:
@@ -1111,7 +1122,37 @@ def resolve_product_enrichment_request(
 
     fields = dict(active.parameters.get("bitrix_product_fields") or {})
     if not fields.get("title") or not fields.get("sku"):
-        return _enrichment_missing_context_decision(active)
+        # Production defect closure: the prior upload turn may have only
+        # parsed/analyzed the spreadsheet (e.g. "В таблице 13 строк и 8
+        # столбцов...") WITHOUT naming a specific row -- no ROW_FOUND yet,
+        # so bitrix_product_fields was never persisted -- while THIS
+        # enrichment turn names the exact SKU/EAN itself ("...карточку
+        # товара LG 55MRGB86B6A.ARUG из загруженного прайса..."). Rather
+        # than giving up, reuse the EXISTING, unchanged FAMILY_EXCEL
+        # row-lookup tool call (data.excel_assistant/assist) against the
+        # already-parsed dataset_id -- never re-parsing/re-uploading.
+        # ``chain_to_enrichment_text`` tells the gateway to re-resolve this
+        # SAME enrichment request immediately after, so the previously
+        # parsed product context is restored and CALL_PRODUCT_ENRICHMENT
+        # still fires within this one turn when the lookup succeeds.
+        dataset_id = str(active.parameters.get("dataset_id") or "")
+        if not dataset_id:
+            return _enrichment_missing_context_decision(active)
+        lookup_args = {"text": text, "dataset_id": dataset_id}
+        lookup_idem = _idempotency_key(request_id, "data.excel_assistant.assist", lookup_args)
+        return ActionDecision(
+            decision=CALL_TOOL,
+            readiness=READY_TO_EXECUTE,
+            continuation=CONTINUE_ACTIVE_TASK,
+            task=active,
+            arguments=lookup_args,
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation=EXCEL_CONTRACT.operation,
+            extra_llm=False,
+            capability_status=CAPABILITY_AVAILABLE_AND_AUTHORIZED,
+            idempotency_key=lookup_idem,
+            chain_to_enrichment_text=text,
+        )
 
     retail_price = str(active.parameters.get("bitrix_retail_price_preview") or "")
     args = {
