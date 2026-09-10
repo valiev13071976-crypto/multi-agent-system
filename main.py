@@ -268,6 +268,9 @@ from business_assistant_api.router import configure_business_assistant_api_route
 from telegram_interface.config import telegram_interface_enabled
 from telegram_interface.runtime import build_telegram_interface_runtime
 from telegram_interface.router import configure_telegram_interface_router
+from market_intel.config import market_intel_enabled
+from market_intel.runtime import build_market_intelligence_runtime
+from market_intel.router import configure_market_intel_router
 from voice_interface.config import voice_interface_enabled
 from voice_interface.runtime import build_voice_interface_runtime
 from voice_interface.router import configure_voice_interface_router
@@ -402,6 +405,17 @@ if (
     )
     ba_api_runtime.service.ba.product_intelligence_service = (
         side_effect_runtime.product_intelligence_runtime.service
+    )
+# Telegram Wholesale / Market Intelligence reads the owner's OWN Telegram
+# account and compares observed supplier prices against the catalog the
+# existing Excel/file pipeline already normalized. It is given only the
+# READ side of that catalog (``ProductCatalogStore.list_products``) and
+# never the ingestion path, so it cannot affect existing imports.
+market_intel_runtime = None
+if market_intel_enabled():
+    _mi_product_runtime = getattr(side_effect_runtime, "product_intelligence_runtime", None)
+    market_intel_runtime = build_market_intelligence_runtime(
+        catalog=getattr(getattr(_mi_product_runtime, "service", None), "store", None),
     )
 realtime_runtime = None
 if realtime_enabled():
@@ -611,6 +625,11 @@ if tg_interface_runtime is not None:
     )
 else:
     app.include_router(configure_telegram_interface_router(None, webhook_secret=""))
+app.include_router(
+    configure_market_intel_router(
+        market_intel_runtime.service if market_intel_runtime is not None else None
+    )
+)
 if voice_interface_runtime is not None:
     app.include_router(configure_voice_interface_router(voice_interface_runtime.service))
 app.include_router(configure_personalization_router(personalization_runtime.service))
