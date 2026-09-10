@@ -38,6 +38,10 @@ _ARTICLE_PROPERTY = schema.offer_property(code="ARTICLE")
 # EAN/GTIN, SEO, and gallery/additional-image writing still have none and
 # remain unwritten, exactly as before.
 _PHYSICAL_DIMENSION_KEYS = (schema.WEIGHT_FIELD, schema.LENGTH_FIELD, schema.WIDTH_FIELD, schema.HEIGHT_FIELD)
+# Bitrix REST pages list methods at 50 rows; this bound keeps the section
+# read finite (50 pages = 2500 sections) if an install ever returns a
+# ``next`` cursor that does not terminate.
+_SECTION_LIST_MAX_PAGES = 50
 
 
 class LiveBitrixAdapter(BitrixFixtureAdapter):
@@ -170,13 +174,32 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             # ``iblock_id`` explicitly) -- never assumed.
             requested_iblock = params.get("iblock_id")
             iblock_id = int(requested_iblock) if requested_iblock else self._require_catalog_iblock_id()
-            data = self.client.call(
-                "catalog.section.list",
-                credential_ref=credential_ref,
-                params={"filter": {"iblockId": iblock_id}, "select": ["id", "name", "sort", "iblockSectionId"]},
-            )
-            result = data.get("result")
-            return self._envelope(result.get("sections", []) if isinstance(result, dict) else (result or []))
+            # catalog.section.list is PAGED: the real production response
+            # carries ``total`` (62) but only the first 50 sections, plus a
+            # ``next`` offset. Reading a single page silently hid 12 real
+            # sections from ``schema.resolve_section_id``, which then failed
+            # closed with ``no_matching_section_found`` for a section that
+            # genuinely exists. Follow ``next`` until the list is exhausted;
+            # the page cap keeps this bounded, same discipline as every
+            # other read here.
+            sections: list = []
+            start = None
+            for _page in range(_SECTION_LIST_MAX_PAGES):
+                page_params: dict = {
+                    "filter": {"iblockId": iblock_id},
+                    "select": ["id", "name", "sort", "iblockSectionId"],
+                }
+                if start is not None:
+                    page_params["start"] = start
+                data = self.client.call("catalog.section.list", credential_ref=credential_ref, params=page_params)
+                result = data.get("result")
+                page = result.get("sections", []) if isinstance(result, dict) else (result or [])
+                sections.extend(page)
+                next_start = data.get("next")
+                if not page or next_start in (None, ""):
+                    break
+                start = int(next_start)
+            return self._envelope(sections)
 
         if operation == "offer_read":
             parent_id = str(

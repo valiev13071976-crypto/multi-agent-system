@@ -1,0 +1,421 @@
+{
+ "_source": "LIVE read-only catalog.section.list against the production Bitrix/Aspro install (webhook redacted); captured verbatim, only the 'time' block removed.",
+ "pages": [
+  {
+   "request": {
+    "filter": {
+     "iblockId": 14
+    },
+    "select": [
+     "id",
+     "name",
+     "sort",
+     "iblockSectionId"
+    ]
+   },
+   "status": 200,
+   "response": {
+    "result": {
+     "sections": [
+      {
+       "iblockSectionId": null,
+       "id": 45,
+       "name": "Оборудование",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 45,
+       "id": 46,
+       "name": "Генераторы",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 45,
+       "id": 47,
+       "name": "Отопительное оборудование",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 45,
+       "id": 48,
+       "name": "Климатическая техника",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 48,
+       "id": 49,
+       "name": "Бризеры",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 48,
+       "id": 50,
+       "name": "Кондиционеры",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 45,
+       "id": 51,
+       "name": "Запчасти",
+       "sort": 400
+      },
+      {
+       "iblockSectionId": null,
+       "id": 57,
+       "name": "Хобби и творчество",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 57,
+       "id": 58,
+       "name": "Рисование и лепка",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 57,
+       "id": 59,
+       "name": "Рукоделие",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 57,
+       "id": 60,
+       "name": "Творческие наборы",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": null,
+       "id": 61,
+       "name": "Электроника",
+       "sort": 600
+      },
+      {
+       "iblockSectionId": 61,
+       "id": 62,
+       "name": "Телефоны и смарт-часы",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 62,
+       "id": 63,
+       "name": "Смартфоны",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 62,
+       "id": 64,
+       "name": "Смарт-часы",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 62,
+       "id": 65,
+       "name": "Аксессуары",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 61,
+       "id": 66,
+       "name": "Игры и приставки",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 66,
+       "id": 67,
+       "name": "Консоли",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 66,
+       "id": 68,
+       "name": "Игры",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 66,
+       "id": 69,
+       "name": "Аксессуары",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 61,
+       "id": 70,
+       "name": "Телевизоры",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 70,
+       "id": 71,
+       "name": "FULL HD-телевизоры",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 70,
+       "id": 72,
+       "name": "Смарт-телевизоры",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 70,
+       "id": 73,
+       "name": "Телевизоры с изогнутым экраном",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 61,
+       "id": 74,
+       "name": "Аудиотехника",
+       "sort": 400
+      },
+      {
+       "iblockSectionId": 74,
+       "id": 75,
+       "name": "Акустика",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 74,
+       "id": 76,
+       "name": "Виниловые проигрыватели",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 74,
+       "id": 77,
+       "name": "Наушники",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": null,
+       "id": 78,
+       "name": "Автотовары",
+       "sort": 700
+      },
+      {
+       "iblockSectionId": 78,
+       "id": 79,
+       "name": "Уход за автомобилем",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 78,
+       "id": 80,
+       "name": "Запчасти для мотоциклов",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 78,
+       "id": 81,
+       "name": "Запчасти для автомобилей",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": null,
+       "id": 82,
+       "name": "Товары для дома",
+       "sort": 800
+      },
+      {
+       "iblockSectionId": 82,
+       "id": 83,
+       "name": "Текстиль",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 82,
+       "id": 84,
+       "name": "Декор",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 82,
+       "id": 85,
+       "name": "Посуда",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 82,
+       "id": 86,
+       "name": "Инвентарь",
+       "sort": 400
+      },
+      {
+       "iblockSectionId": 82,
+       "id": 87,
+       "name": "Освещение",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 87,
+       "id": 88,
+       "name": "Люстры",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 87,
+       "id": 89,
+       "name": "Светильники",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 87,
+       "id": 90,
+       "name": "Фонари",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": null,
+       "id": 91,
+       "name": "Строительство и ремонт",
+       "sort": 900
+      },
+      {
+       "iblockSectionId": 91,
+       "id": 92,
+       "name": "Инструменты",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 92,
+       "id": 93,
+       "name": "Электроинструменты",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 92,
+       "id": 94,
+       "name": "Пилы",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 92,
+       "id": 95,
+       "name": "Наборы инструментов",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 92,
+       "id": 96,
+       "name": "Расходные материалы и оснастка",
+       "sort": 400
+      },
+      {
+       "iblockSectionId": 91,
+       "id": 97,
+       "name": "Отделочные материалы",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 97,
+       "id": 98,
+       "name": "Стеновые панели",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 97,
+       "id": 99,
+       "name": "Напольные покрытия",
+       "sort": 200
+      }
+     ]
+    },
+    "next": 50,
+    "total": 62
+   }
+  },
+  {
+   "request": {
+    "filter": {
+     "iblockId": 14
+    },
+    "select": [
+     "id",
+     "name",
+     "sort",
+     "iblockSectionId"
+    ],
+    "start": 50
+   },
+   "status": 200,
+   "response": {
+    "result": {
+     "sections": [
+      {
+       "iblockSectionId": 97,
+       "id": 100,
+       "name": "Обои",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 97,
+       "id": 101,
+       "name": "Клеи",
+       "sort": 410
+      },
+      {
+       "iblockSectionId": 91,
+       "id": 102,
+       "name": "Сантехника",
+       "sort": 600
+      },
+      {
+       "iblockSectionId": 102,
+       "id": 103,
+       "name": "Ванны",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 102,
+       "id": 104,
+       "name": "Душевые кабины",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 102,
+       "id": 105,
+       "name": "Смесители",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": 102,
+       "id": 106,
+       "name": "Унитазы",
+       "sort": 500
+      },
+      {
+       "iblockSectionId": null,
+       "id": 112,
+       "name": "Красота и здоровье",
+       "sort": 1100
+      },
+      {
+       "iblockSectionId": 112,
+       "id": 113,
+       "name": "Пищевые добавки",
+       "sort": 100
+      },
+      {
+       "iblockSectionId": 112,
+       "id": 114,
+       "name": "Макияж и уход",
+       "sort": 200
+      },
+      {
+       "iblockSectionId": 112,
+       "id": 115,
+       "name": "Маникюр и педикюр",
+       "sort": 300
+      },
+      {
+       "iblockSectionId": 112,
+       "id": 116,
+       "name": "Парфюмерия",
+       "sort": 400
+      }
+     ]
+    },
+    "total": 62
+   }
+  }
+ ]
+}

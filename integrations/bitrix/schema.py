@@ -323,9 +323,23 @@ class SectionResolutionError(Exception):
 #      does not know simply falls through and fails closed exactly as
 #      before -- nothing is ever guessed, and no section id, brand, SKU or
 #      EAN is encoded here.
+#   3. Whole-token containment (LIVE production follow-up: the real
+#      catalog.section.list data proves supplier labels are COMPOUND --
+#      "ТВ", "Телевизоры LED", "Электроника / Телевизоры" -- while the
+#      shop's own section names are single terms like "Телевизоры", so
+#      layers 1-2, which only ever compare a label to a section AS A
+#      WHOLE, can never match them). A section matches when its own name
+#      (or its concept) equals one of the candidate's contiguous
+#      whole-token runs. Still never a substring match: "ТВ-тюнер" does
+#      not contain the token "тв".
 #
-# Both layers still require EXACTLY ONE surviving section, otherwise the
-# same fail-closed SectionResolutionError as before.
+# Every layer still requires EXACTLY ONE surviving section, otherwise the
+# same fail-closed SectionResolutionError as before. The one exception is
+# layer 3, where a compound label may legitimately name a section AND its
+# own ancestor ("Электроника / Телевизоры"): when all matches lie on a
+# single parent chain of the same ``catalog.section.list`` snapshot, the
+# most specific (deepest) one wins instead of failing closed. Matches on
+# different branches remain ambiguous.
 _PLURAL_MARKERS = ("ами", "ями", "ов", "ев", "ы", "и", "а", "я", "s")
 
 
@@ -342,7 +356,7 @@ def _normalize_section_term(text: str) -> str:
 
 
 CATEGORY_CONCEPT_ALIASES: tuple[tuple[str, ...], ...] = (
-    ("tv", "tv set", "television", "телевизор", "телевизоры", "телеви"),
+    ("tv", "tv set", "television", "телевизор", "телевизоры", "телеви", "тв"),
     ("smartphone", "mobile phone", "cellphone", "смартфон", "телефон"),
     ("laptop", "notebook", "ноутбук"),
     ("monitor", "монитор"),
@@ -372,6 +386,47 @@ for _aliases in CATEGORY_CONCEPT_ALIASES:
 
 def _section_concept(text: str) -> str:
     return _CONCEPT_BY_TERM.get(_normalize_section_term(text), "")
+
+
+def _token_runs(text: str) -> set[str]:
+    """Every contiguous whole-token run of a normalized term, e.g.
+    "электроника телевизор" -> {"электроника", "телевизор",
+    "электроника телевизор"}."""
+    tokens = _normalize_section_term(text).split()
+    return {
+        " ".join(tokens[start:end])
+        for start in range(len(tokens))
+        for end in range(start + 1, len(tokens) + 1)
+    }
+
+
+def _deepest_of_single_lineage(matches: list, sections: list):
+    """Return the most specific match when every match is on ONE parent
+    chain of this snapshot (a compound label naming a section and its own
+    ancestor), otherwise ``None`` -- matches on different branches stay
+    ambiguous and fail closed."""
+    def parent_of(section):
+        return section.get("iblockSectionId") or section.get("parentSectionId")
+
+    parent_by_id = {}
+    for section in sections:
+        section_id = section.get("id")
+        if section_id is not None:
+            parent_by_id[str(section_id)] = parent_of(section)
+
+    def ancestors(section) -> set[str]:
+        seen: set[str] = set()
+        parent = parent_of(section)
+        while parent not in (None, "") and str(parent) not in seen:
+            seen.add(str(parent))
+            parent = parent_by_id.get(str(parent))
+        return seen
+
+    deepest = max(matches, key=lambda section: len(ancestors(section)))
+    deepest_lineage = ancestors(deepest) | {str(deepest.get("id"))}
+    if all(str(section.get("id")) in deepest_lineage for section in matches):
+        return deepest
+    return None
 
 
 def resolve_section_id(*, category: str = "", subcategory: str = "", sections: list) -> dict:
@@ -416,6 +471,20 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
         concept = _section_concept(candidate)
         matches = [s for s in sections if concept and _section_concept(s.get("name")) == concept]
         match_kind = "category_concept"
+    if not matches:
+        # Layer 3: the compound supplier label names the section.
+        runs = _token_runs(candidate)
+        run_concepts = {_section_concept(run) for run in runs} - {""}
+        matches = [
+            s
+            for s in sections
+            if _normalize_section_term(s.get("name")) in runs
+            or (_section_concept(s.get("name")) in run_concepts and _section_concept(s.get("name")))
+        ]
+        match_kind = "label_contains_section_name"
+        if len(matches) > 1:
+            deepest = _deepest_of_single_lineage(matches, sections)
+            matches = [deepest] if deepest is not None else matches
     if len(matches) == 1:
         match = matches[0]
         return {
