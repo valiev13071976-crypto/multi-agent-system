@@ -680,6 +680,55 @@ class PriceComparisonTests(unittest.TestCase):
             )
             self.assertEqual(cheapest["price"], "84500")
 
+    def test_our_prices_are_read_from_the_catalog_never_derived(self):
+        """Phase 1 reports market intelligence only. Our own wholesale
+        price is whatever the catalog already holds, so a product with no
+        price must come back empty rather than with anything Market
+        Intelligence calculated from the observed market."""
+        catalog = InMemoryProductCatalogStore()
+        catalog.save_product(
+            Product(
+                product_id="p-tv",
+                tenant_id=TENANT,
+                title="Телевизор LG 55MRGB86B6A",
+                brand="LG",
+                gtin=TV_EAN,
+                mpn=TV_MODEL,
+                price=PriceInfo(currency="RUB"),
+            )
+        )
+        with _TempStore() as store:
+            service = _service(store, catalog=catalog)
+            for channel in _enable_all(service):
+                service.ingest_channel(tenant_id=TENANT, channel_id=channel.channel_id)
+
+            comparison = service.price_comparison(tenant_id=TENANT, product_id="p-tv")
+
+            self.assertIsNone(comparison.our_selling_price)
+            self.assertIsNone(comparison.our_purchase_price)
+            # The observed market is still reported; only OUR price is absent.
+            self.assertEqual(comparison.observation_count, 2)
+            self.assertEqual(comparison.min_price, Decimal("84500"))
+            self.assertEqual(comparison.median_price, Decimal("87200"))
+
+    def test_no_recommended_or_derived_price_is_ever_published(self):
+        """Guards the Phase 1 boundary: price setting is a later phase, so
+        the comparison contract must not grow a recommendation field."""
+        with _TempStore() as store:
+            service = self._ingest_everything(store)
+            comparison = service.price_comparison(tenant_id=TENANT, product_id="p-tv")
+
+        for forbidden in (
+            "recommended_price",
+            "suggested_price",
+            "target_price",
+            "margin",
+            "markup",
+            "discount",
+        ):
+            with self.subTest(field=forbidden):
+                self.assertFalse(hasattr(comparison, forbidden))
+
     def test_a_foreign_currency_observation_is_excluded_never_converted(self):
         with _TempStore() as store:
             client = FixtureTelegramReadClient(
