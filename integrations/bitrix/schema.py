@@ -332,6 +332,16 @@ class SectionResolutionError(Exception):
 #      (or its concept) equals one of the candidate's contiguous
 #      whole-token runs. Still never a substring match: "ТВ-тюнер" does
 #      not contain the token "тв".
+#   4. Already-prepared product evidence (LIVE production follow-up: the
+#      supplier's category column turned out to be an internal code --
+#      "CE" -- that names no product category in ANY vocabulary, so no
+#      amount of name matching against the 100+ real sections can ever
+#      resolve it). When, and only when, the supplier label itself names
+#      no product category at all, the concepts evidenced by the PREPARED
+#      card (``derive_category_concepts`` over its title and canonical
+#      characteristic keys) select the section instead. A supplier label
+#      that does name a category this catalog happens to lack keeps
+#      failing closed rather than being silently rerouted by the title.
 #
 # Every layer still requires EXACTLY ONE surviving section, otherwise the
 # same fail-closed SectionResolutionError as before. The one exception is
@@ -410,6 +420,56 @@ def _token_runs(text: str) -> set[str]:
     return runs
 
 
+# Canonical characteristic keys that identify a product TYPE on their own
+# (``product_enrichment.characteristics.CANONICAL_CHARACTERISTIC_ALIASES``
+# is the vocabulary these come from). Only keys that no other product type
+# can carry belong here -- a display diagonal, for instance, says nothing
+# about whether the product is a TV or a monitor, so it is deliberately
+# absent and contributes no evidence at all.
+CHARACTERISTIC_CONCEPT_EVIDENCE: dict[str, str] = {
+    "smart_tv_support": "tv",
+    "tuners": "tv",
+}
+
+
+def derive_category_concepts(signals) -> set[str]:
+    """Product-category concepts evidenced by the ALREADY prepared product
+    data (its title and the canonical characteristic keys enrichment
+    resolved) -- a pure function over strings, never a search, an LLM call
+    or a new classification subsystem. Uses the same
+    ``CATEGORY_CONCEPT_ALIASES`` vocabulary section names are matched
+    with, so a signal only counts when it names a product category as a
+    whole token."""
+    concepts: set[str] = set()
+    for signal in signals or ():
+        text = str(signal or "").strip()
+        if not text:
+            continue
+        evidenced = CHARACTERISTIC_CONCEPT_EVIDENCE.get(text.casefold())
+        if evidenced:
+            concepts.add(evidenced)
+            continue
+        for run in _token_runs(text):
+            concept = _CONCEPT_BY_TERM.get(run)
+            if concept:
+                concepts.add(concept)
+    return concepts
+
+
+def _sections_for_concepts(concepts: set[str], sections: list) -> list:
+    return [s for s in sections if _section_concept(s.get("name")) in concepts and _section_concept(s.get("name"))]
+
+
+def _names_a_product_category(text: str) -> bool:
+    """Whether the supplier's own label names a product category at all
+    ("Холодильники", "LED-телевизоры") as opposed to being an opaque
+    internal code that classifies nothing ("CE", "Consumer Electronics",
+    "Электроника")."""
+    if _section_concept(text):
+        return True
+    return any(_CONCEPT_BY_TERM.get(run) for run in _token_runs(text))
+
+
 def _deepest_of_single_lineage(matches: list, sections: list):
     """Return the most specific match when every match is on ONE parent
     chain of this snapshot (a compound label naming a section and its own
@@ -439,12 +499,17 @@ def _deepest_of_single_lineage(matches: list, sections: list):
     return None
 
 
-def resolve_section_id(*, category: str = "", subcategory: str = "", sections: list) -> dict:
+def resolve_section_id(*, category: str = "", subcategory: str = "", sections: list, signals=()) -> dict:
     """Deterministically resolve a Panda category/subcategory pair to one
     EXISTING Bitrix section id, from an already-fetched live/fixture
     ``catalog.section.list`` snapshot (``sections``: an iterable of
     ``{"id", "name", ...}`` dicts) -- never a live call itself, so it stays
     a pure function like ``resolve_section_ancestors``.
+
+    ``signals`` are strings the caller ALREADY prepared for this product
+    (its title, the canonical characteristic keys enrichment resolved) and
+    are consulted only as a last resort, when the supplier's own category
+    label names no product category at all -- see the layer notes above.
 
     Uses ``subcategory`` (more specific -- e.g. "Телевизоры") WHENEVER it
     was supplied, falling back to ``category`` ONLY if no subcategory was
@@ -462,6 +527,8 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
     )
     if not candidate:
         raise SectionResolutionError("section_name_not_supplied", "no category/subcategory supplied to resolve")
+
+    evidence_concepts = derive_category_concepts(signals)
 
     sections = list(sections)
     if not sections:
@@ -504,6 +571,23 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
             or (_section_concept(s.get("name")) in run_concepts and _section_concept(s.get("name")))
         ]
         match_kind = "label_contains_section_name"
+        if len(matches) > 1:
+            deepest = _deepest_of_single_lineage(matches, sections)
+            matches = [deepest] if deepest is not None else matches
+    if not matches and evidence_concepts and not _names_a_product_category(candidate):
+        # Layer 4: the supplier's category is an opaque internal code that
+        # names no product category at all ("CE", "Consumer Electronics"),
+        # so fall back to what the PREPARED product itself already says it
+        # is -- its title and the canonical characteristic keys enrichment
+        # resolved. Deliberately NOT applied when the supplier did name a
+        # product category this catalog happens to lack (e.g.
+        # "Холодильники" with no fridge section): that is a disagreement
+        # between the supplier and the product, and it keeps failing
+        # closed rather than silently overriding the supplier. Still only
+        # ever selects an EXISTING section, and still fails closed below
+        # unless exactly one survives.
+        matches = _sections_for_concepts(evidence_concepts, sections)
+        match_kind = "product_evidence_concept"
         if len(matches) > 1:
             deepest = _deepest_of_single_lineage(matches, sections)
             matches = [deepest] if deepest is not None else matches

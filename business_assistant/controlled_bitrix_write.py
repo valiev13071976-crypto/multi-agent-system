@@ -582,7 +582,18 @@ def prepare_single_product_write(
             sections = sections_result.get("items") or sections_result.get("sections") or []
             try:
                 resolved = schema.resolve_section_id(
-                    category=request.category_source, subcategory=request.subcategory, sections=sections
+                    category=request.category_source,
+                    subcategory=request.subcategory,
+                    sections=sections,
+                    # A supplier price list's category column is only ONE
+                    # classification signal, and it is often a broad
+                    # internal code ("CE") that names no section at all.
+                    # These are the product-type signals the prepared card
+                    # ALREADY carries -- its title and the canonical
+                    # characteristic keys enrichment resolved -- reused
+                    # here as evidence; nothing is fetched or inferred
+                    # anew during the write.
+                    signals=(title, *dict(request.characteristics or {}).keys()),
                 )
             except schema.SectionResolutionError as exc:
                 return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
