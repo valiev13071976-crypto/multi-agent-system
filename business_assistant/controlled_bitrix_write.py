@@ -905,7 +905,13 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
             "(найдено несколько похожих записей). Запись не выполнена."
         )
     if status == STATUS_UNRESOLVED:
-        return f"Не удалось подготовить запись в Bitrix: {result.get('reason', 'unresolved')}."
+        # The reason code alone ("no_matching_section_found") never said
+        # WHICH value failed to resolve, so a production failure could not
+        # be diagnosed from the owner's own transcript. The detail carries
+        # exactly that (candidate + how many sections were read).
+        detail = str(result.get("detail") or "").strip()
+        text = f"Не удалось подготовить запись в Bitrix: {result.get('reason', 'unresolved')}."
+        return f"{text} {detail}" if detail else text
     if status == STATUS_WRITE_PARTIAL_FAILURE:
         step_labels = {
             "offer_create": "создание торгового предложения/артикула (SKU)",

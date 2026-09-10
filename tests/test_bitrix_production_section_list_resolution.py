@@ -111,6 +111,34 @@ class SupplierLabelResolvesToRealSectionTests(unittest.TestCase):
             schema.resolve_section_id(category="Аксессуары", sections=self.sections)
         self.assertEqual(ctx.exception.code, "ambiguous_section_name")
 
+    def test_qualified_hyphenated_supplier_labels_resolve(self):
+        """A price list qualifies the category inline ("ЖК-телевизоры",
+        "Смарт-ТВ", "LED-телевизоры") while the shop simply calls the
+        section "Телевизоры" -- the hyphenated token was one opaque word,
+        so none of these could reach it."""
+        for label in ("Смарт-ТВ", "ЖК-телевизоры", "LED-телевизоры", "OLED-телевизоры", "ТВ-техника"):
+            with self.subTest(label=label):
+                resolved = schema.resolve_section_id(category=label, sections=self.sections)
+                self.assertEqual(resolved["section_id"], self.tv_section_id)
+
+    def test_hyphenated_section_names_keep_their_own_identity(self):
+        for name in ("Смарт-телевизоры", "Смарт-часы"):
+            with self.subTest(name=name):
+                resolved = schema.resolve_section_id(subcategory=name, sections=self.sections)
+                self.assertEqual(resolved["section_id"], _section_id_named(name))
+
+    def test_failure_names_the_candidate_and_the_snapshot_it_was_matched_against(self):
+        with self.assertRaises(schema.SectionResolutionError) as ctx:
+            schema.resolve_section_id(category="Мониторы", sections=self.sections)
+        message = str(ctx.exception)
+        self.assertIn("Мониторы", message)
+        self.assertIn(str(len(self.sections)), message)
+
+    def test_empty_section_list_is_reported_as_its_own_failure(self):
+        with self.assertRaises(schema.SectionResolutionError) as ctx:
+            schema.resolve_section_id(category="ТВ", sections=[])
+        self.assertEqual(ctx.exception.code, "section_list_empty")
+
     def test_unknown_category_still_fails_closed(self):
         for label in ("CE", "Продукты питания", "Widgets"):
             with self.subTest(label=label):
@@ -130,6 +158,35 @@ class SupplierLabelResolvesToRealSectionTests(unittest.TestCase):
         self.assertEqual(ctx.exception.code, "no_matching_section_found")
         resolved = schema.resolve_section_id(category=beyond["name"], sections=_all_sections())
         self.assertEqual(resolved["section_id"], beyond["id"])
+
+
+class UnresolvedWriteTextNamesTheCandidateTests(unittest.TestCase):
+    """A production failure has to be diagnosable from the owner's own
+    transcript: the reason code alone never said which value failed."""
+
+    def test_unresolved_text_includes_the_resolution_detail(self):
+        from business_assistant.controlled_bitrix_write import (
+            STATUS_UNRESOLVED,
+            format_bitrix_write_result_text,
+        )
+
+        try:
+            schema.resolve_section_id(category="Мониторы", sections=_all_sections())
+        except schema.SectionResolutionError as exc:
+            result = {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
+
+        text = format_bitrix_write_result_text(result)
+        self.assertIn("no_matching_section_found", text)
+        self.assertIn("Мониторы", text)
+
+    def test_unresolved_text_without_detail_is_unchanged(self):
+        from business_assistant.controlled_bitrix_write import (
+            STATUS_UNRESOLVED,
+            format_bitrix_write_result_text,
+        )
+
+        text = format_bitrix_write_result_text({"status": STATUS_UNRESOLVED, "reason": "missing_title_or_sku"})
+        self.assertEqual(text, "Не удалось подготовить запись в Bitrix: missing_title_or_sku.")
 
 
 class LiveSectionReadFollowsPaginationTests(unittest.TestCase):

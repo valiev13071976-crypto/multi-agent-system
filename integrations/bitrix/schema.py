@@ -391,13 +391,23 @@ def _section_concept(text: str) -> str:
 def _token_runs(text: str) -> set[str]:
     """Every contiguous whole-token run of a normalized term, e.g.
     "электроника телевизор" -> {"электроника", "телевизор",
-    "электроника телевизор"}."""
+    "электроника телевизор"}.
+
+    A hyphenated supplier token is ALSO offered as its own parts: real
+    price lists qualify the category inline ("ЖК-телевизоры", "Смарт-ТВ",
+    "LED-телевизоры") where the shop simply calls the section
+    "Телевизоры". Only the candidate label is split this way -- section
+    names keep their own hyphenated identity, so "Смарт-телевизоры" stays
+    a distinct section rather than collapsing into "Телевизоры".
+    """
     tokens = _normalize_section_term(text).split()
-    return {
+    runs = {
         " ".join(tokens[start:end])
         for start in range(len(tokens))
         for end in range(start + 1, len(tokens) + 1)
     }
+    runs.update(part for token in tokens for part in token.split("-") if part)
+    return runs
 
 
 def _deepest_of_single_lineage(matches: list, sections: list):
@@ -453,6 +463,18 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
     if not candidate:
         raise SectionResolutionError("section_name_not_supplied", "no category/subcategory supplied to resolve")
 
+    sections = list(sections)
+    if not sections:
+        # A HTTP 200 that carried no sections at all is a different
+        # failure from "this category does not match any of them": it
+        # means the configured catalog IBLOCK has no sections (e.g.
+        # BITRIX_CATALOG_ID pointing at the offers/services IBLOCK), and
+        # no category value could ever resolve against it.
+        raise SectionResolutionError(
+            "section_list_empty",
+            "catalog.section.list returned no sections for the configured catalog IBLOCK",
+        )
+
     by_name: dict[str, list] = {}
     for section in sections:
         name = str(section.get("name") or "").strip().casefold()
@@ -497,11 +519,17 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
     if len(matches) > 1:
         raise SectionResolutionError(
             "ambiguous_section_name",
-            f"{len(matches)} existing Bitrix sections are named {candidate!r}; refusing to guess which one",
+            f"{len(matches)} existing Bitrix sections match {candidate!r} "
+            f"({', '.join(sorted(str(m.get('name')) for m in matches))}); refusing to guess which one",
         )
     raise SectionResolutionError(
         "no_matching_section_found",
-        f"no existing Bitrix section is named {candidate!r}",
+        # The candidate AND the size of the snapshot it was matched
+        # against are part of the message on purpose: a production
+        # failure has to say WHICH value could not be resolved and
+        # whether the section list Panda actually received was empty.
+        f"no existing Bitrix section matched {candidate!r} "
+        f"(checked {len(sections)} sections read from catalog.section.list)",
     )
 
 PANDA_MANAGED = "PANDA_MANAGED"
