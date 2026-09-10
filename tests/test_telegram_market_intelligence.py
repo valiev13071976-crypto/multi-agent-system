@@ -18,15 +18,18 @@ from __future__ import annotations
 import base64
 import os
 import sqlite3
+import sys
 import tempfile
 import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 from unittest.mock import patch
 
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from telethon.sessions import StringSession
 
 from security.api_auth import configure_security
 from security.auth import AuthService
@@ -273,13 +276,56 @@ class ClientSelectionFailsClosedTests(unittest.TestCase):
         client = select_telegram_read_client(env, session_string="stored-session")
         self.assertIsInstance(client, MTProtoTelegramReadClient)
 
-    def test_missing_telethon_dependency_fails_closed(self):
-        """Telethon is optional; its absence must be an explicit error, not
-        a silent degrade to fixtures."""
+    def test_broken_telethon_install_fails_closed(self):
+        """Telethon ships in requirements, but a broken or partial install
+        must be an explicit error rather than a silent degrade to fixtures."""
         client = MTProtoTelegramReadClient(api_id=1, api_hash="h", session_string="s")
+        absent = {"telethon": None, "telethon.sync": None, "telethon.sessions": None}
+        with patch.dict(sys.modules, absent, clear=False):
+            with self.assertRaises(MarketIntelError) as ctx:
+                client.list_dialogs()
+        self.assertEqual(ctx.exception.code, MI_CLIENT_UNAVAILABLE)
+
+    def test_unreadable_stored_session_fails_closed(self):
+        """Telethon rejects a corrupt session string with a bare ValueError;
+        it must not escape as a 500."""
+        client = MTProtoTelegramReadClient(api_id=1, api_hash="h", session_string="not-a-session")
         with self.assertRaises(MarketIntelError) as ctx:
             client.list_dialogs()
-        self.assertEqual(ctx.exception.code, MI_CLIENT_UNAVAILABLE)
+        self.assertEqual(ctx.exception.code, MI_SESSION_MISSING)
+        self.assertEqual(ctx.exception.http_status, 403)
+
+
+class TelethonIsADeployableDependencyTests(unittest.TestCase):
+    """The MTProto read side has to be runnable after merge, so the client
+    library is a normal production dependency rather than a manual step."""
+
+    def test_declared_in_production_requirements(self):
+        requirements = Path(__file__).resolve().parents[1] / "requirements.txt"
+        declared = [
+            line.strip()
+            for line in requirements.read_text(encoding="utf-8").splitlines()
+            if line.strip().lower().startswith("telethon")
+        ]
+        self.assertEqual(len(declared), 1, declared)
+        # Telethon 2.x drops ``telethon.sync``, which this client uses.
+        self.assertIn("<2", declared[0])
+
+    def test_the_import_path_the_client_uses_actually_resolves(self):
+        from telethon.sessions import StringSession
+        from telethon.sync import TelegramClient
+
+        self.assertTrue(callable(TelegramClient))
+        self.assertTrue(callable(StringSession))
+
+    def test_a_real_client_is_constructed_without_any_network_call(self):
+        session = StringSession()
+        client = MTProtoTelegramReadClient(
+            api_id=12345, api_hash="hash", session_string=session.save()
+        )
+        built = client._build_client()
+        self.assertTrue(hasattr(built, "connect"))
+        self.assertTrue(hasattr(built, "iter_messages"))
 
 
 class ProductionCredentialNamesTests(unittest.TestCase):

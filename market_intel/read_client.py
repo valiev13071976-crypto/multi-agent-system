@@ -126,10 +126,11 @@ def _posted_at(message: Any) -> datetime:
 class MTProtoTelegramReadClient:
     """Real MTProto client, backed by Telethon.
 
-    Telethon is an OPTIONAL dependency: it is imported lazily so that a
-    deployment which has not authorized live account reading never needs
-    it, and its absence fails closed with ``mi_client_unavailable``
-    instead of degrading to a silent fixture.
+    Telethon ships as a normal production dependency, but it is still
+    imported lazily: a deployment that has not authorized live account
+    reading must not pay for it at startup, and a broken install has to
+    fail closed with ``mi_client_unavailable`` rather than degrade to a
+    silent fixture.
 
     ``client_factory`` is the seam the tests drive: the risky part of this
     adapter is mapping Telethon objects onto our own contracts, and that
@@ -147,7 +148,7 @@ class MTProtoTelegramReadClient:
     def _build_client(self) -> Any:
         if self.client_factory is not None:
             return self.client_factory()
-        try:  # pragma: no cover - exercised via the fail-closed path below
+        try:
             from telethon.sessions import StringSession
             from telethon.sync import TelegramClient
         except ImportError as exc:
@@ -156,7 +157,18 @@ class MTProtoTelegramReadClient:
                 "telethon is not installed; live Telegram account reading is unavailable",
                 http_status=503,
             ) from exc
-        return TelegramClient(StringSession(self.session_string), self.api_id, self.api_hash)
+        try:
+            session = StringSession(self.session_string)
+        except ValueError as exc:
+            # A stored session can be corrupt or written by a different
+            # Telethon major. Telethon signals that with a bare ValueError,
+            # which must not surface as a 500.
+            raise MarketIntelError(
+                MI_SESSION_MISSING,
+                "stored Telegram user session is not readable; re-authorize the account",
+                http_status=403,
+            ) from exc
+        return TelegramClient(session, self.api_id, self.api_hash)
 
     @contextmanager
     def _session(self):
