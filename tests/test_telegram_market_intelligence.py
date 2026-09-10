@@ -39,6 +39,10 @@ from product_intel.platform_models import (
 from product_intel.store import InMemoryProductCatalogStore
 
 from market_intel.catalog_adapter import offer_candidate_fields
+from market_intel.config import (
+    market_intel_secret_contract,
+    telegram_api_credentials_configured,
+)
 from market_intel.errors import (
     MI_CHANNEL_NOT_MONITORED,
     MI_CLIENT_UNAVAILABLE,
@@ -252,8 +256,8 @@ class ClientSelectionFailsClosedTests(unittest.TestCase):
         env = {
             "TELEGRAM_USER_CLIENT_ENABLED": "true",
             "TELEGRAM_USER_LIVE_ACTIVE": "true",
-            "TELEGRAM_API_ID": "12345",
-            "TELEGRAM_API_HASH": "abc",
+            "TELEGRAM_USER_API_ID": "12345",
+            "TELEGRAM_USER_API_HASH": "abc",
         }
         with self.assertRaises(MarketIntelError) as ctx:
             select_telegram_read_client(env, session_string="")
@@ -263,8 +267,8 @@ class ClientSelectionFailsClosedTests(unittest.TestCase):
         env = {
             "TELEGRAM_USER_CLIENT_ENABLED": "true",
             "TELEGRAM_USER_LIVE_ACTIVE": "true",
-            "TELEGRAM_API_ID": "12345",
-            "TELEGRAM_API_HASH": "abc",
+            "TELEGRAM_USER_API_ID": "12345",
+            "TELEGRAM_USER_API_HASH": "abc",
         }
         client = select_telegram_read_client(env, session_string="stored-session")
         self.assertIsInstance(client, MTProtoTelegramReadClient)
@@ -276,6 +280,47 @@ class ClientSelectionFailsClosedTests(unittest.TestCase):
         with self.assertRaises(MarketIntelError) as ctx:
             client.list_dialogs()
         self.assertEqual(ctx.exception.code, MI_CLIENT_UNAVAILABLE)
+
+
+class ProductionCredentialNamesTests(unittest.TestCase):
+    """The owner sets these by hand in the deployment environment, and a
+    wrong name degrades silently to the fixture client rather than raising.
+    Pin the exact names so a rename cannot quietly disable live reading."""
+
+    API_ID = "TELEGRAM_USER_API_ID"
+    API_HASH = "TELEGRAM_USER_API_HASH"
+
+    def test_credential_check_reads_exactly_the_production_names(self):
+        self.assertTrue(
+            telegram_api_credentials_configured({self.API_ID: "12345", self.API_HASH: "abc"})
+        )
+        for partial in ({self.API_ID: "12345"}, {self.API_HASH: "abc"}, {}):
+            with self.subTest(env=sorted(partial)):
+                self.assertFalse(telegram_api_credentials_configured(partial))
+
+    def test_bot_token_credentials_do_not_satisfy_the_user_client(self):
+        """The Bot API integration is a separate credential set; its
+        variables must never authorize account reading."""
+        self.assertFalse(
+            telegram_api_credentials_configured(
+                {"TELEGRAM_BOT_TOKEN": "irrelevant", "TELEGRAM_API_ID": "1", "TELEGRAM_API_HASH": "x"}
+            )
+        )
+
+    def test_contract_advertises_the_production_names(self):
+        advertised = {row["VARIABLE_NAME"] for row in market_intel_secret_contract()}
+        self.assertIn(self.API_ID, advertised)
+        self.assertIn(self.API_HASH, advertised)
+
+    def test_contract_exposes_names_only_and_never_values(self):
+        env = {self.API_ID: "12345", self.API_HASH: "super-secret-hash"}
+        with patch.dict(os.environ, env, clear=False):
+            rendered = repr(market_intel_secret_contract())
+        self.assertNotIn("super-secret-hash", rendered)
+        self.assertNotIn("12345", rendered)
+        for row in market_intel_secret_contract():
+            with self.subTest(variable=row["VARIABLE_NAME"]):
+                self.assertEqual(sorted(row), ["REQUIRED", "STATUS", "VARIABLE_NAME"])
 
 
 class _FakeEntity:
@@ -797,8 +842,8 @@ class RuntimeCompositionTests(unittest.TestCase):
                     "MARKET_INTEL_ENABLED": "true",
                     "TELEGRAM_USER_CLIENT_ENABLED": "true",
                     "TELEGRAM_USER_LIVE_ACTIVE": "true",
-                    "TELEGRAM_API_ID": "12345",
-                    "TELEGRAM_API_HASH": "abc",
+                    "TELEGRAM_USER_API_ID": "12345",
+                    "TELEGRAM_USER_API_HASH": "abc",
                     "PANDA_DATA_DIR": tmp,
                 },
                 db_path=os.path.join(tmp, "mi.sqlite"),

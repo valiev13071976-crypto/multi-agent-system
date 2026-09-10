@@ -252,7 +252,7 @@ def select_telegram_read_client(
     if not telegram_api_credentials_configured(env):
         raise MarketIntelError(
             MI_LIVE_FORBIDDEN,
-            "TELEGRAM_API_ID and TELEGRAM_API_HASH are required when the Telegram user client is live",
+            "TELEGRAM_USER_API_ID and TELEGRAM_USER_API_HASH are required when the Telegram user client is live",
             http_status=403,
         )
     if not str(session_string or "").strip():
@@ -262,8 +262,8 @@ def select_telegram_read_client(
             http_status=403,
         )
     return MTProtoTelegramReadClient(
-        api_id=_as_int(env.get("TELEGRAM_API_ID")),
-        api_hash=str(env.get("TELEGRAM_API_HASH") or ""),
+        api_id=_as_int(env.get("TELEGRAM_USER_API_ID")),
+        api_hash=str(env.get("TELEGRAM_USER_API_HASH") or ""),
         session_string=str(session_string),
         client_factory=client_factory,
     )

@@ -58,8 +58,8 @@ def telegram_user_live_selected(env: dict | None = None) -> bool:
 def telegram_api_credentials_configured(env: dict | None = None) -> bool:
     """Presence only — never return or log the values."""
     source = env if env is not None else os.environ
-    return bool(str(source.get("TELEGRAM_API_ID") or "").strip()) and bool(
-        str(source.get("TELEGRAM_API_HASH") or "").strip()
+    return bool(str(source.get("TELEGRAM_USER_API_ID") or "").strip()) and bool(
+        str(source.get("TELEGRAM_USER_API_HASH") or "").strip()
     )
 
 
@@ -111,12 +111,12 @@ def market_intel_secret_contract() -> list[dict[str, str]]:
             "STATUS": "CONFIGURED-CONTRACT",
         },
         {
-            "VARIABLE_NAME": "TELEGRAM_API_ID",
+            "VARIABLE_NAME": "TELEGRAM_USER_API_ID",
             "REQUIRED": "REQUIRED for live account reading only",
             "STATUS": "CONFIGURED-CONTRACT",
         },
         {
-            "VARIABLE_NAME": "TELEGRAM_API_HASH",
+            "VARIABLE_NAME": "TELEGRAM_USER_API_HASH",
             "REQUIRED": "REQUIRED for live account reading only",
             "STATUS": "CONFIGURED-CONTRACT",
         },
