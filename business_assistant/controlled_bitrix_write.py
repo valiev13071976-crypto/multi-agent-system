@@ -514,40 +514,6 @@ def prepare_single_product_write(
     if not title or not sku:
         return {"status": STATUS_UNRESOLVED, "reason": "missing_title_or_sku"}
 
-    retail_amount = _normalize_price(request.retail_price)
-    if retail_amount is None:
-        return {"status": STATUS_UNRESOLVED, "reason": "missing_or_invalid_retail_price"}
-
-    # Purchase price is optional, but if the source data supplied one it
-    # must be a valid positive number -- fail closed (never write a
-    # malformed/guessed value, never silently drop it either) rather than
-    # proceeding with bad data.
-    purchase_price_amount = None
-    if request.purchase_price:
-        purchase_price_amount = _normalize_price(request.purchase_price)
-        if purchase_price_amount is None:
-            return {"status": STATUS_UNRESOLVED, "reason": "invalid_purchase_price"}
-
-    # Purchase price's native destination (purchasingPrice/purchasingCurrency)
-    # is only implemented on the LIVE adapter so far (see
-    # LiveBitrixAdapter._write_product_create_live) -- the FIXTURE
-    # adapter/store does not yet persist it, so the preview must not claim
-    # a write that will not actually happen for a non-LIVE bridge.
-    purchase_price_has_destination = bridge.environment == ENV_LIVE and purchase_price_amount is not None
-
-    # Weight/length/width/height (schema.py module docstring item D) --
-    # fail closed on a malformed supplied value, before any sync/write.
-    physical_fields, physical_error = _normalize_physical_fields(request)
-    if physical_error:
-        return {"status": STATUS_UNRESOLVED, "reason": physical_error}
-
-    # Preview/detail pictures (schema.py items E/F, product enrichment
-    # pipeline follow-up) -- fail closed on a malformed supplied entry,
-    # before any sync/write, same as physical dimensions above.
-    media_fields, media_error = _normalize_media_fields(request)
-    if media_error:
-        return {"status": STATUS_UNRESOLVED, "reason": media_error}
-
     # Category/section (schema.py module docstring item A) -- resolving
     # WHICH section requires a real ``catalog.section.list`` read, which
     # only the LIVE bridge can meaningfully do (the FIXTURE store's
@@ -556,6 +522,15 @@ def prepare_single_product_write(
     # section id: if a category/subcategory WAS supplied but does not
     # resolve to exactly one existing LIVE section, this fails closed
     # (STATUS_UNRESOLVED) instead of ever proceeding to catalog root.
+    #
+    # Deliberately resolved BEFORE the retail-price check below (production
+    # defect closure): category/section identity is a fact about the
+    # PRODUCT, not about its price, so a still-missing/not-yet-known retail
+    # price must never suppress this read-only lookup -- otherwise a
+    # read-only "what would be written" preview would hide an answer it is
+    # fully able to compute. See the ``missing_or_invalid_retail_price``
+    # early return below, which now echoes ``resolved_section_id`` (when
+    # resolvable) instead of skipping this lookup outright.
     section_id = None
     category_has_destination = False
     if request.subcategory or request.category_source:
@@ -599,6 +574,51 @@ def prepare_single_product_write(
                 return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
             section_id = resolved["section_id"]
             category_has_destination = True
+
+    retail_amount = _normalize_price(request.retail_price)
+    if retail_amount is None:
+        # Still fails closed on the retail price exactly as before (never
+        # guesses/derives one), but now also surfaces whatever was already
+        # read-only resolvable above -- the category/section (from this
+        # SAME governed lookup) and the EAN already carried on the
+        # request -- so a caller rendering this preview is not forced to
+        # hide facts it already knows just because the price is unknown.
+        unresolved: dict = {"status": STATUS_UNRESOLVED, "reason": "missing_or_invalid_retail_price"}
+        if section_id is not None:
+            unresolved["resolved_section_id"] = section_id
+        if request.ean:
+            unresolved["ean"] = request.ean
+        return unresolved
+
+    # Purchase price is optional, but if the source data supplied one it
+    # must be a valid positive number -- fail closed (never write a
+    # malformed/guessed value, never silently drop it either) rather than
+    # proceeding with bad data.
+    purchase_price_amount = None
+    if request.purchase_price:
+        purchase_price_amount = _normalize_price(request.purchase_price)
+        if purchase_price_amount is None:
+            return {"status": STATUS_UNRESOLVED, "reason": "invalid_purchase_price"}
+
+    # Purchase price's native destination (purchasingPrice/purchasingCurrency)
+    # is only implemented on the LIVE adapter so far (see
+    # LiveBitrixAdapter._write_product_create_live) -- the FIXTURE
+    # adapter/store does not yet persist it, so the preview must not claim
+    # a write that will not actually happen for a non-LIVE bridge.
+    purchase_price_has_destination = bridge.environment == ENV_LIVE and purchase_price_amount is not None
+
+    # Weight/length/width/height (schema.py module docstring item D) --
+    # fail closed on a malformed supplied value, before any sync/write.
+    physical_fields, physical_error = _normalize_physical_fields(request)
+    if physical_error:
+        return {"status": STATUS_UNRESOLVED, "reason": physical_error}
+
+    # Preview/detail pictures (schema.py items E/F, product enrichment
+    # pipeline follow-up) -- fail closed on a malformed supplied entry,
+    # before any sync/write, same as physical dimensions above.
+    media_fields, media_error = _normalize_media_fields(request)
+    if media_error:
+        return {"status": STATUS_UNRESOLVED, "reason": media_error}
 
     # Characteristics (schema.py module docstring item C) -- only report/
     # write the ones with a verified property destination; an

@@ -204,6 +204,8 @@ def format_write_plan_text(
     ]
     if write_request.brand:
         lines.append(f"Бренд: {write_request.brand}")
+    if write_request.ean:
+        lines.append(f"EAN: {write_request.ean}")
     if write_request.purchase_price:
         lines.append(f"Закупочная цена: {write_request.purchase_price} {write_request.currency}")
     if write_request.retail_price:
@@ -252,10 +254,20 @@ def format_write_plan_text(
     for line in detailed.splitlines() or [detailed]:
         lines.append(f"    {line}")
 
+    # The resolved category/section can be present either on a successful
+    # REQUIRES_APPROVAL preview (nested under ``target_product``) or on an
+    # otherwise-UNRESOLVED preview that still resolved the category before
+    # failing closed on a still-unknown retail price (top-level key --
+    # production defect closure: category must not be hidden just because
+    # the price is not yet known). Rendered once, regardless of status, so
+    # neither branch below needs to repeat it.
+    resolved_section_id = write_preview.get("resolved_section_id")
+    if resolved_section_id is None:
+        resolved_section_id = (write_preview.get("target_product") or {}).get("resolved_section_id")
+    if resolved_section_id is not None:
+        lines.append(f"Раздел каталога (Bitrix): ID {resolved_section_id}")
+
     if write_preview.get("status") == "REQUIRES_APPROVAL":
-        target = write_preview.get("target_product") or {}
-        if target.get("resolved_section_id") is not None:
-            lines.append(f"Раздел каталога (Bitrix): ID {target.get('resolved_section_id')}")
         will_write = write_preview.get("will_write") or []
         if will_write:
             lines.append(f"Поля записи (по текущей политике записи): {', '.join(str(i) for i in will_write)}")

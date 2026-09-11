@@ -895,7 +895,18 @@ class WorkflowPandaConversationGateway:
             write_request = dataclasses.replace(write_request, retail_price=str(args.get("retail_price")))
 
         write_preview: dict = {}
-        if self._bitrix_bridge is not None and write_request.retail_price:
+        if self._bitrix_bridge is not None:
+            # Production defect closure: always attempt the EXISTING,
+            # read-only ``prepare_single_product_write`` preview -- even
+            # when ``retail_price`` is still unknown. That call now
+            # resolves the category/section (a fact about the product,
+            # not its price) BEFORE checking retail price internally, and
+            # still fails closed with ``missing_or_invalid_retail_price``
+            # when no price is known -- it just no longer skips the
+            # category lookup and EAN echo on the way there. Previously
+            # gating this call on ``write_request.retail_price`` being
+            # truthy meant the section resolver was never even invoked
+            # whenever the price was still unknown.
             try:
                 write_preview = prepare_single_product_write(
                     self._bitrix_bridge,
