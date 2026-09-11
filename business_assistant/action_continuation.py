@@ -362,6 +362,18 @@ class ActionDecision:
     # CALL_PRODUCT_ENRICHMENT if it now resolves. Every other decision
     # leaves this at its default "" and is completely unaffected.
     chain_to_enrichment_text: str = ""
+    # Production defect closure (single-turn "upload XLSX + take the first
+    # product + calculate retail price + resolve exact Bitrix/Aspro
+    # category" request): non-empty only for the CALL_TOOL fallback
+    # ``resolve_action_turn`` returns when a pricing/category refinement
+    # turn ALSO carries its own spreadsheet attachment but no FAMILY_EXCEL
+    # context exists yet. Mirrors ``chain_to_enrichment_text`` exactly --
+    # tells ``WorkflowPandaConversationGateway.respond()`` to re-attempt
+    # ``resolve_product_pricing_category_refinement_request`` with this
+    # text immediately after the row-lookup tool call, and chain straight
+    # into EXPLAIN_BITRIX_WRITE_PLAN if it now resolves. Every other
+    # decision leaves this at its default "" and is completely unaffected.
+    chain_to_pricing_category_refinement_text: str = ""
 
 
 class ActiveTaskStore:
@@ -1323,6 +1335,27 @@ def _enrichment_needs_excel_ingestion_first(
     return active is None or active.family != FAMILY_EXCEL
 
 
+def _pricing_category_refinement_needs_excel_ingestion_first(
+    active: ActiveTask | None, has_spreadsheet_attachment: bool
+) -> bool:
+    """True when an explicit "...возьми первый товар из <файл> и подготовь
+    его для Bitrix/Aspro: ... рассчитанную розничную цену, точную
+    категорию Bitrix/Aspro..." request carries its OWN spreadsheet on
+    THIS turn but has no FAMILY_EXCEL context yet -- i.e. the attachment
+    and the pricing/category refinement instruction arrived in the SAME
+    (first) message of a brand-new conversation, so nothing has been
+    ingested yet and ``resolve_product_pricing_category_refinement_
+    request`` would fail closed on its ``active is None`` guard without
+    ever looking at the attachment. Mirrors ``_enrichment_needs_excel_
+    ingestion_first`` exactly. Such a turn must first go through the
+    existing FAMILY_EXCEL ingestion/row lookup (exactly what a bare
+    "Возьми первый товар из <файл>..." turn does) before the pricing/
+    category refinement can resolve a product."""
+    if not has_spreadsheet_attachment:
+        return False
+    return active is None or active.family != FAMILY_EXCEL
+
+
 def resolve_product_enrichment_request(
     text: str,
     *,
@@ -1565,6 +1598,11 @@ def resolve_action_turn(
     # explicit enrichment request in the SAME message" dispatch below.
     # Never set by external callers.
     _skip_enrichment_dispatch: bool = False,
+    # Private recursion guard for the one-turn "spreadsheet attachment +
+    # explicit pricing/category refinement request in the SAME message"
+    # dispatch below (mirrors ``_skip_enrichment_dispatch`` exactly).
+    # Never set by external callers.
+    _skip_pricing_category_dispatch: bool = False,
 ) -> ActionDecision:
     """Pure-ish turn resolver. At most one extra LLM call: never (extra_llm=False)."""
     current = (text or "").strip()
@@ -1661,7 +1699,39 @@ def resolve_action_turn(
     # actual confirmation always wins, and this predicate refuses one
     # anyway) and before the generic heuristics, exactly like ``is_bitrix_
     # write_plan_question`` immediately above it.
-    if is_explicit_product_pricing_or_category_refinement_request(current):
+    if is_explicit_product_pricing_or_category_refinement_request(current) and not _skip_pricing_category_dispatch:
+        if _pricing_category_refinement_needs_excel_ingestion_first(active, has_spreadsheet_attachment):
+            # Production defect closure (one-turn case): the XLSX and the
+            # "Возьми первый товар из <файл> и подготовь его для
+            # Bitrix/Aspro: ... рассчитанную розничную цену, точную
+            # категорию Bitrix/Aspro..." instruction were submitted in the
+            # SAME message of a brand-new conversation, so there is no
+            # FAMILY_EXCEL task/dataset yet and
+            # ``resolve_product_pricing_category_refinement_request``
+            # would fail closed on its ``active is None`` guard without the
+            # attachment ever being parsed -- exactly mirrors the
+            # analogous ``is_explicit_product_enrichment_request`` branch
+            # above. Resolve THIS turn as an ordinary FAMILY_EXCEL turn
+            # instead -- the branch below creates the task and the tool
+            # call ingests the workbook and performs the SAME row lookup a
+            # bare "Возьми первый товар из <файл>..." turn performs
+            # (including PR #62's own "first product" fallback) -- then
+            # reuse the chaining marker so the gateway continues into
+            # EXPLAIN_BITRIX_WRITE_PLAN within this same turn once the row
+            # resolves (unresolved/ambiguous rows keep the Excel reply).
+            excel_first = resolve_action_turn(
+                current,
+                tenant_id=tenant,
+                owner_id=owner,
+                conversation_id=conv,
+                store=store,
+                follow_up=follow_up,
+                gateway=gateway,
+                request_id=request_id,
+                spreadsheet_attachment_count=spreadsheet_attachment_count,
+                _skip_pricing_category_dispatch=True,
+            )
+            return replace(excel_first, chain_to_pricing_category_refinement_text=current)
         return resolve_product_pricing_category_refinement_request(
             current,
             active=active,
