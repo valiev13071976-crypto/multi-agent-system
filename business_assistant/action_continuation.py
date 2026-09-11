@@ -552,6 +552,57 @@ _ENRICHMENT_TARGET_STEMS = (
     "full product card",
 )
 
+# Production defect closure (single-product Bitrix preparation follow-up,
+# no attachment on this turn -- e.g. "Do not analyze the whole spreadsheet.
+# Choose ONE first product from LG_TV.xlsx and prepare it for Bitrix/
+# Aspro: exact model, EAN, brand, category, purchase price, retail price,
+# characteristics, description, images, and show the Bitrix write plan.
+# Do not write/publish yet."). This mentions a Bitrix/Aspro target and a
+# preparation verb, so ``requires_business_integration`` below matches it
+# (it also carries the spreadsheet filename/"xlsx", one of that function's
+# own business-task keywords) whenever the follow-up turn itself carries
+# no ``artifact_refs`` (the workbook was uploaded on an earlier turn) --
+# routing it into the same degraded fixture business-workflow engine as
+# the enrichment/write-plan defects above, instead of the conversational
+# pipeline that can actually resolve the already-uploaded dataset and
+# preview one row. Deliberately narrow and additive, mirroring
+# ``is_explicit_product_enrichment_request``/``is_bitrix_write_plan_
+# question`` exactly: requires an explicit single-item SELECTION signal
+# (an explicit "choose/select/pick the first/one product" instruction, or
+# an explicit "don't analyze the whole spreadsheet" qualifier) together
+# with a Bitrix/Aspro preparation target in the SAME message. Never
+# matches a bare "подготовь"/"prepare" alone, and an explicit write
+# confirmation (``is_explicit_bitrix_write_confirmation``) always wins.
+_SINGLE_PRODUCT_SELECT_RE = re.compile(
+    r"\b(?:choose|select|pick|выбери|выберите|возьми|возьмите)\b(?:\s+\w+){0,3}\s+"
+    r"\b(?:one|first|один|одна|одну|первый|первую|первое)\b"
+    r"|\b(?:first|1|один|одна|первый|первую|первое)\s+(?:product|item|товар\w*|позици\w*)\b",
+    re.I,
+)
+_WHOLE_SPREADSHEET_NEGATION_RE = re.compile(
+    r"(?:do\s+not|don.t|не)\s+анализ\w*\s+всю\s+таблиц\w*"
+    r"|(?:do\s+not|don.t)\s+analy[sz]e\s+the\s+whole\s+spreadsheet",
+    re.I,
+)
+_SINGLE_PRODUCT_PREP_VERB_STEMS = ("подготов", "prepare", "оформи", "show", "покаж")
+
+
+def is_explicit_single_product_bitrix_prep_request(text: str) -> bool:
+    """True only for an explicit instruction to select exactly ONE product
+    from an already-uploaded price list and prepare/preview it for
+    Bitrix/Aspro (never a "analyze the whole spreadsheet" style request).
+    See the constants above for the exact production defect this closes."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if is_explicit_bitrix_write_confirmation(blob):
+        return False
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+        return False
+    if not _has_stem(blob, _SINGLE_PRODUCT_PREP_VERB_STEMS):
+        return False
+    return bool(_SINGLE_PRODUCT_SELECT_RE.search(blob) or _WHOLE_SPREADSHEET_NEGATION_RE.search(blob))
+
 # Block 5.2: a bare http(s) URL in the message is the strongest, fully
 # deterministic acquisition signal -- mirrors how a spreadsheet attachment is
 # the strongest Excel signal (spec section 20: "no technical mode picker").

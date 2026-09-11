@@ -213,9 +213,25 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     from business_assistant.action_continuation import (
         is_bitrix_write_plan_question,
         is_explicit_product_enrichment_request,
+        is_explicit_single_product_bitrix_prep_request,
     )
 
     if is_explicit_product_enrichment_request(raw):
+        return True
+
+    # Production defect closure (single-product Bitrix preparation
+    # follow-up, no attachment on this turn): "Do not analyze the whole
+    # spreadsheet. Choose ONE first product from LG_TV.xlsx and prepare it
+    # for Bitrix/Aspro: ... show the Bitrix write plan. Do not
+    # write/publish yet." mentions the workbook filename/"xlsx" (one of
+    # ``_BUSINESS_TASK_KEYWORDS`` below) plus "Bitrix" and a preparation
+    # verb, so ``requires_business_integration`` would send it to the
+    # attachment-blind legacy business-workflow recipe engine instead of
+    # ``WorkflowPandaConversationGateway``, which can resolve the
+    # already-uploaded dataset and preview exactly one row. See
+    # ``is_explicit_single_product_bitrix_prep_request``'s own docstring
+    # for the exact signals required.
+    if is_explicit_single_product_bitrix_prep_request(raw):
         return True
 
     # Production defect closure (same misrouting, read-only follow-up

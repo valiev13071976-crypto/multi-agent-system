@@ -108,6 +108,32 @@ _USER_SUPPLIED_PRICE_RE = re.compile(
     r"(розничн\w*|продажн\w*|retail|selling)\D{0,20}?(\d[\d\s]*(?:[.,]\d+)?)", re.I
 )
 
+# Production defect closure (phase 3): a request that names NO specific
+# SKU/EAN/product name at all -- e.g. "Choose ONE first product from
+# LG_TV.xlsx and prepare it for Bitrix/Aspro..." -- still isn't a
+# supported nl_ops transform and never matches ``_find_row_by_identifier``
+# (there is no identifier substring to find), so it fell through to the
+# SAME dimension-only ``_analyze_only_summary`` a bare "analyze this
+# spreadsheet" request produces, silently discarding the user's explicit
+# "pick exactly one product" instruction. This is a narrow, additive,
+# schema-driven fallback -- never a second parser/ingestion path -- that
+# recognizes only an EXPLICIT "choose/select/pick the first/one
+# product(s)" phrasing and then surfaces the table's actual first row
+# through the SAME existing ``_row_lookup_result`` preview (still zero
+# Bitrix mutation, still requires separate confirmation before any write).
+# A request that also names a concrete identifier is unaffected -- that
+# already-working exact match always takes priority.
+_FIRST_PRODUCT_SELECT_RE = re.compile(
+    r"\b(?:choose|select|pick|выбери|выберите|возьми|возьмите)\b(?:\s+\w+){0,3}\s+"
+    r"\b(?:one|first|один|одна|одну|первый|первую|первое)\b"
+    r"|\b(?:first|1|один|одна|первый|первую|первое)\s+(?:product|item|товар\w*|позици\w*)\b",
+    re.I,
+)
+
+
+def _wants_first_row(text: str) -> bool:
+    return bool(_FIRST_PRODUCT_SELECT_RE.search(text or ""))
+
 
 def _find_row_by_identifier(text: str, rows: list[dict], table) -> tuple[dict, str, str] | None:
     blob = (text or "").casefold()
@@ -129,6 +155,24 @@ def _find_row_by_identifier(text: str, rows: list[dict], table) -> tuple[dict, s
     if len(matches) == 1:
         return matches[0]
     return None
+
+
+def _first_row_hit(rows: list[dict], table) -> tuple[dict, str, str] | None:
+    """Resolves an explicit "choose the first/one product" request (no
+    named identifier) to the table's actual first row -- same shape
+    ``_find_row_by_identifier`` returns, so it feeds the SAME
+    ``_row_lookup_result`` preview unchanged. ``matched_column``/
+    ``matched_value`` report the row's own identifying column when THIS
+    workbook has one; never invented when it doesn't."""
+    if not rows:
+        return None
+    row = rows[0]
+    candidates = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
+    for col in candidates:
+        value = str(row.get(col.source_name) or "").strip()
+        if value:
+            return (row, col.source_name, value)
+    return (row, "__row_index__", "1")
 
 
 def _extract_user_supplied_price(text: str) -> str | None:
@@ -757,6 +801,8 @@ class DataIntelligenceService:
             }
         except UnsupportedOperationError:
             row_hit = _find_row_by_identifier(text, rows, table)
+            if row_hit is None and _wants_first_row(text):
+                row_hit = _first_row_hit(rows, table)
             if row_hit is not None:
                 return self._row_lookup_result(dataset_id, row_hit, text, table)
             return self._analyze_only_summary(dataset_id, desc, rows, table, tenant_id=tenant_id)
