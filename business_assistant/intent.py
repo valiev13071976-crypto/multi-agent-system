@@ -213,6 +213,7 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     from business_assistant.action_continuation import (
         is_bitrix_write_plan_question,
         is_explicit_product_enrichment_request,
+        is_explicit_product_pricing_or_category_refinement_request,
         is_explicit_single_product_bitrix_prep_request,
     )
 
@@ -244,6 +245,21 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     # the prepared card state (EXPLAIN_BITRIX_WRITE_PLAN). Never a write:
     # the predicate refuses any explicit write confirmation.
     if is_bitrix_write_plan_question(raw):
+        return True
+
+    # Production defect closure (Turn-3 pricing/category refinement
+    # follow-up, reproduced AFTER the single-product Bitrix prep fix
+    # above): "Рассчитай розничную цену для этого товара и определи точную
+    # категорию Bitrix/Aspro для телевизора. Покажи обновлённую карточку и
+    # план записи. Ничего в Bitrix пока не записывай." also mentions
+    # "Bitrix" plus an action verb ("покажи"), so requires_business_
+    # integration below sent it to the same degraded recipe engine, whose
+    # reply was the generic "Задача выполнена." diagnostic summary. It
+    # must reach WorkflowPandaConversationGateway, which re-resolves the
+    # SAME already-selected product and answers with the updated card +
+    # write plan (EXPLAIN_BITRIX_WRITE_PLAN). Never a write: the predicate
+    # refuses any explicit write confirmation.
+    if is_explicit_product_pricing_or_category_refinement_request(raw):
         return True
 
     if requires_business_integration(raw):

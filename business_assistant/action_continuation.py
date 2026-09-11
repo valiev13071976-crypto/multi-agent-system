@@ -603,6 +603,46 @@ def is_explicit_single_product_bitrix_prep_request(text: str) -> bool:
         return False
     return bool(_SINGLE_PRODUCT_SELECT_RE.search(blob) or _WHOLE_SPREADSHEET_NEGATION_RE.search(blob))
 
+
+# Production defect closure (Turn-3 pricing/category refinement follow-up,
+# reproduced AFTER the single-product Bitrix prep fix above): "Рассчитай
+# розничную цену для этого товара и определи точную категорию Bitrix/Aspro
+# для телевизора. Покажи обновлённую карточку и план записи. Ничего в
+# Bitrix пока не записывай." refers back to the product ALREADY selected/
+# prepared by a prior turn (no fresh selection wording, no attachment on
+# this turn) and asks Panda to (re)surface the retail price and the exact
+# Bitrix/Aspro category for it. It mentions a Bitrix/Aspro target plus a
+# "покажи"/"show" action verb, so ``requires_business_integration`` below
+# matches it and routes it to the attachment-blind legacy business-
+# workflow recipe engine, whose reply is the generic "Задача выполнена."
+# diagnostic summary -- never the updated card/write plan. Deliberately
+# narrow and additive, mirroring ``is_explicit_single_product_bitrix_prep_
+# request``/``is_bitrix_write_plan_question`` exactly: requires a Bitrix/
+# Aspro target PLUS an explicit pricing-calculation verb OR an explicit
+# category-determination verb+noun pair, in the SAME message, and an
+# explicit write confirmation always wins.
+_PRICING_CALC_VERB_STEMS = ("рассчита", "расчита", "вычисли", "calculate", "compute")
+_CATEGORY_DETERMINE_VERB_STEMS = ("определи", "уточни", "resolve", "determine")
+_CATEGORY_NOUN_STEMS = ("категор", "category", "раздел каталог")
+
+
+def is_explicit_product_pricing_or_category_refinement_request(text: str) -> bool:
+    """True only for an explicit follow-up asking to (re)calculate the
+    retail price and/or resolve the exact Bitrix/Aspro category for the
+    product a PRIOR turn already selected/prepared. See the constants
+    above for the exact production defect this closes. Never matches an
+    actual write confirmation."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if is_explicit_bitrix_write_confirmation(blob):
+        return False
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+        return False
+    has_pricing_calc = _has_stem(blob, _PRICING_CALC_VERB_STEMS)
+    has_category_calc = _has_stem(blob, _CATEGORY_DETERMINE_VERB_STEMS) and _has_stem(blob, _CATEGORY_NOUN_STEMS)
+    return has_pricing_calc or has_category_calc
+
 # Block 5.2: a bare http(s) URL in the message is the strongest, fully
 # deterministic acquisition signal -- mirrors how a spreadsheet attachment is
 # the strongest Excel signal (spec section 20: "no technical mode picker").
@@ -1451,6 +1491,61 @@ def resolve_bitrix_write_plan_question(
     )
 
 
+def resolve_product_pricing_category_refinement_request(
+    text: str,
+    *,
+    active: ActiveTask | None,
+    store: ActiveTaskStore,
+    request_id: str = "",
+) -> ActionDecision:
+    """Deterministic routing for "Рассчитай розничную цену... и определи
+    точную категорию Bitrix/Aspro..." (Turn-3 pricing/category refinement
+    production defect closure). Resolves the SAME previously-previewed
+    product from the active FAMILY_EXCEL task's ``parameters[
+    'bitrix_product_fields']``/``bitrix_retail_price_preview`` -- exactly
+    like ``resolve_bitrix_write_confirmation`` -- reuses ONLY an already
+    known/persisted retail price (never derives a new one; no such
+    calculator exists in this codebase), builds the canonical write
+    request through the EXISTING ``build_write_request_from_fields``, and
+    dispatches the EXISTING ``EXPLAIN_BITRIX_WRITE_PLAN`` decision so the
+    EXISTING, unchanged ``_explain_bitrix_write_plan`` handler -- which
+    already calls the EXISTING, read-only category resolver
+    (``prepare_single_product_write`` -> ``schema.resolve_section_id``) --
+    renders the updated card + write plan. Never writes to Bitrix."""
+    if active is None or active.family != FAMILY_EXCEL:
+        return _bitrix_missing_context_decision(active)
+
+    fields = dict(active.parameters.get("bitrix_product_fields") or {})
+    if not fields.get("title") or not fields.get("sku"):
+        return _bitrix_missing_context_decision(active)
+
+    retail_price = _extract_confirmed_retail_price(text) or str(
+        active.parameters.get("bitrix_retail_price_preview") or ""
+    )
+
+    from business_assistant.controlled_bitrix_write import build_write_request_from_fields
+    from business_assistant.product_enrichment_bridge import serialize_write_request
+
+    write_request = build_write_request_from_fields(fields, tenant_id=active.tenant_id, retail_price=retail_price)
+    args = {
+        "write_request": serialize_write_request(write_request),
+        "characteristic_status": {},
+        "enrichment_preview": {},
+        "retail_price": retail_price,
+    }
+    return ActionDecision(
+        decision=EXPLAIN_BITRIX_WRITE_PLAN,
+        readiness=READY_TO_EXECUTE,
+        continuation=CONTINUE_ACTIVE_TASK,
+        task=active,
+        arguments=args,
+        operation="prepare_single_product_write",
+        extra_llm=False,
+        capability_status=CAPABILITY_AVAILABLE_AND_AUTHORIZED,
+        idempotency_key=_idempotency_key(request_id, "bitrix.pricing_category_refinement_explain", args),
+    )
+
+
 def resolve_action_turn(
     text: str,
     *,
@@ -1546,6 +1641,28 @@ def resolve_action_turn(
     # instruction back instead of answering from the prepared state.
     if is_bitrix_write_plan_question(current):
         return resolve_bitrix_write_plan_question(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
+
+    # Production defect closure (Turn-3 pricing/category refinement
+    # follow-up, reproduced AFTER the single-product Bitrix prep fix
+    # above): "Рассчитай розничную цену для этого товара и определи точную
+    # категорию Bitrix/Aspro для телевизора..." mentions "Bitrix" plus a
+    # "покажи"/action verb, so it would otherwise fall through to the
+    # generic follow-up/continuation heuristics below and, once ``mode ==
+    # NEW_TASK`` and ``_is_unrelated_new_task`` (which itself calls
+    # ``requires_business_integration``) fires, degrade into the generic
+    # business-workflow's diagnostic summary instead of re-surfacing the
+    # SAME prepared product/Bitrix plan with the resolved category. Checked
+    # after both Bitrix branches and the write-plan question above (an
+    # actual confirmation always wins, and this predicate refuses one
+    # anyway) and before the generic heuristics, exactly like ``is_bitrix_
+    # write_plan_question`` immediately above it.
+    if is_explicit_product_pricing_or_category_refinement_request(current):
+        return resolve_product_pricing_category_refinement_request(
             current,
             active=active,
             store=store,
