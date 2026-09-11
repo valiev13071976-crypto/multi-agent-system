@@ -204,6 +204,8 @@ def format_write_plan_text(
     ]
     if write_request.brand:
         lines.append(f"Бренд: {write_request.brand}")
+    if write_request.purchase_price:
+        lines.append(f"Закупочная цена: {write_request.purchase_price} {write_request.currency}")
     if write_request.retail_price:
         lines.append(f"Розничная цена: {write_request.retail_price} {write_request.currency}")
 

@@ -732,6 +732,47 @@ class WorkflowPandaConversationGateway:
             return tool_result
         return await self._invoke_product_enrichment(request, enrichment_action)
 
+    async def _maybe_chain_to_pricing_category_refinement(
+        self, request: ConversationRequest, chain_text: str, tool_result: ConversationResult
+    ) -> ConversationResult:
+        """Production defect closure: a single, brand-new-conversation turn
+        that both attaches an XLSX AND asks to take the first product,
+        calculate its retail price and resolve the exact Bitrix/Aspro
+        category (e.g. "Возьми первый товар из загруженного LG_TV.xlsx и
+        подготовь его для Bitrix/Aspro: ... рассчитанную розничную цену,
+        точную категорию Bitrix/Aspro ...") -- ``resolve_product_pricing_
+        category_refinement_request`` falls back to re-running the SAME,
+        unchanged ``data.excel_assistant`` row lookup (dispatched as an
+        ordinary CALL_TOOL by ``_invoke_tool`` above, which resolves the
+        first row via PR #62's own fallback and persists it onto
+        ``bitrix_product_fields``/``bitrix_retail_price_preview``) with
+        THIS turn's text instead of failing closed on "no prepared card".
+        If that lookup now resolves a single row (ROW_FOUND), continue
+        straight into EXPLAIN_BITRIX_WRITE_PLAN in the SAME turn -- the
+        user should never have to repeat their request just because the
+        file arrived on the same message. If the lookup still cannot
+        resolve a row, the original tool reply is returned unchanged.
+        Mirrors ``_maybe_chain_to_enrichment`` exactly."""
+        from business_assistant.action_continuation import (
+            EXPLAIN_BITRIX_WRITE_PLAN,
+            resolve_product_pricing_category_refinement_request,
+        )
+
+        active = self._action_store.get(
+            tenant_id=str(request.tenant_id or ""),
+            owner_id=str(request.user_id or ""),
+            conversation_id=str(request.conversation_id or ""),
+        )
+        refinement_action = resolve_product_pricing_category_refinement_request(
+            chain_text,
+            active=active,
+            store=self._action_store,
+            request_id=str(request.request_id or request.correlation_id or ""),
+        )
+        if refinement_action.decision != EXPLAIN_BITRIX_WRITE_PLAN:
+            return tool_result
+        return await self._explain_bitrix_write_plan(request, refinement_action)
+
     async def _invoke_product_enrichment(
         self, request: ConversationRequest, action
     ) -> ConversationResult:
@@ -1037,6 +1078,13 @@ class WorkflowPandaConversationGateway:
             chain_text = str(getattr(action, "chain_to_enrichment_text", "") or "")
             if chain_text:
                 result = await self._maybe_chain_to_enrichment(request, chain_text, result)
+            pricing_category_chain_text = str(
+                getattr(action, "chain_to_pricing_category_refinement_text", "") or ""
+            )
+            if pricing_category_chain_text:
+                result = await self._maybe_chain_to_pricing_category_refinement(
+                    request, pricing_category_chain_text, result
+                )
             self._record_latency(t0, follow_up_ms)
             meta = dict(result.metadata or {})
             meta["follow_up_kind"] = resolution.kind
