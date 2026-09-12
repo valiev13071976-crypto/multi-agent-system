@@ -849,8 +849,22 @@ _WRITE_PLAN_ASK_STEMS = ("покаж", "показать", "объясн", "пе
 # Deliberately a phrase, not a bare "запис" stem: "...покажи подготовленную
 # карточку и план действий перед записью" (Block 5.5's own row-preview
 # request) must keep routing exactly as it does today.
+#
+# Production defect closure (Task 6: "покажи ... окончательный план для
+# этого же товара ... Ничего пока не записывай и не публикуй." immediately
+# after a Turn-1 enrichment): the SAME read-only "show me the write plan"
+# shape as the "будет записан" phrasing above, just worded as "окончательный
+# план"/"финальный план"/"итоговый план"/"final plan" instead of an explicit
+# "will be written" clause. Deliberately an ADJECTIVE immediately before
+# "план" (not a bare "план\s+запис" match): "...план записи в Bitrix"
+# (already used by ``is_explicit_product_pricing_or_category_refinement_
+# request``'s and the enrichment request's own turns, e.g. "...покажи EAN
+# ... и план записи в Bitrix.") must keep routing exactly as it does today
+# -- only "показать/объяснить the FINAL/CONCLUSIVE plan" is this predicate's
+# own, distinct shape.
 _WRITE_PLAN_RE = re.compile(
-    r"(буд(ет|ут)\s+записан|что\s+именно\s+(будет\s+)?запис|(would|will)\s+be\s+written)",
+    r"(буд(ет|ут)\s+записан|что\s+именно\s+(будет\s+)?запис|(would|will)\s+be\s+written"
+    r"|(оконч|финальн|итогов)\w*\s+план|final\s+(write\s+)?plan)",
     re.I,
 )
 
@@ -868,10 +882,13 @@ def is_bitrix_write_plan_question(text: str) -> bool:
     """True only for a read-only question about WHAT the already prepared
     product card would write to Bitrix/Aspro -- e.g. "Покажи точно, какие
     данные из этой карточки товара будут записаны в Bitrix/Aspro, если я
-    подтвержу запись ... Ничего в Bitrix не записывай.". Requires a
-    show/explain ask + a Bitrix/Aspro target + an explicit "будет
-    записано"/"would be written" phrase in the SAME message, and never
-    matches an actual write confirmation."""
+    подтвержу запись ... Ничего в Bitrix не записывай." or "Покажи перед
+    подтверждением записи окончательный план для этого же товара: ...
+    Ничего пока не записывай и не публикуй.". Requires a show/explain ask +
+    a Bitrix/Aspro target + either an explicit "будет записано"/"would be
+    written" phrase or a "окончательный/финальный/итоговый план"/"final
+    plan" phrase in the SAME message, and never matches an actual write
+    confirmation."""
     blob = _norm(text)
     if not blob:
         return False
