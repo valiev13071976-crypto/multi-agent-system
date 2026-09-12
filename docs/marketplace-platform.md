@@ -210,3 +210,109 @@ blocked pending 5.7B production acceptance. See `.env.example` for the
 ### Tests
 
 `tests/test_marketplace_platform_5_7a.py`.
+
+## Block 5.8 — canonical Marketplace Price Protection engine
+
+`marketplace/price_protection.py` is a self-contained, vendor-neutral
+engine that gates a *proposed* marketplace price write **before** it can
+reach `MarketplacePlatform.write_price` (5.7A). It is distinct from the
+pre-existing `marketplace.economics`/`marketplace.price_guard` (which
+reacts to a price the marketplace *already shows*, e.g. promo-induced
+loss auto-correct/alerting) — Block 5.8 instead gates a price Panda is
+*about to write*.
+
+```
+Product economics (PriceProtectionContext)
+        ↓
+Price Protection calculation (calculate_minimum_allowed_price /
+                               calculate_profitability)
+        ↓
+Decision engine (evaluate_price_decision) → ALLOW / REQUIRE_APPROVAL / BLOCK
+        ↓
+MarketplacePlatform.write_price(..., protection=context)   (5.7A, opt-in)
+        ↓
+existing governed write (IntegrationActivationService.execute_via_gateway)
+        ↓
+WB / Ozon / Yandex Market FIXTURE adapter
+```
+
+### Canonical economic context
+
+`PriceProtectionContext` (tenant/product/sku/provider/currency +
+`purchase_cost`, `additional_unit_cost`, `commission_rate`/`_fixed`,
+`logistics_cost`, `last_mile_cost`, `fulfillment_cost`, `storage_cost`,
+`return_allowance`, `acquiring_rate`/`_fixed`, `advertising_rate`/`_fixed`,
+`packaging_cost`, `other_costs`, `tax_rate`/`_fixed`,
+`minimum_profit_amount`, `minimum_margin_rate`). Every `*_rate` field is an
+explicit fraction of 1 (`Decimal("0.15")` == 15%) — never an ambiguous
+bare `10`/`0.10`. `purchase_cost=None` means genuinely missing (never
+silently treated as zero); every other cost field legitimately defaults
+to `Decimal("0")`.
+
+### Minimum allowed price (the real algebra, not an approximation)
+
+```
+fixed = purchase_cost + additional_unit_cost + commission_fixed + logistics_cost
+        + last_mile_cost + fulfillment_cost + storage_cost + return_allowance
+        + acquiring_fixed + advertising_fixed + packaging_cost + other_costs + tax_fixed
+rate  = commission_rate + acquiring_rate + advertising_rate + tax_rate
+
+minimum_price (absolute-profit floor) = (fixed + minimum_profit_amount) / (1 - rate)
+minimum_price (margin floor)          = fixed / (1 - rate - minimum_margin_rate)
+```
+
+When both `minimum_profit_amount` and `minimum_margin_rate` are
+configured, the **stricter (higher)** of the two candidate prices wins.
+When neither is configured, the floor defaults to break-even (required
+profit = 0) — a loss-making price is never permitted even without an
+explicit profit policy. An impossible cost stack (`rate >= 1`, or
+`rate + minimum_margin_rate >= 1`) is `INVALID_ECONOMIC_INPUT`, never a
+nonsense/negative price.
+
+### Decision engine (`evaluate_price_decision`)
+
+Returns a structured `PriceProtectionDecision` (never a bare boolean):
+outcome (`ALLOW`/`REQUIRE_APPROVAL`/`BLOCK`), ordered `reason_codes`
+(`BELOW_MINIMUM_ALLOWED_PRICE`/`LOSS_MAKING`/`BELOW_MINIMUM_PROFIT`/
+`BELOW_MINIMUM_MARGIN`/`PRICE_DROP_LIMIT_EXCEEDED`/
+`PRICE_INCREASE_LIMIT_EXCEEDED`/`CRITICAL_PRICE_CHANGE`/
+`INVALID_ECONOMIC_INPUT`/`CURRENCY_MISMATCH`), profitability classification
+(`SAFE`/`BELOW_TARGET_MARGIN`/`BELOW_MINIMUM_PROFIT`/`LOSS_MAKING`/
+`INVALID_ECONOMICS`), full cost breakdown at both the proposed and the
+minimum price, and deltas vs. minimum/current price.
+
+**Hard floor vs. policy-required approval (spec section 7)**: a price
+below the calculated minimum is `BLOCK` — unconditional, never
+overridable by `approved_write`. A policy-configured limit
+(`maximum_price_drop_percent`/`_increase_percent`/`critical_change_percent`
+/`require_approval_for_price_decrease`) on an otherwise economically safe
+price is `REQUIRE_APPROVAL` instead — it still needs the existing
+`approved_write` flag, but can never be a permanent block.
+
+### Policy precedence (`PriceProtectionPolicyStore`)
+
+Deterministic 3-tier precedence, same lookup/upsert idiom as 5.7A's
+`MarketplaceCategoryMapStore`: SKU override → provider policy → tenant
+default → a conservative system default (hard floor always enabled, no
+policy friction) when nothing has been configured.
+
+### Integration with the governed write path
+
+`MarketplacePlatform.write_price(..., protection: PriceProtectionContext
+| None = None, current_price: Decimal | None = None)` — `protection` is
+opt-in; omitting it keeps pre-5.8 mechanics-only behavior byte-for-byte.
+When supplied: `BLOCK` raises before any external call is attempted
+(hard floor, no `approved_write` bypass); `REQUIRE_APPROVAL` still needs
+`approved_write=True` (no second approval engine — same flag every
+governed write already requires) and raises `MARKETPLACE_APPROVAL_REQUIRED`
+with the decision attached as approval evidence when not yet approved;
+`ALLOW` proceeds through the exact same governed write. No new
+idempotency mechanism — the existing `idempotency_key` replay behavior is
+unchanged. `MarketplacePlatform.evaluate_price_protection_batch(...)`
+reuses `bulk_sync_gate` (the existing Product Intelligence batch-admission
+gate) and evaluates every item independently — one safe item never
+authorizes an unsafe sibling SKU.
+
+### Tests
+
+`tests/test_marketplace_price_protection_5_8.py`.
