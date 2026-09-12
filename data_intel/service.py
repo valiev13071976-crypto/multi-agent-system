@@ -698,6 +698,17 @@ class DataIntelligenceService:
         row_prices: dict = {}
         purchase_price = None
         selling_price_from_file = None
+        # A generic, undifferentiated price column (role ROLE_PRICE, e.g. a
+        # bare "цена"/"price" header with no separate "закупка"/"розница"
+        # split) is already declared in ``_PRICE_LOOKUP_ROLES`` above
+        # specifically for this retail-price lookup -- restores existing,
+        # already-intended behavior: a supplier row that names only ONE
+        # price (no explicit selling-price column) still surfaces it as the
+        # retail price below, exactly like ROLE_SELLING_PRICE already does,
+        # instead of it being collected into ``row_prices`` and then
+        # silently discarded. Never a derived/invented value -- always the
+        # row's own already-parsed price, read verbatim.
+        generic_price_from_file = None
         for col in table.columns:
             if col.semantic_role not in _PRICE_LOOKUP_ROLES:
                 continue
@@ -709,14 +720,23 @@ class DataIntelligenceService:
                 purchase_price = value
             elif col.semantic_role == ROLE_SELLING_PRICE and selling_price_from_file is None:
                 selling_price_from_file = value
+            elif col.semantic_role == ROLE_PRICE and generic_price_from_file is None:
+                generic_price_from_file = value
         if purchase_price is not None:
             card_lines.append(f"Закупочная цена (из файла): {purchase_price}")
 
         # A retail price the USER supplied in this (or the merged prior)
         # turn always wins over one already in the file -- it is the value
-        # the user explicitly asked Panda to use.
+        # the user explicitly asked Panda to use. Absent that, an explicit
+        # selling-price column wins over a bare generic price column (more
+        # specific role first), mirroring the priority order the loop above
+        # already resolves column-by-column.
         user_price = _extract_user_supplied_price(text)
-        retail_price = user_price if user_price is not None else selling_price_from_file
+        retail_price = user_price
+        if retail_price is None:
+            retail_price = selling_price_from_file
+        if retail_price is None:
+            retail_price = generic_price_from_file
         if retail_price is not None:
             source = "из запроса" if user_price is not None else "из файла"
             card_lines.append(f"Розничная цена ({source}): {retail_price}")
