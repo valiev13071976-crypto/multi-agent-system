@@ -1513,21 +1513,50 @@ def resolve_bitrix_write_plan_question(
     request_id: str = "",
 ) -> ActionDecision:
     """Deterministic routing for the read-only "покажи, что именно будет
-    записано в Bitrix" follow-up (production defect closure). Answers ONLY
-    from the enrichment state the prior ``CALL_PRODUCT_ENRICHMENT`` turn
-    persisted on this same active task -- never re-runs enrichment, never
-    writes. Without that state there is nothing to explain, so this asks
-    for the card to be prepared first (same fail-closed shape as
-    ``resolve_bitrix_write_confirmation``)."""
-    if active is None or not dict(active.parameters.get("bitrix_enrichment_write_request") or {}):
-        return _bitrix_missing_context_decision(active)
+    записано в Bitrix" follow-up (production defect closure). Answers from
+    whichever prepared-product state the active task already carries:
+    preferably the richer enrichment state a prior ``CALL_PRODUCT_
+    ENRICHMENT`` turn persisted (``bitrix_enrichment_write_request``), but
+    -- production defect closure (PR #67 follow-up) -- Turn 1 does not
+    always run enrichment first; a plain row-preview/single-product
+    Bitrix-prep turn (``data_intel.service._row_lookup_result``'s
+    ``ROW_FOUND``) only ever persists the flatter ``bitrix_product_fields``/
+    ``bitrix_retail_price_preview`` pair. Falls back to building the
+    canonical write request from THAT state instead -- the SAME existing,
+    already-proven fallback ``resolve_product_pricing_category_refinement_
+    request`` already uses via ``build_write_request_from_fields`` -- so
+    this question is answered from whatever was actually prepared, never
+    forcing a re-attachment/re-enrichment the user never asked for. Never
+    re-runs ingestion or enrichment, never writes. Without EITHER state
+    there is nothing to explain, so this asks for the card to be prepared
+    first (same fail-closed shape as ``resolve_bitrix_write_confirmation``).
+    """
+    enrichment_write_request = dict(active.parameters.get("bitrix_enrichment_write_request") or {}) if active else {}
+    if enrichment_write_request:
+        args = {
+            "write_request": enrichment_write_request,
+            "characteristic_status": dict(active.parameters.get("bitrix_enrichment_characteristic_status") or {}),
+            "enrichment_preview": dict(active.parameters.get("bitrix_enrichment_preview") or {}),
+            "retail_price": str(active.parameters.get("bitrix_retail_price_preview") or ""),
+        }
+    else:
+        if active is None or active.family != FAMILY_EXCEL:
+            return _bitrix_missing_context_decision(active)
+        fields = dict(active.parameters.get("bitrix_product_fields") or {})
+        if not fields.get("title") or not fields.get("sku"):
+            return _bitrix_missing_context_decision(active)
 
-    args = {
-        "write_request": dict(active.parameters.get("bitrix_enrichment_write_request") or {}),
-        "characteristic_status": dict(active.parameters.get("bitrix_enrichment_characteristic_status") or {}),
-        "enrichment_preview": dict(active.parameters.get("bitrix_enrichment_preview") or {}),
-        "retail_price": str(active.parameters.get("bitrix_retail_price_preview") or ""),
-    }
+        from business_assistant.controlled_bitrix_write import build_write_request_from_fields
+        from business_assistant.product_enrichment_bridge import serialize_write_request
+
+        retail_price = str(active.parameters.get("bitrix_retail_price_preview") or "")
+        write_request = build_write_request_from_fields(fields, tenant_id=active.tenant_id, retail_price=retail_price)
+        args = {
+            "write_request": serialize_write_request(write_request),
+            "characteristic_status": {},
+            "enrichment_preview": {},
+            "retail_price": retail_price,
+        }
     return ActionDecision(
         decision=EXPLAIN_BITRIX_WRITE_PLAN,
         readiness=READY_TO_EXECUTE,
