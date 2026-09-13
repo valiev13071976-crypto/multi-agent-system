@@ -341,8 +341,15 @@ class OneProductEndToEndGovernedWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(product_fields["property100"], TARGET_BRAND)
         self.assertEqual(product_fields[schema.SECTION_FIELD], 103)
         self.assertEqual(result.get("section_id_written"), 103)
-        # purchase price -> native fields, never mixed into the retail price
-        self.assertEqual(product_fields["purchasingPrice"], TARGET_PURCHASE_PRICE)
+        # purchase price -> native fields, never mixed into the retail price.
+        # Production defect closure (real Bitrix admin form showing
+        # "899990.00000000"): the write path now canonicalizes monetary
+        # values to standard 2-decimal precision before they reach the
+        # Bitrix wire (business_assistant.controlled_bitrix_write
+        # ._normalize_money) -- the SOURCE "103198.3" (one decimal) is the
+        # exact same amount as "103198.30", never a recalculated price.
+        self.assertEqual(product_fields["purchasingPrice"], "103198.30")
+        self.assertNotEqual(TARGET_PURCHASE_PRICE, product_fields["purchasingPrice"])
         self.assertEqual(product_fields["purchasingCurrency"], "RUB")
         # characteristics -> verified properties only
         self.assertTrue(result.get("characteristics_written"))

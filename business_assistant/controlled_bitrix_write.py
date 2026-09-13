@@ -66,7 +66,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
-from decimal import Decimal, InvalidOperation
+from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Mapping, Sequence
 
 from data_intel.cleaning import clean_text, normalize_decimal_string
@@ -137,6 +137,17 @@ _CATEGORY_ENV_UNSUPPORTED = (
     "(iblockSectionId)_but_resolving_it_requires_a_real_catalog.section.list_"
     "read,_which_only_the_LIVE_bridge_performs_(fixture/sandbox_only;_live_"
     "resolves_and_writes_it)"
+)
+# Gallery images DO have a verified native Bitrix destination now (offer
+# property 280 / MORE_PHOTO, IBLOCK 15 -- see integrations.bitrix.schema's
+# OFFER_PROPERTIES and LiveBitrixAdapter._gallery_offer_fields), but only
+# the LIVE adapter implements writing it so far -- the FIXTURE
+# adapter/store this reason is used for does not yet persist it, mirroring
+# _PURCHASE_PRICE_ENV_UNSUPPORTED above.
+_GALLERY_ENV_UNSUPPORTED = (
+    "gallery_has_a_verified_native_bitrix_destination_"
+    "(offer_property_280/MORE_PHOTO)_but_this_environment's_adapter_does_"
+    "not_yet_persist_it_(fixture/sandbox_only;_live_writes_it)"
 )
 # Characteristics with no verified Bitrix property destination on this
 # installation (integrations.bitrix.schema.CATALOG_CHARACTERISTICS) --
@@ -272,6 +283,17 @@ class SingleProductWriteRequest:
     # an empty dict here means "no image supplied", never a guessed one.
     preview_picture: Mapping[str, str] = field(default_factory=dict)
     detail_picture: Mapping[str, str] = field(default_factory=dict)
+    # Gallery follow-up defect closure: additional/gallery images the
+    # enrichment pipeline already prepared (``product_enrichment.models.
+    # MediaAsset`` entries with ``role == "gallery"``) but this write path
+    # previously never forwarded anywhere. Each entry is the SAME already-
+    # downloaded/validated/base64-encoded shape as ``preview_picture``/
+    # ``detail_picture`` (``{"filename", "base64"}``) -- never a bare
+    # external URL/hotlink. Maps to the verified MORE_PHOTO property
+    # (offer/IBLOCK 15 property 280 -- see
+    # ``integrations.bitrix.schema.OFFER_PROPERTIES``); an empty tuple
+    # means "no gallery images supplied", never a guessed one.
+    gallery_pictures: Sequence[Mapping[str, str]] = field(default_factory=tuple)
 
 
 def _first_column_value(row: dict, columns, role: str) -> str:
@@ -353,6 +375,7 @@ def build_write_request_from_fields(
         characteristics={str(k): str(v) for k, v in dict(raw_characteristics).items() if v not in (None, "")},
         preview_picture=_clean_picture_field(fields.get("preview_picture")),
         detail_picture=_clean_picture_field(fields.get("detail_picture")),
+        gallery_pictures=_clean_gallery_pictures(fields.get("gallery_pictures")),
     )
 
 
@@ -366,6 +389,13 @@ def _clean_picture_field(raw) -> dict:
     return {"filename": filename, "base64": base64_content}
 
 
+def _clean_gallery_pictures(raw) -> tuple:
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    cleaned = (_clean_picture_field(entry) for entry in raw)
+    return tuple(entry for entry in cleaned if entry)
+
+
 def _normalize_price(raw: str) -> str | None:
     text = normalize_decimal_string(raw)
     if text is None:
@@ -376,6 +406,54 @@ def _normalize_price(raw: str) -> str | None:
     except (InvalidOperation, ValueError):
         return None
     return text
+
+
+# RUB (and every other real-world currency this write path is used for)
+# has no sub-kopeck unit -- the same 2-decimal monetary-scale convention
+# already established elsewhere in this codebase (``data_intel.economics
+# .MONEY_SCALE``), reused here rather than inventing a second one.
+_MONEY_SCALE = Decimal("0.01")
+
+
+def _normalize_money(raw: str) -> str | None:
+    """Production defect closure (real Bitrix admin form showing
+    ``899990.00000000`` instead of ``899990``): identical fail-closed
+    "positive decimal string" validation as ``_normalize_price`` above,
+    PLUS canonicalization to standard monetary precision before the value
+    ever crosses into the Bitrix wire (``catalog.price.add`` /
+    ``purchasingPrice``).
+
+    Root cause -- ``_normalize_price``/``normalize_decimal_string`` only
+    ever validate a value, they never canonicalize its precision:
+    ``format(Decimal("899990.00000000"), "f")`` faithfully preserves
+    however many (possibly spurious) trailing decimal digits the SOURCE
+    text already carried, and that exact string was, until this fix, sent
+    straight through to ``catalog.price.add``'s ``price`` field / the
+    native ``purchasingPrice`` field, which Bitrix's admin form then
+    echoes verbatim.
+
+    This NEVER changes the numeric MEANING of the price (899990 and
+    899990.00000000 are the exact same amount) and never introduces a new
+    pricing algorithm: it only rounds away precision beyond RUB's own
+    2-decimal (kopeck) unit, using ``ROUND_HALF_UP`` -- the same rounding
+    mode ``data_intel.economics``/``data_intel.transform`` already use for
+    money -- then drops a trailing ``.00`` only when BOTH decimal digits
+    are actually zero, so a genuinely fractional price (e.g. the already
+    2-decimal ``"22513.70"``) is never truncated to ``"22513.7"``.
+
+    Used ONLY for retail/purchase price. Physical dimensions
+    (weight/length/width/height) deliberately keep using ``_normalize_price``
+    unchanged -- schema.py's own module docstring (item D) is explicit
+    that their unit/precision is never independently converted, which is a
+    different guarantee than canonicalizing a MONETARY value's precision.
+    """
+    text = _normalize_price(raw)
+    if text is None:
+        return None
+    quantized = Decimal(text).quantize(_MONEY_SCALE, rounding=ROUND_HALF_UP)
+    if quantized == quantized.to_integral_value():
+        return format(quantized.to_integral_value(), "f")
+    return format(quantized, "f")
 
 
 def _default_idempotency_key(tenant_id: str, request: SingleProductWriteRequest) -> str:
@@ -433,6 +511,23 @@ def _normalize_media_fields(request: SingleProductWriteRequest) -> tuple[dict, s
         if not filename or not base64_content:
             return {}, f"invalid_{attr}"
         fields[media_key] = {"filename": filename, "base64": base64_content}
+    # Gallery follow-up defect closure -- same fail-closed discipline as
+    # preview/detail above (every entry, if any, must already carry both
+    # ``filename`` and non-empty ``base64``); maps to the OFFER-level
+    # MORE_PHOTO property (schema.py) rather than a base-product field, so
+    # it is validated here but written by ``LiveBitrixAdapter`` alongside
+    # the offer/SKU create, never the base product create.
+    gallery = list(request.gallery_pictures or ())
+    if gallery:
+        cleaned_gallery = []
+        for entry in gallery:
+            entry = dict(entry) if isinstance(entry, Mapping) else {}
+            filename = str(entry.get("filename") or "")
+            base64_content = str(entry.get("base64") or "")
+            if not filename or not base64_content:
+                return {}, "invalid_gallery_pictures"
+            cleaned_gallery.append({"filename": filename, "base64": base64_content})
+        fields["gallery_pictures"] = cleaned_gallery
     return fields, None
 
 
@@ -575,7 +670,7 @@ def prepare_single_product_write(
             section_id = resolved["section_id"]
             category_has_destination = True
 
-    retail_amount = _normalize_price(request.retail_price)
+    retail_amount = _normalize_money(request.retail_price)
     if retail_amount is None:
         # Still fails closed on the retail price exactly as before (never
         # guesses/derives one), but now also surfaces whatever was already
@@ -596,7 +691,7 @@ def prepare_single_product_write(
     # proceeding with bad data.
     purchase_price_amount = None
     if request.purchase_price:
-        purchase_price_amount = _normalize_price(request.purchase_price)
+        purchase_price_amount = _normalize_money(request.purchase_price)
         if purchase_price_amount is None:
             return {"status": STATUS_UNRESOLVED, "reason": "invalid_purchase_price"}
 
@@ -676,6 +771,13 @@ def prepare_single_product_write(
         {"field": "category", "value": category_display, "reason": _CATEGORY_ENV_UNSUPPORTED}
         if category_display and not category_has_destination
         else None,
+        {
+            "field": "gallery_pictures",
+            "value": f"{len(request.gallery_pictures or ())} image(s)",
+            "reason": _GALLERY_ENV_UNSUPPORTED,
+        }
+        if request.gallery_pictures and not (bridge.environment == ENV_LIVE and media_fields.get("gallery_pictures"))
+        else None,
     ]
     for key in unmapped_characteristics:
         not_written.append(
@@ -698,9 +800,16 @@ def prepare_single_product_write(
         will_write.append(f"physical ({', '.join(sorted(physical_fields))}, native fields, no unit conversion)")
     if request.short_description or request.detailed_description:
         will_write.append("content (previewText/detailText, native fields)")
-    if media_fields:
+    main_media_keys = sorted(k for k in media_fields if k in ("preview_picture", "detail_picture"))
+    if main_media_keys:
         will_write.append(
-            f"media ({', '.join(sorted(media_fields))}, native previewPicture/detailPicture fileData fields, uploaded bytes -- never a hotlink)"
+            f"media ({', '.join(main_media_keys)}, native previewPicture/detailPicture fileData fields, uploaded bytes -- never a hotlink)"
+        )
+    gallery_pictures = media_fields.get("gallery_pictures") or []
+    gallery_has_destination = bridge.environment == ENV_LIVE and bool(gallery_pictures)
+    if gallery_has_destination:
+        will_write.append(
+            f"gallery ({len(gallery_pictures)} image(s), offer property 280 / MORE_PHOTO, verified -- LIVE only, uploaded bytes -- never a hotlink)"
         )
     written_characteristics = [k for k in request.characteristics if k not in unmapped_characteristics]
     if written_characteristics and characteristics_have_destination:
@@ -813,6 +922,7 @@ def execute_single_product_write(
             "section_id_written": created_product.get("section_id_written"),
             "characteristics_written": created_product.get("characteristics_written") or [],
             "media_written": created_product.get("media_written") or [],
+            "gallery_written": int(created_product.get("gallery_written") or 0),
             "idempotency_key": key,
         }
 
@@ -845,6 +955,7 @@ def execute_single_product_write(
         "section_id_written": created_product.get("section_id_written"),
         "characteristics_written": created_product.get("characteristics_written") or [],
         "media_written": created_product.get("media_written") or [],
+        "gallery_written": int(created_product.get("gallery_written") or 0),
         "active": False,
         "published": False,
         "not_written": preview["will_not_write"],
@@ -912,6 +1023,8 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
             lines.append(f"Характеристики записаны: {', '.join(result.get('characteristics_written'))}")
         if result.get("media_written"):
             lines.append(f"Изображения загружены (не hotlink): {', '.join(result.get('media_written'))}")
+        if result.get("gallery_written"):
+            lines.append(f"Галерея загружена (MORE_PHOTO, не hotlink): {result.get('gallery_written')} изображени(й)")
         not_written = result.get("not_written") or []
         if not_written:
             fields = ", ".join(str(item.get("field")) for item in not_written)

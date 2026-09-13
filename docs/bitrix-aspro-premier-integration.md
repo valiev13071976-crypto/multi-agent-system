@@ -276,13 +276,15 @@ never a guessed property ID/code):
   `prepare_single_product_write` only reports it under `will_write` for a
   LIVE-environment bridge.
 
-**Never written**: EAN, SEO (META TITLE/KEYWORDS/DESCRIPTION), and
-gallery/additional images — no verified destination exists for these on
-this installation; `controlled_bitrix_write` never includes them in the
-payload this adapter reads, so there is nothing to guess. Category/section,
-weight/dimensions, preview/detail text, preview/detail pictures, and a
-small verified set of characteristics DO now have verified destinations —
-see "Complete Product Card Follow-up Pass" below.
+**Never written**: EAN and SEO (META TITLE/KEYWORDS/DESCRIPTION) — no
+verified destination exists for these on this installation;
+`controlled_bitrix_write` never includes them in the payload this adapter
+reads, so there is nothing to guess. Category/section, weight/dimensions,
+preview/detail text, preview/detail pictures, a small verified set of
+characteristics, and (Aspro product-write-mapping defect closure — real
+product 989) gallery/additional images DO now have verified destinations —
+see "Complete Product Card Follow-up Pass" and "Aspro Product-Write-Mapping
+Defect Closure" below.
 
 **Example — controlled create for a real LG test product**, given
 title `"Телевизор LG 32LQ63006LA.ARUG"`, SKU `32LQ63006LA.ARUG`, brand
@@ -622,6 +624,86 @@ characteristics payload actually reaching the mocked `catalog.product.add`
 call. All real Bitrix HTTP interaction in every test is a mocked
 transport — zero real network calls, zero real Bitrix mutations, and real
 products 992/993 were never touched by any test or discovery call.
+
+## Aspro Product-Write-Mapping Defect Closure (real product 989 — "Телевизор LG 100MRGB96B6.ARUG")
+
+A real Panda-created product (Bitrix product ID 989) inspected in the
+live Aspro Premier admin form showed: only a small subset of prepared
+characteristics mapped (by design — see below), an empty gallery despite
+prepared gallery images, and a price displayed as `899990.00000000`
+instead of `899990`. Two of these were real, provable write-mapping
+defects; the rest were confirmed CORRECT AS DESIGNED (no code change).
+
+### 1. Price display defect (`899990.00000000`) — FIXED
+
+Root cause: `business_assistant.controlled_bitrix_write._normalize_price`
+(and the `data_intel.cleaning.normalize_decimal_string` it delegates to)
+only ever VALIDATE a price string — they never canonicalize its
+precision. `format(Decimal("899990.00000000"), "f")` faithfully preserves
+however many (possibly spurious) trailing decimal digits the SOURCE value
+already carried, and that exact string was sent straight through to
+`catalog.price.add`'s `price` field / the native `purchasingPrice` field,
+which Bitrix's admin form then echoes verbatim.
+
+Fix: a new `_normalize_money` helper, used ONLY for retail/purchase price
+(never for physical dimensions — schema.py's own module docstring says
+their unit/precision must never be independently converted). It
+canonicalizes to standard 2-decimal (kopeck) monetary precision using the
+same `ROUND_HALF_UP` convention already established elsewhere in this
+codebase (`data_intel.economics.MONEY_SCALE`), then drops a trailing
+`.00` only when BOTH decimal digits are actually zero — a genuinely
+fractional price (e.g. `"22513.70"`) is never truncated to `"22513.7"`.
+The calculated numeric value itself is never changed and no new pricing
+algorithm is introduced (`899990.00000000` and `899990` are the exact
+same amount).
+
+### 2. Gallery images empty — FIXED
+
+Root cause: `product_enrichment_bridge.build_enriched_write_request`
+never forwarded enrichment's gallery media assets (`role == "gallery"`)
+into `SingleProductWriteRequest` at all — the old `format_write_plan_text`
+told the user "gallery — will NOT be written (no supported destination in
+this write path)".
+
+Fix: `SingleProductWriteRequest.gallery_pictures` (same already-downloaded/
+validated/base64-encoded `{"filename", "base64"}` shape as
+`preview_picture`/`detail_picture`) is now wired to the verified
+**offer-level** MORE_PHOTO property (280, IBLOCK 15 — there is no
+verified base-product/IBLOCK 14 gallery property) via
+`LiveBitrixAdapter._gallery_offer_fields`/`_live_create_offer`, using
+Bitrix's own documented multi-value FILE property write shape: an array
+of `{"value": {"fileData": ["<filename>", "<base64>"]}}` entries (the
+same `catalog.product(.offer).add` REST method family whose single-value
+`previewPicture`/`detailPicture` shape was already relied on).
+
+### 3. Confirmed correct as designed — no code change
+
+- **Article/SKU on the base product**: ARTICLE (property 283) is verified
+  ONLY on the OFFERS IBLOCK (15); there is no verified base-product/
+  IBLOCK 14 destination, so the base product's own "Артикул" field
+  staying empty is the correct structural model, not a defect.
+- **Characteristics**: only the 5 canonical keys in
+  `schema.CATALOG_CHARACTERISTICS` have a verified destination on this
+  installation; every other prepared characteristic is correctly left
+  unmapped rather than guessed onto an arbitrary property.
+- **EAN / SEO**: still no verified Bitrix destination on this
+  installation; still correctly never written.
+- **Category/section**: unchanged — the resolved section (e.g. 70,
+  "Телевизоры") already persists correctly via the native
+  `iblockSectionId` field.
+
+### Tests
+
+`tests/test_panda_aspro_product_write_mapping_defect_closure.py` — full
+production-shaped coverage: price canonicalization (both the exact
+`899990.00000000` defect shape and that a genuine 2-decimal price is
+never truncated), base-product-vs-offer field separation, category
+persistence, characteristic mapping (verified vs. unmapped), description
+mapping, preview/detail/gallery media mapping, absence of any SEO/
+unrelated-Aspro field, zero Bitrix mutation on preview, and absence of
+any Telegram/market_intel dependency. All Bitrix calls are a mocked HTTP
+transport (`_RecordingTransport`) — zero real network calls, zero real
+Bitrix mutations; real product 989 is never referenced or touched.
 
 ## Product Enrichment Pipeline (supplier XLSX → complete card, pre-Bitrix-write)
 
