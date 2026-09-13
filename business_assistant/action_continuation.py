@@ -564,6 +564,25 @@ _ENRICHMENT_TARGET_STEMS = (
     "full product card",
 )
 
+# Production defect closure ("enrich this SAME prepared product" follow-up
+# on an ALREADY-selected product, e.g. "...выполни полную подготовку
+# карточки перед записью... Выполни обогащение товара: характеристики,
+# краткое и полное описание, SEO, основное изображение и галерею..."):
+# the enrichment TARGET here is expressed as an explicit shopping list of
+# the enrichment pipeline's own components (characteristics/description/
+# SEO/image/gallery) rather than the literal adjacent phrase "полную
+# карточку" -- "полную" instead modifies "подготовку"
+# ("полную ПОДГОТОВКУ карточки"), so ``_ENRICHMENT_TARGET_STEMS`` above
+# never matches even though the intent is identical. Two or more of these
+# component nouns alongside the SAME enrichment verb (see
+# ``is_explicit_product_enrichment_request``) is at least as unambiguous a
+# signal as the literal "full card" phrase, and is never satisfied by a
+# bare "подготовь"/"обогати" alone -- e.g. a plain read-only "покажи
+# окончательный план ... характеристик ..." (no enrichment verb at all)
+# never matches this, so PR #67's write-plan question keeps routing to
+# ``EXPLAIN_BITRIX_WRITE_PLAN`` exactly as before.
+_ENRICHMENT_COMPONENT_STEMS = ("характеристик", "описан", "seo", "изображен", "галере")
+
 # Production defect closure (single-product Bitrix preparation follow-up,
 # no attachment on this turn -- e.g. "Do not analyze the whole spreadsheet.
 # Choose ONE first product from LG_TV.xlsx and prepare it for Bitrix/
@@ -826,16 +845,28 @@ def is_explicit_product_enrichment_request(text: str) -> bool:
     this NEVER writes anything to Bitrix by itself; it only runs the
     ``product_enrichment`` pipeline and shows a complete preview
     (requirement 12: "enrichment is NOT approval to write"). Requires
-    BOTH an enrichment verb and an explicit "full/complete card" target in
-    the SAME message, so it can never be confused with Block 5.5's own
-    "Подготовь карточки товаров" (batch product-catalog family, plural,
-    different phrasing) or a bare "подготовь"/"обогати" alone."""
+    BOTH an enrichment verb and an explicit "full/complete card" target
+    -- OR (production defect closure) the SAME enrichment verb plus two or
+    more of the enrichment pipeline's own component nouns
+    (characteristics/description/SEO/image/gallery, see
+    ``_ENRICHMENT_COMPONENT_STEMS``), which covers "...выполни полную
+    подготовку карточки... Выполни обогащение товара: характеристики,
+    описание, SEO, изображение и галерею..." (the target noun and the verb
+    are no longer adjacent, so the literal "full card" phrase does not
+    match, but the instruction is just as explicit an ENRICHMENT ACTION
+    request) -- in the SAME message, so it can never be confused with
+    Block 5.5's own "Подготовь карточки товаров" (batch product-catalog
+    family, plural, different phrasing) or a bare "подготовь"/"обогати"
+    alone."""
     blob = _norm(text)
     if not blob:
         return False
     if not _has_stem(blob, _ENRICHMENT_VERB_STEMS):
         return False
-    return _has_stem(blob, _ENRICHMENT_TARGET_STEMS)
+    if _has_stem(blob, _ENRICHMENT_TARGET_STEMS):
+        return True
+    component_hits = sum(1 for stem in _ENRICHMENT_COMPONENT_STEMS if stem in blob)
+    return component_hits >= 2
 
 
 # Production defect closure (read-only "what exactly would be written?"
