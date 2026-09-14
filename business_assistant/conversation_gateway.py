@@ -1110,6 +1110,7 @@ class WorkflowPandaConversationGateway:
         # _invoke_tool() uses for the actual tool call below; cheap (no blob
         # fetch), and resolving twice per turn is a harmless bounded cost.
         spreadsheet_attachment_count = 0
+        spreadsheet_refs_this_turn: list[dict] = []
         if self._artifact_service is not None and request.attachment_refs:
             try:
                 _pre_resolved = self._artifact_service.resolve_trusted_refs(
@@ -1119,9 +1120,51 @@ class WorkflowPandaConversationGateway:
                 )
             except Exception:
                 _pre_resolved = []
-            spreadsheet_attachment_count = sum(
-                1 for r in _pre_resolved if str(r.get("kind") or "") == "spreadsheet"
+            spreadsheet_refs_this_turn = [
+                r for r in _pre_resolved if str(r.get("kind") or "") == "spreadsheet"
+            ]
+            spreadsheet_attachment_count = len(spreadsheet_refs_this_turn)
+
+        # PANDA -- Managed Agent integration boundary (PR #74 integration
+        # block, disabled by default). ONE narrow adapter call, gated by
+        # PANDA_MANAGED_AGENT_ENABLED (default false): when off, the import
+        # below still costs nothing extra behaviorally, but
+        # managed_agent_enabled() short-circuits before anything in
+        # managed_agent_poc/ is touched, so production behavior is exactly
+        # the same as before this integration existed. When on AND this
+        # turn is eligible (state/attachment-based only -- see
+        # managed_agent_poc.panda_bridge, never a text/phrase check), the
+        # existing, already-proven managed-agent runtime (PR #74) answers
+        # this turn directly using ONLY its 3 read-only tools
+        # (analyze_spreadsheet/select_product/explain_bitrix_write_plan)
+        # over the SAME, unmodified data_intel dataset -- the legacy
+        # resolve_action_turn() phrase-based routing below never runs for
+        # this turn. Any failure (SDK missing, no key, timeout, ...)
+        # degrades to None and falls straight through to resolve_action_turn
+        # exactly as if this block did not exist.
+        from managed_agent_poc.panda_bridge import managed_agent_enabled
+
+        if managed_agent_enabled():
+            from managed_agent_poc.panda_bridge import maybe_respond_via_managed_agent
+
+            managed_result = await maybe_respond_via_managed_agent(
+                text=text,
+                tenant_id=str(request.tenant_id or ""),
+                owner_id=str(request.user_id or ""),
+                conversation_id=str(request.conversation_id or ""),
+                artifact_service=self._artifact_service,
+                spreadsheet_ref=spreadsheet_refs_this_turn[0] if spreadsheet_refs_this_turn else None,
             )
+            if managed_result is not None:
+                self._record_latency(t0, follow_up_ms)
+                meta = dict(managed_result.get("metadata") or {})
+                meta["follow_up_kind"] = resolution.kind
+                meta["follow_up_target"] = resolution.target
+                return ConversationResult(
+                    text=str(managed_result.get("text") or ""),
+                    task_id=task_id,
+                    metadata=meta,
+                )
 
         action = resolve_action_turn(
             text,
