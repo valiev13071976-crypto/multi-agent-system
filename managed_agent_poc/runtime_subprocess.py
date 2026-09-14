@@ -60,6 +60,7 @@ _REPO_ROOT = os.environ.get("PANDA_MANAGED_AGENT_POC_REPO_ROOT") or os.path.dirn
 sys.path.append(_REPO_ROOT)
 
 from data_intel.contracts import (  # noqa: E402
+    ROLE_ARTICLE,
     ROLE_BARCODE,
     ROLE_BRAND,
     ROLE_CATEGORY,
@@ -75,7 +76,7 @@ from data_intel.store import SqliteDatasetStore  # noqa: E402
 
 from managed_agent_poc.state_store import ConversationStateStore, PersistedState  # noqa: E402
 
-_IDENTIFIER_ROLES = (ROLE_SKU, ROLE_PRODUCT_NAME, ROLE_EAN, ROLE_BARCODE, ROLE_CATEGORY, ROLE_BRAND)
+_IDENTIFIER_ROLES = (ROLE_SKU, ROLE_ARTICLE, ROLE_PRODUCT_NAME, ROLE_EAN, ROLE_BARCODE, ROLE_CATEGORY, ROLE_BRAND)
 _PRICE_ROLES = (ROLE_SELLING_PRICE, ROLE_PRICE, ROLE_PURCHASE_PRICE)
 
 
@@ -132,6 +133,28 @@ def _row_product_fields(row: dict, table) -> dict:
             value = str(row.get(col.source_name) or "").strip()
             if value:
                 fields[key] = value
+    # Production defect closure #3 (real production: MANAGED_PRODUCT_
+    # SELECTED logged has_sku=False/has_name=True for a row whose
+    # identifier column IS present and non-empty): mirrors the EXISTING,
+    # already-proven ``data_intel.service._row_lookup_result`` contract
+    # EXACTLY -- ``"sku": _role_value(row, table, ROLE_SKU) or
+    # _role_value(row, table, ROLE_ARTICLE)``. ``ROLE_ARTICLE`` (e.g. a
+    # column literally header "Артикул" -- see
+    # ``data_intel.mapping``'s own role classifier) is a DISTINCT
+    # semantic role from ``ROLE_SKU``, and a real supplier price list's
+    # identifier column is frequently classified as ``ROLE_ARTICLE``, not
+    # ``ROLE_SKU`` -- this tool's own row-projection previously had no
+    # mapping for that role at all, so the value was silently dropped
+    # before it ever reached ``select_product``'s returned dict. Never
+    # overwrites an already-resolved ``sku`` (``ROLE_SKU`` always wins
+    # when a table has both roles, exactly like the existing contract).
+    if "sku" not in fields:
+        for col in table.columns:
+            if col.semantic_role == ROLE_ARTICLE:
+                value = str(row.get(col.source_name) or "").strip()
+                if value:
+                    fields["sku"] = value
+                    break
     return fields
 
 
