@@ -1942,6 +1942,21 @@ def resolve_action_turn(
             # the existing chaining marker so the gateway continues into
             # CALL_PRODUCT_ENRICHMENT within this same turn once the row
             # resolves (unresolved/ambiguous rows keep the Excel reply).
+            #
+            # Production defect closure (recursion/500-log-storm): a single
+            # message can satisfy BOTH this predicate AND
+            # ``is_explicit_product_pricing_or_category_refinement_request``
+            # below (e.g. one instruction that asks for a full enrichment
+            # card AND explicitly names the retail price/category). ``active``
+            # is never mutated by this synchronous resolver -- ingestion only
+            # happens later via the dispatched tool call -- so on the
+            # recursive call below it is still ``None``/non-FAMILY_EXCEL,
+            # meaning the pricing/category branch's own excel-ingestion-first
+            # check would ALSO fire and recurse back in here with only ITS
+            # OWN guard set, alternating forever. This recursive call must
+            # therefore skip EVERY explicit-instruction dispatch branch, not
+            # just this one, so it always resolves to the plain FAMILY_EXCEL
+            # ingestion decision in exactly one hop.
             excel_first = resolve_action_turn(
                 current,
                 tenant_id=tenant,
@@ -1953,6 +1968,7 @@ def resolve_action_turn(
                 request_id=request_id,
                 spreadsheet_attachment_count=spreadsheet_attachment_count,
                 _skip_enrichment_dispatch=True,
+                _skip_pricing_category_dispatch=True,
             )
             return replace(excel_first, chain_to_enrichment_text=current)
         return resolve_product_enrichment_request(
@@ -2012,6 +2028,16 @@ def resolve_action_turn(
             # reuse the chaining marker so the gateway continues into
             # EXPLAIN_BITRIX_WRITE_PLAN within this same turn once the row
             # resolves (unresolved/ambiguous rows keep the Excel reply).
+            #
+            # Production defect closure (recursion/500-log-storm): mirrors
+            # the analogous comment on the enrichment branch's own
+            # recursive call above -- a single message can satisfy BOTH
+            # this predicate AND ``is_explicit_product_enrichment_request``,
+            # and ``active`` never changes across this synchronous
+            # resolution, so this recursive call must also skip the
+            # enrichment dispatch branch, not just its own, or the two
+            # branches alternate recursively forever (each one only ever
+            # guarding against re-entering ITSELF).
             excel_first = resolve_action_turn(
                 current,
                 tenant_id=tenant,
@@ -2022,6 +2048,7 @@ def resolve_action_turn(
                 gateway=gateway,
                 request_id=request_id,
                 spreadsheet_attachment_count=spreadsheet_attachment_count,
+                _skip_enrichment_dispatch=True,
                 _skip_pricing_category_dispatch=True,
             )
             return replace(excel_first, chain_to_pricing_category_refinement_text=current)
