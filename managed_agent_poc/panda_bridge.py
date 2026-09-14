@@ -39,9 +39,13 @@ calls ``business_assistant.controlled_bitrix_write``/
 ``business_assistant.product_enrichment_bridge`` or any Bitrix/Aspro
 mapping code. It reuses only:
 - ``managed_agent_poc.adapter.ManagedAgentPOC`` (unmodified, from #74)
-- ``managed_agent_poc.state_store.ConversationStateStore`` (unmodified,
-  #74's own durable dataset/session state -- reused here with a durable
-  file path instead of a temp dir; NOT a new, second state store)
+- ``managed_agent_poc.state_store.ConversationStateStore`` (#74's own
+  durable dataset/session state -- reused here with a durable file path
+  instead of a temp dir; NOT a new, second state store. Minimally
+  EXTENDED, not replaced, by the retail-price-override defect closure
+  below: one new targeted column/method, ``set_retail_price_override``,
+  alongside the original dataset/selection columns, which its own
+  ``save()`` still never touches)
 - ``artifacts.service.ArtifactService.get_blob`` (the SAME trusted
   attachment boundary ``data_intel.tools.DataIntelToolAdapter`` already
   uses for the existing Excel path -- never a second upload/trust path)
@@ -310,6 +314,100 @@ def _resolved_product_tool(tool_calls: list) -> str:
     for name, _fields in _iter_resolved_product_calls(tool_calls):
         tool = name
     return tool
+
+
+# Production defect closure (explicit user retail-price refinement lost
+# between turns): PART B of the task ("reuse existing refinement
+# architecture first") inspected every existing candidate:
+# - ``business_assistant.action_continuation``'s ``ActiveTaskStore``/
+#   ``resolve_product_pricing_category_refinement_request`` -- INSUFFICIENT
+#   here: this module's own docstring ("palm + fingers" independence)
+#   never reads/writes ``ActiveTaskStore``, and a managed-agent-driven
+#   conversation never populates it (Turn 1 never reaches
+#   ``resolve_action_turn`` at all), so it is never the authoritative
+#   product/task state for THIS vertical. Its ``is_explicit_product_
+#   pricing_or_category_refinement_request`` gate is also the wrong verb
+#   shape (only "рассчитай"/"calculate", never "установи"/"set an
+#   explicit value").
+# - ``managed_agent_poc.state_store.ConversationStateStore``/
+#   ``PersistedState`` -- REUSABLE: this IS the authoritative durable
+#   per-conversation product state for the managed-agent vertical
+#   (``current_identifier``/``shown_identifiers``/``dataset_id``,
+#   already read by this module via ``turn_result.current_identifier``).
+#   Minimally EXTENDED (not replaced) with one targeted, product-scoped
+#   column (``set_retail_price_override``/``retail_price_overrides`` --
+#   see that module) rather than any new, parallel product/pricing state.
+# - ``business_assistant.action_continuation._extract_confirmed_retail_
+#   price`` / ``business_assistant.controlled_bitrix_write._normalize_
+#   money`` -- REUSABLE as pure extraction/validation functions (already
+#   the closed-contract "explicit user-confirmed retail price in free
+#   text" parser and the closed-contract "positive monetary string"
+#   validator); reused directly below, never reimplemented.
+def _extract_explicit_retail_price_override(text: str) -> str:
+    """Reuses the EXISTING, closed-contract retail-price extractor/
+    validator the legacy conversational path already uses for the
+    semantically identical operation (an explicit user-confirmed retail
+    price in free text) -- see ``business_assistant.action_continuation.
+    _extract_confirmed_retail_price`` (used by ``resolve_bitrix_write_
+    confirmation``/``resolve_product_pricing_category_refinement_
+    request``) and ``business_assistant.controlled_bitrix_write.
+    _normalize_money`` (the SAME positive-decimal-string validator
+    ``prepare_single_product_write`` itself already applies to a write
+    request's own ``retail_price`` before it ever reaches a Bitrix
+    field). No new regex/validation logic is introduced -- the managed-
+    agent boundary had NO refinement mechanism at all before this (its 3
+    tools are read-only row projections; see the module docstring), so
+    this only reuses the two existing functions at that boundary.
+    Returns ``""`` for absent/invalid/zero/negative input, so a typo or
+    an unrelated message can never silently replace -- or corrupt -- a
+    valid, already-persisted override (PART C's invalid-input
+    requirement)."""
+    from business_assistant.action_continuation import _extract_confirmed_retail_price  # noqa: SLF001
+    from business_assistant.controlled_bitrix_write import _normalize_money  # noqa: SLF001
+
+    extracted = _extract_confirmed_retail_price(text)
+    if not extracted:
+        return ""
+    return _normalize_money(extracted) or ""
+
+
+def _apply_retail_price_refinement(
+    text: str,
+    *,
+    tenant_id: str,
+    conversation_id: str,
+    state_path: str,
+    current_identifier: str,
+) -> str:
+    """Implements PART C's state invariants for an explicit retail-price
+    refinement. A validated override extracted from THIS turn's text
+    (see ``_extract_explicit_retail_price_override``) is persisted,
+    product-scoped by ``current_identifier``, into the SAME durable
+    ``ConversationStateStore`` this module already reuses for dataset/
+    selection state (``set_retail_price_override`` -- a targeted column
+    write that can never be wiped by the SAME store's own ``save()``
+    calls; see that method's docstring). Returns the retail-price
+    override that applies to the CURRENT product after this turn --
+    freshly set this turn, or a durable one persisted by an earlier turn
+    -- or ``""`` when neither exists. No product context (``current_
+    identifier`` empty, e.g. before any product has ever been selected
+    in this conversation) means there is nothing to scope the override
+    to, so this is a no-op returning ``""``."""
+    if not current_identifier:
+        return ""
+    from managed_agent_poc.state_store import ConversationStateStore
+
+    store = ConversationStateStore(state_path)
+    extracted = _extract_explicit_retail_price_override(text)
+    if extracted:
+        store.set_retail_price_override(
+            tenant_id=tenant_id,
+            conversation_id=conversation_id,
+            product_identifier=current_identifier,
+            price=extracted,
+        )
+    persisted = store.load(tenant_id=tenant_id, conversation_id=conversation_id)
+    return str(persisted.retail_price_overrides.get(current_identifier) or "")
 
 
 def _canonical_fields_and_retail_price(raw: Mapping) -> tuple[dict, str]:
@@ -787,6 +885,22 @@ async def maybe_respond_via_managed_agent(
         "mutated": False,
     }
 
+    # Production defect closure (explicit user retail-price refinement
+    # lost between turns): applied BEFORE ``_canonical_fields_and_retail_
+    # price`` translates the raw tool projection below, so a resolved
+    # override is already the retail price both delegation paths see --
+    # never a second, later patch of the rendered text. Scoped to
+    # ``turn_result.current_identifier`` (the SAME durable "current
+    # product" this module already reads); a no-op when no product has
+    # ever been selected in this conversation yet.
+    retail_price_override = _apply_retail_price_refinement(
+        text,
+        tenant_id=tenant_id,
+        conversation_id=conversation_id,
+        state_path=state_path,
+        current_identifier=turn_result.current_identifier,
+    )
+
     # Production defect closure #2, step 1 (prove root cause before
     # editing): wrapped so an unexpected bug in selection extraction
     # itself is also OBSERVABLE (EVENT_PRODUCT_PREPARATION_REQUIRED_BUT_
@@ -795,6 +909,15 @@ async def maybe_respond_via_managed_agent(
     # eliminate.
     try:
         raw_fields = _selected_product_raw_fields(turn_result.tool_calls)
+        if raw_fields is not None and retail_price_override:
+            # The later explicit user override remains authoritative
+            # over the row's own/previously restored retail value (PART
+            # C's precedence requirement) -- never merely a rendering
+            # patch; ``_canonical_fields_and_retail_price`` below reads
+            # this SAME dict, so both delegation paths (PREPARE_PRODUCT
+            # and SHOW_WRITE_PLAN) see the override identically.
+            raw_fields = dict(raw_fields)
+            raw_fields["retail_price"] = retail_price_override
     except Exception as exc:  # noqa: BLE001 -- selection extraction must never crash a turn
         _log_event(
             EVENT_PRODUCT_PREPARATION_REQUIRED_BUT_NOT_REACHED,

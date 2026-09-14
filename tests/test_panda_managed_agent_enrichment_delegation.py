@@ -234,6 +234,28 @@ FULL_CARD_FOR_NEW_PRODUCT_TEXT = (
     "Ничего не записывай в Bitrix."
 )
 
+# Production defect closure (explicit user retail-price refinement lost
+# between turns): the exact real production Turn-2 follow-up, sent AFTER
+# a Turn-1 full-card preparation whose source price list has no usable
+# retail price (deterministic SHOW_WRITE_PLAN correctly reports
+# ``UNRESOLVED (missing_or_invalid_retail_price)`` at that point).
+SET_RETAIL_PRICE_800000_TEXT = (
+    "Установи розничную цену этого товара 800000 рублей. Цена с НДС. Ничего пока не "
+    "записывай и не публикуй. Покажи обновлённый финальный план записи в Bitrix/Aspro."
+)
+SET_RETAIL_PRICE_820000_TEXT = (
+    "Установи розничную цену этого товара 820000 рублей. Цена с НДС. Ничего пока не "
+    "записывай и не публикуй. Покажи обновлённый финальный план записи в Bitrix/Aspro."
+)
+SET_RETAIL_PRICE_INVALID_TEXT = (
+    "Установи розничную цену этого товара 0 рублей. Ничего пока не записывай и не "
+    "публикуй. Покажи обновлённый финальный план записи в Bitrix/Aspro."
+)
+RETURN_TO_PRODUCT_A_TEXT = (
+    f"Вернись к товару {PRODUCT_A_NAME}. Покажи финальный план записи в Bitrix/Aspro, "
+    "без записи."
+)
+
 RESEARCH_URL_A = "https://www.lg.com/ru/tv/100mrgb96b6"
 RESEARCH_URL_B = "https://www.lg.com/ru/tv/55mrgb86b6a"
 IMAGE_URL_A = "https://www.lg.com/ru/photos/100mrgb96b6-hero.png"
@@ -246,6 +268,23 @@ def _xlsx_bytes() -> bytes:
     ws.append(["sku", "product_name", "category", "brand", "ean", "purchase_price", "розница"])
     ws.append([PRODUCT_A_SKU, PRODUCT_A_NAME, CATEGORY, BRAND, PRODUCT_A_EAN, PRODUCT_A_PURCHASE_PRICE, PRODUCT_A_RETAIL_PRICE])
     ws.append([PRODUCT_B_SKU, PRODUCT_B_NAME, CATEGORY, BRAND, PRODUCT_B_EAN, PRODUCT_B_PURCHASE_PRICE, PRODUCT_B_RETAIL_PRICE])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _no_retail_price_xlsx_bytes() -> bytes:
+    """Production-style price list with an ``Артикул`` identifier column
+    (``ROLE_ARTICLE``, the #81 identity-loss defect's own column shape)
+    and NO retail/selling-price column at all -- the exact source shape
+    the retail-price-refinement production defect needs: the deterministic
+    pipeline has nothing to resolve retail price FROM until a later turn
+    explicitly supplies one."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Артикул", "Товар", "Категория", "Бренд", "EAN", "Закупочная цена"])
+    ws.append([PRODUCT_A_SKU, PRODUCT_A_NAME, CATEGORY, BRAND, PRODUCT_A_EAN, PRODUCT_A_PURCHASE_PRICE])
+    ws.append([PRODUCT_B_SKU, PRODUCT_B_NAME, CATEGORY, BRAND, PRODUCT_B_EAN, PRODUCT_B_PURCHASE_PRICE])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -1589,6 +1628,470 @@ class ManagedAgentShowWritePlanDelegationTests(unittest.IsolatedAsyncioTestCase)
         self.assertEqual(self.transport.price_add_count, 0)
         self.assertFalse(r1.metadata.get("mutated"))
         self.assertFalse(r2.metadata.get("mutated"))
+
+
+class ManagedAgentExplicitRetailPriceRefinementTests(unittest.IsolatedAsyncioTestCase):
+    """Production defect closure: explicit user retail-price refinement
+    lost between turns.
+
+    Real production sequence:
+
+        TURN 1: full-card PREPARE_PRODUCT for LG ``100MRGB96B6.ARUG`` from
+        a price list with NO usable retail-price column -- deterministic
+        SHOW_WRITE_PLAN correctly reports ``UNRESOLVED (missing_or_
+        invalid_retail_price)``.
+
+        TURN 2: "Установи розничную цену этого товара 800000 рублей.
+        Цена с НДС. ... Покажи обновлённый финальный план записи в
+        Bitrix/Aspro." -- expected: retail_price becomes 800000 RUB for
+        the CURRENT product and SHOW_WRITE_PLAN reflects it. ACTUAL (on
+        main before this fix): the price is lost; SHOW_WRITE_PLAN still
+        reports ``UNRESOLVED (missing_or_invalid_retail_price)``.
+
+    Root cause (PART A): the managed-agent's 3 tools (``select_product``/
+    ``explain_bitrix_write_plan``) are read-only STRUCTURED-argument row
+    projections -- neither has any parameter to carry "set the retail
+    price to X"; the tool's OWN output for turn 2 is the exact SAME row
+    projection as turn 1 (still no ``retail_price`` key). The only place
+    "800000" ever appears is the turn's free-text ``text`` itself, which
+    ``managed_agent_poc.panda_bridge.maybe_respond_via_managed_agent``
+    never inspected before this fix -- it fed the tool's raw fields
+    straight into ``_canonical_fields_and_retail_price``, so the explicit
+    override was silently dropped between "the user typed it" and
+    "``product_fields``/``retail_price`` reaches ``_delegate_to_existing_
+    write_plan``". The pre-existing LEGACY refinement mechanism
+    (``business_assistant.action_continuation.resolve_product_pricing_
+    category_refinement_request``/``ActiveTaskStore.parameters[
+    'bitrix_retail_price_preview']``) is architecturally UNREACHABLE
+    here: this module's own "palm + fingers" independence never reads/
+    writes ``ActiveTaskStore``, and a managed-agent-driven conversation
+    never populates it in the first place (see PART B in the PR
+    description for the full inspection of existing candidates).
+
+    Fix: ``managed_agent_poc.panda_bridge._extract_explicit_retail_price_
+    override``/``_apply_retail_price_refinement`` reuse the EXISTING
+    ``_extract_confirmed_retail_price``/``_normalize_money`` extractor/
+    validator to read the override directly from THIS turn's text, and
+    persist it -- product-scoped, durable, latest-wins -- via a minimal,
+    targeted extension of the managed-agent's OWN authoritative durable
+    state (``managed_agent_poc.state_store.ConversationStateStore.
+    set_retail_price_override``), never a new/parallel product or
+    pricing state, and never a pricing FORMULA of any kind.
+
+    CRITICAL ACCEPTANCE ASSERTION: uses the ACTUAL real ``ManagedAgentPOC``
+    serialized tool-call/state contract for every turn (captured via a
+    throwaway, real ``ManagedAgentPOC`` whose MODEL tool-selection alone
+    is scripted -- ``select_product``/``explain_bitrix_write_plan``/
+    ``_row_product_fields``/``ConversationStateStore`` all execute for
+    real), never a hand-typed guess.
+
+    Zero real Bitrix mutation: the LIVE bridge is backed by a mocked HTTP
+    transport (``_RecordingTransport``) that raises on any unexpected
+    call (including ``catalog.product.add``); no explicit write
+    confirmation is ever sent, and the managed-agent path exposes no
+    write/publish tool at all. Zero live internet/model calls: the
+    Bitrix HTTP client, the web-research fetch tool, and
+    ``ManagedAgentPOC.run_turn`` are all mocked/stubbed."""
+
+    async def asyncSetUp(self):
+        self.transport = _RecordingTransport(sections=[TV_SECTION, ELECTRONICS_SECTION])
+        self.live_env = _LiveEnv()
+        self.live_env.__enter__()
+        self.http_patch = mock.patch.object(BoundedHttpClient, "request", side_effect=self.transport)
+        self.http_patch.start()
+        self.bridge, _activation = _bridge_and_activation()
+
+        self.tmp = tempfile.mkdtemp()
+        self._old_data_dir = os.environ.get("PANDA_DATA_DIR")
+        self._old_flag = os.environ.get(ENABLED_ENV_VAR)
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+
+        self.panda, self.artifact_service = _panda(
+            bitrix_bridge=self.bridge,
+            search_provider=FakeSearchProvider(
+                {
+                    f"{BRAND} {PRODUCT_A_SKU}": [fake_result(RESEARCH_URL_A, title=f"LG {PRODUCT_A_SKU}")],
+                    f"{BRAND} {PRODUCT_B_SKU}": [fake_result(RESEARCH_URL_B, title=f"LG {PRODUCT_B_SKU}")],
+                }
+            ),
+            scrape_fetch_handler=_scrape_fetch_handler,
+            media_fetcher=FakeImageFetcher({IMAGE_URL_A: _png_bytes(), IMAGE_URL_B: _png_bytes()}),
+        )
+
+    async def asyncTearDown(self):
+        self.http_patch.stop()
+        self.live_env.__exit__(None, None, None)
+        if self._old_data_dir is None:
+            os.environ.pop("PANDA_DATA_DIR", None)
+        else:
+            os.environ["PANDA_DATA_DIR"] = self._old_data_dir
+        if self._old_flag is None:
+            os.environ.pop(ENABLED_ENV_VAR, None)
+        else:
+            os.environ[ENABLED_ENV_VAR] = self._old_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _capture_turns(self, *, xlsx_path: str, conversation_id: str, steps: list[tuple]) -> list[list]:
+        """Drives a throwaway, real ``ManagedAgentPOC`` (only the MODEL's
+        tool-selection DECISION is scripted; ``select_product``/
+        ``explain_bitrix_write_plan``/``_row_product_fields``/durable
+        state persistence all execute for real against the real ingested
+        XLSX rows) to capture the LITERAL ``tool_calls`` shape for each
+        turn in ``steps`` -- a list of ``(text, scripted_tool_call)``
+        pairs -- on the SAME conversation, so a later turn's
+        ``identifier=None`` resolution genuinely resolves against an
+        EARLIER turn's own persisted ``current_identifier`` -- never a
+        hand-typed dict."""
+        from managed_agent_poc.flags import FLAG_ENV_VAR
+
+        old_flag = os.environ.get(FLAG_ENV_VAR)
+        os.environ[FLAG_ENV_VAR] = "true"
+        try:
+            capture_poc = ManagedAgentPOC(
+                dataset_store_path=os.path.join(self.tmp, f"{conversation_id}_capture_dataset.sqlite3"),
+                session_db_path=os.path.join(self.tmp, f"{conversation_id}_capture_session.sqlite3"),
+                state_store_path=os.path.join(self.tmp, f"{conversation_id}_capture_state.sqlite3"),
+            )
+            captured: list[list] = []
+            for idx, (text, scripted_call) in enumerate(steps):
+                kwargs = {}
+                if idx == 0:
+                    kwargs["artifact_bytes_path"] = xlsx_path
+                    kwargs["artifact_filename"] = FILENAME
+                result = capture_poc.run_turn(
+                    text=text,
+                    tenant_id="tenant-a",
+                    conversation_id=f"{conversation_id}-capture",
+                    test_scripted_plan=[scripted_call, {"final_output": "captured"}],
+                    **kwargs,
+                )
+                assert result.status == "COMPLETED", result
+                captured.append(result.tool_calls)
+            return captured
+        finally:
+            if old_flag is None:
+                os.environ.pop(FLAG_ENV_VAR, None)
+            else:
+                os.environ[FLAG_ENV_VAR] = old_flag
+
+    async def test_explicit_retail_price_refinement_propagates_durably_to_show_write_plan(self):
+        """PART A + PART C (steps 1-5): the core production defect, its
+        exact-state assertion BEFORE write-plan rendering, durability
+        across a repeated SHOW_WRITE_PLAN, and "latest override wins"."""
+        artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant="tenant-a",
+            owner="u1",
+            conv="conv-price-1",
+            filename=FILENAME,
+            content=_no_retail_price_xlsx_bytes(),
+        )
+        xlsx_path = os.path.join(self.tmp, "capture_price_1_" + FILENAME)
+        with open(xlsx_path, "wb") as fh:
+            fh.write(_no_retail_price_xlsx_bytes())
+
+        steps = [
+            (PRODUCTION_TEXT, {"call_tool": "select_product", "arguments": {"identifier": None}}),
+            (WRITE_PLAN_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+            (SET_RETAIL_PRICE_800000_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+            (WRITE_PLAN_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+            (SET_RETAIL_PRICE_820000_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+        ]
+        captured = self._capture_turns(xlsx_path=xlsx_path, conversation_id="conv-price-1", steps=steps)
+        # Sanity check on the REAL captured shape: neither write-plan tool
+        # call ever carries a retail price -- the tool has no such
+        # parameter; "800000"/"820000" only ever exist in the turn's text.
+        for tool_calls in captured[1:]:
+            would_write = tool_calls[0]["output"].get("would_write") or {}
+            self.assertNotIn("retail_price", would_write)
+            self.assertNotIn("price", would_write)
+
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn([
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[0], "final_output": "irrelevant-1"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[1], "final_output": "irrelevant-2"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[2], "final_output": "irrelevant-3"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[3], "final_output": "irrelevant-4"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[4], "final_output": "irrelevant-5"},
+        ])):
+            # TURN 1 -- full-card PREPARE_PRODUCT, no usable source retail
+            # price at all.
+            r1 = await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-price-1",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+            self.assertEqual(r1.metadata.get("delegated_to"), "product_enrichment_bridge.prepare_complete_card")
+            self.assertIn(PRODUCT_A_SKU, r1.text)
+
+            # TURN 1b -- deterministic SHOW_WRITE_PLAN correctly reports
+            # the retail price as UNRESOLVED (production defect's own
+            # starting state; proves the fixture genuinely has no usable
+            # source retail price).
+            r1b = await self.panda.respond(
+                ConversationRequest(
+                    text=WRITE_PLAN_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1b",
+                    conversation_id="conv-price-1",
+                )
+            )
+            self.assertEqual(r1b.metadata.get("delegated_to"), "product_enrichment_bridge.format_write_plan_text")
+            self.assertIn("UNRESOLVED (missing_or_invalid_retail_price", r1b.text)
+
+            # TURN 2 -- THE DEFECT: explicit user override "800000 RUB".
+            r2 = await self.panda.respond(
+                ConversationRequest(
+                    text=SET_RETAIL_PRICE_800000_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-2",
+                    conversation_id="conv-price-1",
+                )
+            )
+
+            # PART C: DIRECT assertion on the canonical/durable state
+            # BEFORE/independent of write-plan rendering -- the override
+            # itself, not merely the rendered text.
+            state_store = ConversationStateStore(_durable_paths(tenant_id="tenant-a", conversation_id="conv-price-1")[2])
+            persisted = state_store.load(tenant_id="tenant-a", conversation_id="conv-price-1")
+            self.assertEqual(persisted.retail_price_overrides.get(PRODUCT_A_SKU), "800000")
+
+            # The rendered SHOW_WRITE_PLAN reflects it: missing_or_invalid_
+            # retail_price is gone, 800000 RUB is now shown.
+            self.assertEqual(r2.metadata.get("delegated_to"), "product_enrichment_bridge.format_write_plan_text")
+            self.assertNotIn("missing_or_invalid_retail_price", r2.text)
+            self.assertIn("800000", r2.text)
+            self.assertIn("Розничная цена: 800000", r2.text)
+            # Product A's OWN identity/preparation is unchanged by setting
+            # the price.
+            self.assertIn(PRODUCT_A_SKU, r2.text)
+            self.assertIn(PRODUCT_A_EAN, r2.text)
+            self.assertIn(PRODUCT_A_PURCHASE_PRICE, r2.text)
+            self.assertIn(str(TV_SECTION_ID), r2.text)
+
+            # TURN 3 -- repeated SHOW_WRITE_PLAN with NO new price
+            # mention: durability. Still 800000, never reverts to
+            # UNRESOLVED.
+            r3 = await self.panda.respond(
+                ConversationRequest(
+                    text=WRITE_PLAN_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-3",
+                    conversation_id="conv-price-1",
+                )
+            )
+            self.assertNotIn("missing_or_invalid_retail_price", r3.text)
+            self.assertIn("Розничная цена: 800000", r3.text)
+
+            # TURN 4 -- a LATER explicit override (820000) replaces the
+            # earlier one (800000), both in the durable state and in the
+            # rendered write plan.
+            r4 = await self.panda.respond(
+                ConversationRequest(
+                    text=SET_RETAIL_PRICE_820000_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-4",
+                    conversation_id="conv-price-1",
+                )
+            )
+            persisted_after = state_store.load(tenant_id="tenant-a", conversation_id="conv-price-1")
+            self.assertEqual(persisted_after.retail_price_overrides.get(PRODUCT_A_SKU), "820000")
+            self.assertIn("Розничная цена: 820000", r4.text)
+            self.assertNotIn("Розничная цена: 800000", r4.text)
+
+        # Zero real Bitrix mutation across every turn.
+        methods_called = [m for m, _ in self.transport.calls]
+        self.assertNotIn("catalog.product.add", methods_called)
+        self.assertEqual(self.transport.product_add_count, 0)
+        self.assertEqual(self.transport.offer_add_count, 0)
+        self.assertEqual(self.transport.price_add_count, 0)
+        for result in (r1, r1b, r2, r3, r4):
+            self.assertFalse(result.metadata.get("mutated"))
+
+    async def test_retail_price_override_is_product_scoped_and_survives_navigation(self):
+        """PART C (steps 6-7): Product B never inherits Product A's
+        override, and returning to Product A retains its own override."""
+        artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant="tenant-a",
+            owner="u1",
+            conv="conv-price-2",
+            filename=FILENAME,
+            content=_no_retail_price_xlsx_bytes(),
+        )
+        xlsx_path = os.path.join(self.tmp, "capture_price_2_" + FILENAME)
+        with open(xlsx_path, "wb") as fh:
+            fh.write(_no_retail_price_xlsx_bytes())
+
+        steps = [
+            (PRODUCTION_TEXT, {"call_tool": "select_product", "arguments": {"identifier": None}}),
+            (SET_RETAIL_PRICE_800000_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+            (ANOTHER_ONE_TEXT, {"call_tool": "select_product", "arguments": {"identifier": None}}),
+            (WRITE_PLAN_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+            (RETURN_TO_PRODUCT_A_TEXT, {"call_tool": "select_product", "arguments": {"identifier": PRODUCT_A_SKU}}),
+            (WRITE_PLAN_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+        ]
+        captured = self._capture_turns(xlsx_path=xlsx_path, conversation_id="conv-price-2", steps=steps)
+        current_identifiers = [PRODUCT_A_SKU, PRODUCT_A_SKU, PRODUCT_B_SKU, PRODUCT_B_SKU, PRODUCT_A_SKU, PRODUCT_A_SKU]
+
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn([
+            {"current_identifier": current_identifiers[i], "tool_calls": captured[i], "final_output": f"irrelevant-{i}"}
+            for i in range(len(steps))
+        ])):
+            await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-price-2",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+            r2 = await self.panda.respond(
+                ConversationRequest(
+                    text=SET_RETAIL_PRICE_800000_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-2",
+                    conversation_id="conv-price-2",
+                )
+            )
+            self.assertIn("Розничная цена: 800000", r2.text)
+
+            # TURN 3 -- "Этот уже был. Дай другой." switches to Product B.
+            await self.panda.respond(
+                ConversationRequest(
+                    text=ANOTHER_ONE_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-3",
+                    conversation_id="conv-price-2",
+                )
+            )
+            # TURN 4 -- Product B's OWN write plan must NOT inherit
+            # Product A's 800000 override; it stays UNRESOLVED (its own
+            # source has no retail price either, and it was never given
+            # an explicit override of its own).
+            r4 = await self.panda.respond(
+                ConversationRequest(
+                    text=WRITE_PLAN_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-4",
+                    conversation_id="conv-price-2",
+                )
+            )
+            self.assertIn(PRODUCT_B_SKU, r4.text)
+            self.assertNotIn("800000", r4.text)
+            self.assertIn("UNRESOLVED (missing_or_invalid_retail_price", r4.text)
+
+            state_store = ConversationStateStore(_durable_paths(tenant_id="tenant-a", conversation_id="conv-price-2")[2])
+            persisted = state_store.load(tenant_id="tenant-a", conversation_id="conv-price-2")
+            self.assertNotIn(PRODUCT_B_SKU, persisted.retail_price_overrides)
+            self.assertEqual(persisted.retail_price_overrides.get(PRODUCT_A_SKU), "800000")
+
+            # TURN 5 -- explicitly return to Product A.
+            await self.panda.respond(
+                ConversationRequest(
+                    text=RETURN_TO_PRODUCT_A_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-5",
+                    conversation_id="conv-price-2",
+                )
+            )
+            # TURN 6 -- Product A retains its OWN earlier override.
+            r6 = await self.panda.respond(
+                ConversationRequest(
+                    text=WRITE_PLAN_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-6",
+                    conversation_id="conv-price-2",
+                )
+            )
+            self.assertIn(PRODUCT_A_SKU, r6.text)
+            self.assertIn("Розничная цена: 800000", r6.text)
+
+    async def test_invalid_retail_price_refinement_does_not_corrupt_existing_valid_override(self):
+        """Invalid/zero monetary input must never silently replace a
+        valid existing retail-price override (reuses the EXISTING
+        ``_normalize_money`` positive-decimal-string validator -- no new
+        UX/validation contract)."""
+        artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant="tenant-a",
+            owner="u1",
+            conv="conv-price-3",
+            filename=FILENAME,
+            content=_no_retail_price_xlsx_bytes(),
+        )
+        xlsx_path = os.path.join(self.tmp, "capture_price_3_" + FILENAME)
+        with open(xlsx_path, "wb") as fh:
+            fh.write(_no_retail_price_xlsx_bytes())
+
+        steps = [
+            (PRODUCTION_TEXT, {"call_tool": "select_product", "arguments": {"identifier": None}}),
+            (SET_RETAIL_PRICE_800000_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+            (SET_RETAIL_PRICE_INVALID_TEXT, {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}}),
+        ]
+        captured = self._capture_turns(xlsx_path=xlsx_path, conversation_id="conv-price-3", steps=steps)
+
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn([
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[0], "final_output": "irrelevant-1"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[1], "final_output": "irrelevant-2"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": captured[2], "final_output": "irrelevant-3"},
+        ])):
+            await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-price-3",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+            r2 = await self.panda.respond(
+                ConversationRequest(
+                    text=SET_RETAIL_PRICE_800000_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-2",
+                    conversation_id="conv-price-3",
+                )
+            )
+            self.assertIn("Розничная цена: 800000", r2.text)
+
+            r3 = await self.panda.respond(
+                ConversationRequest(
+                    text=SET_RETAIL_PRICE_INVALID_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-3",
+                    conversation_id="conv-price-3",
+                )
+            )
+            # The invalid "0" must NOT corrupt the existing valid 800000
+            # override -- it must still be 800000, never UNRESOLVED and
+            # never a fabricated "0".
+            self.assertIn("Розничная цена: 800000", r3.text)
+            self.assertNotIn("Розничная цена: 0", r3.text)
+            self.assertNotIn("missing_or_invalid_retail_price", r3.text)
+
+            state_store = ConversationStateStore(_durable_paths(tenant_id="tenant-a", conversation_id="conv-price-3")[2])
+            persisted = state_store.load(tenant_id="tenant-a", conversation_id="conv-price-3")
+            self.assertEqual(persisted.retail_price_overrides.get(PRODUCT_A_SKU), "800000")
 
 
 @unittest.skipUnless(_SDK_AVAILABLE and _HAS_KEY, _LIVE_SKIP_REASON)
