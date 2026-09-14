@@ -7,9 +7,14 @@ Does not replace Router, Pipeline, ToolGateway, or conversation history.
 from __future__ import annotations
 
 import hashlib
+import json
+import os
 import re
+import sqlite3
+import threading
 import uuid
 from dataclasses import dataclass, field, replace
+from datetime import datetime, timezone
 from typing import Any, Mapping
 
 from agents.routing_requirements import FRESHNESS_CURRENT, derive_task_requirements
@@ -377,7 +382,13 @@ class ActionDecision:
 
 
 class ActiveTaskStore:
-    """In-process active-task frame keyed by existing conversation identity."""
+    """In-process active-task frame keyed by existing conversation identity.
+
+    Process-lifetime only -- lost on restart/redeploy/crash-recycle. Safe
+    for tests and any caller that does not need the active task to survive
+    past this process (see ``SqliteActiveTaskStore`` below for the durable
+    production variant, which implements the exact same ``get``/``put``/
+    ``clear`` contract)."""
 
     def __init__(self):
         self._tasks: dict[tuple[str, str, str], ActiveTask] = {}
@@ -400,6 +411,211 @@ class ActiveTaskStore:
         if not conversation_id:
             return
         self._tasks.pop(self._key(tenant_id, owner_id, conversation_id), None)
+
+
+_ACTIVE_TASK_SCHEMA = """
+CREATE TABLE IF NOT EXISTS business_assistant_active_tasks (
+  tenant_id TEXT NOT NULL,
+  owner_id TEXT NOT NULL,
+  conversation_id TEXT NOT NULL,
+  task_id TEXT NOT NULL,
+  family TEXT NOT NULL,
+  tool_id TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  goal TEXT NOT NULL DEFAULT '',
+  parameters_json TEXT NOT NULL DEFAULT '{}',
+  missing_required_json TEXT NOT NULL DEFAULT '[]',
+  quantity INTEGER,
+  artifact_type TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT '',
+  execute_requested INTEGER NOT NULL DEFAULT 0,
+  execution_count INTEGER NOT NULL DEFAULT 0,
+  last_idempotency_key TEXT NOT NULL DEFAULT '',
+  last_artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+  awaiting_quantity INTEGER NOT NULL DEFAULT 0,
+  risk TEXT NOT NULL DEFAULT '',
+  updated_at TEXT NOT NULL DEFAULT '',
+  PRIMARY KEY (tenant_id, owner_id, conversation_id)
+);
+"""
+
+
+class SqliteActiveTaskStore:
+    """Durable production variant of ``ActiveTaskStore`` -- same ``get``/
+    ``put``/``clear`` contract, backed by a dedicated SQLite file instead of
+    a process-local dict.
+
+    Production defect closure (request-scoped/process-lifetime state loss):
+    ``WorkflowPandaConversationGateway`` previously always defaulted to the
+    plain in-memory ``ActiveTaskStore`` in production too (nothing in
+    ``main.py``/``business_assistant_api.runtime.wire_panda_conversation_
+    gateway`` ever passed a durable ``action_store=``), unlike every other
+    piece of state this same multi-turn continuation depends on (the parsed
+    XLSX dataset in ``data_intel`` defaults to a SQLite-backed store, the
+    conversation/message/request history in ``business_assistant_api`` is
+    already SQLite-backed, and file attachments in ``ArtifactService`` are
+    already SQLite-backed). A conversation's active product task is the ONE
+    piece of state in that chain that did not survive a process
+    restart/redeploy/crash-recycle -- so a conversation whose turn 1
+    (attach + select a product) completed successfully before a restart
+    would, on its very next attachment-less follow-up turn after the
+    restart, find NO active task at all (a correctly-empty, but wrong,
+    lookup against a brand-new process's empty in-memory dict) and get
+    routed right back to the legacy attachment-blind business-workflow path
+    -- reproducing the exact ``BA_CAPABILITY_UNAVAILABLE``/
+    ``dependency_not_ready`` symptom the routing fix was supposed to have
+    already closed. Mirrors the SAME "dedicated SQLite file, shared across
+    API replicas/restarts" pattern ``finops.budget_store.SqliteBudgetStore``
+    and ``providers.governor.SqliteProviderGovernorStore`` already
+    established in this codebase for the identical class of problem
+    (in-memory router/budget state needing to survive a restart) -- not a
+    second, parallel state system."""
+
+    def __init__(self, db_path: str):
+        self.path = str(db_path)
+        if self.path != ":memory:":
+            parent = os.path.dirname(self.path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+        self._lock = threading.RLock()
+        self._local = threading.local()
+        self._init_schema()
+
+    def _connect(self):
+        conn = getattr(self._local, "conn", None)
+        if conn is None:
+            conn = sqlite3.connect(
+                self.path,
+                check_same_thread=False,
+                isolation_level=None,
+                timeout=30.0,
+            )
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("PRAGMA busy_timeout=5000")
+            self._local.conn = conn
+        return conn
+
+    def _init_schema(self) -> None:
+        with self._lock:
+            conn = self._connect()
+            conn.executescript(_ACTIVE_TASK_SCHEMA)
+
+    def _key(self, tenant_id: str, owner_id: str, conversation_id: str) -> tuple[str, str, str]:
+        return (require_tenant_id(tenant_id), str(owner_id or ""), str(conversation_id or ""))
+
+    def get(self, *, tenant_id: str, owner_id: str, conversation_id: str) -> ActiveTask | None:
+        if not conversation_id:
+            return None
+        tenant, owner, conv = self._key(tenant_id, owner_id, conversation_id)
+        with self._lock:
+            row = self._connect().execute(
+                "SELECT * FROM business_assistant_active_tasks "
+                "WHERE tenant_id = ? AND owner_id = ? AND conversation_id = ?",
+                (tenant, owner, conv),
+            ).fetchone()
+        if row is None:
+            return None
+        return ActiveTask(
+            task_id=str(row["task_id"] or ""),
+            tenant_id=str(row["tenant_id"] or ""),
+            owner_id=str(row["owner_id"] or ""),
+            conversation_id=str(row["conversation_id"] or ""),
+            family=str(row["family"] or ""),
+            tool_id=str(row["tool_id"] or ""),
+            operation=str(row["operation"] or ""),
+            goal=str(row["goal"] or ""),
+            parameters=json.loads(row["parameters_json"] or "{}"),
+            missing_required=tuple(json.loads(row["missing_required_json"] or "[]")),
+            quantity=row["quantity"],
+            artifact_type=str(row["artifact_type"] or ""),
+            status=str(row["status"] or ""),
+            execute_requested=bool(row["execute_requested"]),
+            execution_count=int(row["execution_count"] or 0),
+            last_idempotency_key=str(row["last_idempotency_key"] or ""),
+            last_artifact_ids=tuple(json.loads(row["last_artifact_ids_json"] or "[]")),
+            awaiting_quantity=bool(row["awaiting_quantity"]),
+            risk=str(row["risk"] or ""),
+        )
+
+    def put(self, task: ActiveTask) -> None:
+        if not task.conversation_id:
+            return
+        snap = task.snapshot()
+        tenant, owner, conv = self._key(snap.tenant_id, snap.owner_id, snap.conversation_id)
+        with self._lock:
+            self._connect().execute(
+                """
+                INSERT INTO business_assistant_active_tasks (
+                    tenant_id, owner_id, conversation_id, task_id, family, tool_id,
+                    operation, goal, parameters_json, missing_required_json, quantity,
+                    artifact_type, status, execute_requested, execution_count,
+                    last_idempotency_key, last_artifact_ids_json, awaiting_quantity, risk,
+                    updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tenant_id, owner_id, conversation_id) DO UPDATE SET
+                    task_id = excluded.task_id,
+                    family = excluded.family,
+                    tool_id = excluded.tool_id,
+                    operation = excluded.operation,
+                    goal = excluded.goal,
+                    parameters_json = excluded.parameters_json,
+                    missing_required_json = excluded.missing_required_json,
+                    quantity = excluded.quantity,
+                    artifact_type = excluded.artifact_type,
+                    status = excluded.status,
+                    execute_requested = excluded.execute_requested,
+                    execution_count = excluded.execution_count,
+                    last_idempotency_key = excluded.last_idempotency_key,
+                    last_artifact_ids_json = excluded.last_artifact_ids_json,
+                    awaiting_quantity = excluded.awaiting_quantity,
+                    risk = excluded.risk,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    tenant,
+                    owner,
+                    conv,
+                    snap.task_id,
+                    snap.family,
+                    snap.tool_id,
+                    snap.operation,
+                    snap.goal,
+                    json.dumps(snap.parameters),
+                    json.dumps(list(snap.missing_required)),
+                    snap.quantity,
+                    snap.artifact_type,
+                    snap.status,
+                    1 if snap.execute_requested else 0,
+                    snap.execution_count,
+                    snap.last_idempotency_key,
+                    json.dumps(list(snap.last_artifact_ids)),
+                    1 if snap.awaiting_quantity else 0,
+                    snap.risk,
+                    utc_now_iso(),
+                ),
+            )
+
+    def clear(self, *, tenant_id: str, owner_id: str, conversation_id: str) -> None:
+        if not conversation_id:
+            return
+        tenant, owner, conv = self._key(tenant_id, owner_id, conversation_id)
+        with self._lock:
+            self._connect().execute(
+                "DELETE FROM business_assistant_active_tasks "
+                "WHERE tenant_id = ? AND owner_id = ? AND conversation_id = ?",
+                (tenant, owner, conv),
+            )
+
+    def close(self) -> None:
+        conn = getattr(self._local, "conn", None)
+        if conn is not None:
+            conn.close()
+            self._local.conn = None
+
+
+def utc_now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _norm(text: str) -> str:

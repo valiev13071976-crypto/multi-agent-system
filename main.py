@@ -466,6 +466,35 @@ for _attr, _svc in (
         pass
 from business_assistant_api.runtime import wire_panda_conversation_gateway
 
+# Production regression closure (request-scoped/process-lifetime active-task
+# loss): the conversational gateway's ActiveTaskStore previously always
+# defaulted to a plain in-memory dict here too, unlike every other piece of
+# state a multi-turn product/XLSX task depends on -- the parsed dataset
+# (data_intel, SQLite-backed when persistence is ready), conversation/
+# message/request history and file attachments (business_assistant_api /
+# ArtifactService, both already SQLite files under PANDA_DATA_DIR). Give it
+# the SAME durability by default: a dedicated SQLite file in the SAME
+# PANDA_DATA_DIR ba_api_runtime already uses for ba_api.sqlite/ba_uploads
+# (falls back to "." exactly like those do), so a conversation's active
+# task keeps existing across a process restart/redeploy/crash-recycle
+# instead of only for as long as this one process happens to stay up.
+_active_task_store = None
+try:
+    from business_assistant.action_continuation import SqliteActiveTaskStore
+
+    _active_task_db_path = os.environ.get("BA_ACTIVE_TASK_DB_PATH") or os.path.join(
+        os.environ.get("PANDA_DATA_DIR", "."), "active_tasks.sqlite3"
+    )
+    _active_task_store = SqliteActiveTaskStore(_active_task_db_path)
+except Exception:
+    # Durability is a hardening layer over the existing in-memory default --
+    # if the SQLite file cannot be opened for any reason (e.g. read-only
+    # filesystem in a constrained test/tooling context),
+    # wire_panda_conversation_gateway's action_store=None default (plain
+    # ActiveTaskStore) keeps every existing deployment working exactly as
+    # before, just without the durability improvement.
+    _active_task_store = None
+
 wire_panda_conversation_gateway(
     ba_service=ba,
     workflow_engine=getattr(router, "workflow_engine", None),
@@ -476,6 +505,7 @@ wire_panda_conversation_gateway(
     # generation) resolve their capability instead of reporting CAPABILITY_UNAVAILABLE.
     tool_gateway=getattr(side_effect_runtime, "tool_gateway", None),
     artifact_service=ba_api_runtime.artifact_service,
+    action_store=_active_task_store,
 )
 _persistence = getattr(side_effect_runtime, "persistence", None)
 _pf_connection = getattr(_persistence, "connection", None) if _persistence else None
