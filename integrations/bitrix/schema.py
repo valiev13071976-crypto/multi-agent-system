@@ -200,11 +200,21 @@ resolved most of the still-missing product-card data:
      ``detailPicture`` READ as ``{"id","url","urlMachine"}``; Bitrix's own
      ``catalog.product.add`` reference additionally documents the WRITE
      shape for both: ``{"fileData": ["<filename>", "<base64 content>"]}``.
-     No confirmed write-format example exists for generic multi-value FILE
-     properties (e.g. MORE_PHOTO/124 on IBLOCK 14, MORE_PHOTO/280 on
-     IBLOCK 15 -- the Aspro gallery) beyond these two dedicated top-level
-     fields, so gallery/additional-image writing remains deferred rather
-     than guessed.
+
+  F2. GALLERY (real product 989 defect closure -- "Gallery/photogallery
+     fields visible in Aspro are empty even though Panda prepared gallery
+     images"): the generic multi-value FILE property write shape is now
+     confirmed by Bitrix's own documented ``catalog`` REST contract (the
+     SAME ``catalog.product(.offer).add`` method family already used
+     above for ``previewPicture``/``detailPicture`` -- self-hosted
+     "Управление сайтом" and Bitrix24 share this one ``catalog`` REST
+     module, unlike CRM-only methods): a MULTIPLE FILE-type property is
+     written as an array of ``{"value": {"fileData": ["<filename>",
+     "<base64 content>"]}}`` entries. MORE_PHOTO is an OFFER property
+     (280, IBLOCK 15 -- there is no verified base-product/IBLOCK 14
+     gallery property), so it is written on the offer create call, never
+     the base product's. See ``LiveBitrixAdapter._gallery_offer_fields``/
+     ``_live_create_offer``.
 
   G. SEO -- still no verified writable mechanism. This pass additionally
      ruled out ``iblock.element.get``, ``iblock.elementproperty.list``

@@ -114,6 +114,17 @@ def build_enriched_write_request(
 
     preview_asset = next((a for a in enrichment.media.assets if a.role == "preview"), None)
     detail_asset = next((a for a in enrichment.media.assets if a.role == "detail"), None)
+    # Gallery follow-up defect closure: previously enrichment's gallery
+    # assets were computed (see ``enrichment.media.assets``, role
+    # "gallery") but never forwarded into the write request at all --
+    # only reported in the preview as "will NOT be written" (see the
+    # OLD ``format_write_plan_text`` gallery line this same change set
+    # updates). ``gallery_pictures`` now has a real, verified write
+    # destination (MORE_PHOTO, offer property 280 --
+    # ``integrations.bitrix.schema.OFFER_PROPERTIES``/
+    # ``LiveBitrixAdapter._gallery_offer_fields``), so it is passed
+    # through here exactly like preview/detail above.
+    gallery_assets = [a for a in enrichment.media.assets if a.role == "gallery"]
 
     return dataclasses.replace(
         base,
@@ -126,6 +137,8 @@ def build_enriched_write_request(
         or ({"filename": preview_asset.filename, "base64": preview_asset.base64_content} if preview_asset else {}),
         detail_picture=dict(base.detail_picture)
         or ({"filename": detail_asset.filename, "base64": detail_asset.base64_content} if detail_asset else {}),
+        gallery_pictures=tuple(base.gallery_pictures or ())
+        or tuple({"filename": a.filename, "base64": a.base64_content} for a in gallery_assets),
     )
 
 
@@ -241,11 +254,15 @@ def format_write_plan_text(
         lines.append(f"  - детальное: {detail_picture['filename']} (файл загружается в Bitrix, не ссылка)")
     if not preview_picture.get("filename") and not detail_picture.get("filename"):
         lines.append("  - нет подготовленных изображений")
-    gallery_count = int((preview.get("media") or {}).get("gallery_image_count") or 0)
-    if gallery_count:
+    gallery_pictures = tuple(write_request.gallery_pictures or ())
+    if gallery_pictures:
         lines.append(
-            f"  - галерея: {gallery_count} — НЕ будет записана (для галереи нет поддерживаемого назначения в этом пути записи)"
+            f"  - галерея: {len(gallery_pictures)} изображени(й) (загружается в Bitrix через MORE_PHOTO/офер, не ссылка)"
         )
+    else:
+        gallery_count = int((preview.get("media") or {}).get("gallery_image_count") or 0)
+        if gallery_count:
+            lines.append(f"  - галерея: {gallery_count} — не подготовлена для записи (нет обработанных файлов)")
 
     lines.append("ОПИСАНИЕ, КОТОРОЕ БУДЕТ ЗАПИСАНО:")
     lines.append(f"  Короткое (previewText): {write_request.short_description or '(нет)'}")
