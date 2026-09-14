@@ -85,6 +85,7 @@ import logging
 import os
 import re
 import tempfile
+from typing import Mapping
 
 from managed_agent_poc import isolated_env
 
@@ -171,6 +172,131 @@ def _redact_for_log(text: str) -> str:
     return safe[:1000]
 
 
+# Production defect closure (degraded raw-row card): the isolated
+# subprocess's 3 tools (see ``runtime_subprocess.py``) are deliberately
+# thin, read-only ROW PROJECTIONS over the already-ingested spreadsheet --
+# they carry no pricing/category/media/characteristics/Bitrix-mapping
+# logic at all, by design (module docstring: "Business rules stay in
+# Panda"). ``select_product`` (a specific product becomes the
+# conversation's current selection) and ``explain_bitrix_write_plan`` (the
+# user asks to see/confirm what would be written to Bitrix/Aspro for the
+# selected product) are the two tool calls whose OWN docstrings already
+# describe the exact semantic intent the required flow calls "selected
+# product / active product state" -- once either fires, this module
+# DELEGATES the resolved raw fields into the EXISTING, unmodified
+# ``business_assistant.product_enrichment_bridge.prepare_complete_card``
+# capability (the SAME one ``WorkflowPandaConversationGateway.
+# _invoke_product_enrichment`` already calls for the legacy
+# CALL_PRODUCT_ENRICHMENT decision) instead of ever answering from the
+# raw tool output directly. No pricing/category/media/characteristics/
+# Bitrix-mapping logic is added here -- only field-name translation and a
+# pass-through call.
+_PRODUCT_RESOLVING_TOOLS = ("select_product", "explain_bitrix_write_plan")
+
+
+def _selected_product_raw_fields(tool_calls: list) -> dict | None:
+    """Finds the LAST tool call in this turn that resolved a specific
+    product -- ``select_product``'s own ``SELECTED`` status, or
+    ``explain_bitrix_write_plan``'s own ``WRITE_PLAN`` status -- and
+    returns its raw, un-enriched field dict (the SAME row-projection
+    shape ``managed_agent_poc.runtime_subprocess._row_product_fields``
+    already produces: name/sku/ean/barcode/category/brand/purchase_price/
+    retail_price/price). Returns ``None`` when no product was resolved
+    this turn at all (e.g. a pure ``analyze_spreadsheet`` turn, or a
+    NOT_FOUND/NO_PRODUCT_SELECTED lookup) -- the caller must then fall
+    back to the model's own ``final_output`` text unchanged."""
+    resolved: dict | None = None
+    for call in tool_calls or []:
+        if not isinstance(call, Mapping):
+            continue
+        tool = str(call.get("tool") or "")
+        output = call.get("output")
+        if tool not in _PRODUCT_RESOLVING_TOOLS or not isinstance(output, Mapping):
+            continue
+        if tool == "select_product" and output.get("status") == "SELECTED":
+            resolved = {k: v for k, v in output.items() if k not in ("status", "matched_by")}
+        elif tool == "explain_bitrix_write_plan" and output.get("status") == "WRITE_PLAN":
+            would_write = output.get("would_write")
+            if isinstance(would_write, Mapping):
+                resolved = dict(would_write)
+    return resolved
+
+
+def _canonical_fields_and_retail_price(raw: Mapping) -> tuple[dict, str]:
+    """Translates the managed-agent's raw row-projection field NAMES onto
+    the EXACT canonical field-name contract
+    ``data_intel.service._row_lookup_result``'s own ``product_fields``
+    already uses -- the SAME shape
+    ``business_assistant.product_enrichment_bridge``/
+    ``business_assistant.controlled_bitrix_write`` already consume for
+    the legacy conversational path. Pure renaming -- no value is
+    computed, derived, or invented here."""
+    product_fields = {
+        "title": str(raw.get("name") or raw.get("title") or ""),
+        "sku": str(raw.get("sku") or ""),
+        "ean": str(raw.get("ean") or raw.get("barcode") or ""),
+        "category": str(raw.get("category") or ""),
+        "brand": str(raw.get("brand") or ""),
+        "purchase_price": str(raw.get("purchase_price") or ""),
+    }
+    # Retail price follows the EXACT SAME priority the existing
+    # ``data_intel.service._row_lookup_result`` already establishes for
+    # this same raw shape: an explicit selling-price value (here, either
+    # of the two keys the isolated tools may have populated) before an
+    # empty string -- Panda never derives/invents a retail price here.
+    retail_price = str(raw.get("retail_price") or raw.get("price") or "")
+    return product_fields, retail_price
+
+
+async def _delegate_to_existing_product_preparation(
+    raw_fields: Mapping,
+    *,
+    tenant_id: str,
+    tool_gateway=None,
+    bitrix_bridge=None,
+    media_fetcher=None,
+    enrichment_cache=None,
+) -> dict | None:
+    """Delegates a managed-agent-resolved product selection into the
+    EXISTING, unmodified deterministic Product Enrichment / controlled
+    Bitrix write-plan pipeline
+    (``business_assistant.product_enrichment_bridge.prepare_complete_card``).
+
+    Owns NO pricing/category/media/characteristics/Bitrix-mapping logic
+    of its own -- it only translates field names (see
+    ``_canonical_fields_and_retail_price``) and calls straight through to
+    the SAME capability the legacy CALL_PRODUCT_ENRICHMENT decision
+    already uses. Never mutates Bitrix (``prepare_complete_card`` itself
+    is read-only -- see its own docstring). Returns ``None`` (never
+    raises) when the resolved fields lack a title/sku the existing
+    pipeline requires, or when the existing pipeline itself raises for
+    any reason -- callers must fall back to the raw tool/model output
+    unchanged, exactly like every other failure mode in this module."""
+    from business_assistant.product_enrichment_bridge import prepare_complete_card
+
+    product_fields, retail_price = _canonical_fields_and_retail_price(raw_fields)
+    if not product_fields.get("title") or not product_fields.get("sku"):
+        return None
+    try:
+        return await prepare_complete_card(
+            tenant_id=tenant_id,
+            product_fields=product_fields,
+            retail_price=retail_price,
+            bitrix_bridge=bitrix_bridge,
+            tool_gateway=tool_gateway,
+            media_fetcher=media_fetcher,
+            cache=enrichment_cache,
+        )
+    except Exception:  # noqa: BLE001 -- an optional enrichment delegation must never crash a turn
+        logger.warning(
+            "managed_agent_poc: delegation into product_enrichment_bridge.prepare_complete_card "
+            "failed for tenant=%s -- falling back to the raw managed-agent tool output",
+            _safe_path_component(tenant_id),
+            exc_info=True,
+        )
+        return None
+
+
 def _is_eligible_turn(*, tenant_id: str, conversation_id: str, has_spreadsheet_attachment: bool) -> bool:
     """Eligibility is decided ENTIRELY from state/attachment presence --
     never from the text of the message (no ``is_explicit_*``, no
@@ -192,6 +318,22 @@ async def maybe_respond_via_managed_agent(
     artifact_service=None,
     spreadsheet_ref: dict | None = None,
     timeout_s: float | None = None,
+    # Production defect closure (degraded raw-row card): optional handles
+    # to the SAME EXISTING deterministic capabilities the legacy
+    # ``resolve_action_turn``/``CALL_PRODUCT_ENRICHMENT`` path already
+    # uses (``business_assistant.conversation_gateway.
+    # WorkflowPandaConversationGateway`` passes its OWN ``self._tool_
+    # gateway``/``self._bitrix_bridge``/``self._media_fetcher``/``self.
+    # _enrichment_cache`` straight through -- never a second instance of
+    # any of them). All default ``None`` so existing callers that do not
+    # pass them (e.g. any direct test of this function written before
+    # this defect closure) keep working exactly as before, just without
+    # delegation (falls back to the raw tool output, same as a resolution
+    # failure).
+    tool_gateway=None,
+    bitrix_bridge=None,
+    media_fetcher=None,
+    enrichment_cache=None,
 ) -> dict | None:
     """Returns ``None`` when the managed-agent path should not/cannot
     handle this turn (caller must fall back to the existing conversational
@@ -204,6 +346,19 @@ async def maybe_respond_via_managed_agent(
     avoid a circular import between this module and
     ``conversation_gateway.py`` (this module must stay importable and
     side-effect-free on its own, without pulling in Business Assistant).
+
+    When the managed agent resolves a specific product this turn (via
+    ``select_product``/``explain_bitrix_write_plan`` -- see
+    ``_selected_product_raw_fields``), the response text/metadata are
+    built by DELEGATING that resolved product into the EXISTING
+    deterministic ``business_assistant.product_enrichment_bridge.
+    prepare_complete_card`` capability (see
+    ``_delegate_to_existing_product_preparation``) instead of the raw
+    tool/model output -- Managed Agent stays the semantic/orchestration
+    layer; Panda's existing business capabilities stay the source of
+    truth. Falls back to the raw model output unchanged whenever no
+    product was resolved this turn, the resolved fields are incomplete,
+    or the existing pipeline itself fails for any reason.
     """
     if not conversation_id:
         return None
@@ -319,12 +474,29 @@ async def maybe_respond_via_managed_agent(
         return None
 
     selected_tool = turn_result.tool_calls[0]["tool"] if turn_result.tool_calls else ""
-    return {
-        "text": turn_result.final_output or "",
-        "metadata": {
-            "action_decision": "MANAGED_AGENT",
-            "managed_agent_tool": selected_tool,
-            "artifacts": [],
-            "mutated": False,
-        },
+    response_text = turn_result.final_output or ""
+    metadata: dict = {
+        "action_decision": "MANAGED_AGENT",
+        "managed_agent_tool": selected_tool,
+        "artifacts": [],
+        "mutated": False,
     }
+
+    raw_fields = _selected_product_raw_fields(turn_result.tool_calls)
+    if raw_fields is not None:
+        delegated = await _delegate_to_existing_product_preparation(
+            raw_fields,
+            tenant_id=tenant_id,
+            tool_gateway=tool_gateway,
+            bitrix_bridge=bitrix_bridge,
+            media_fetcher=media_fetcher,
+            enrichment_cache=enrichment_cache,
+        )
+        if delegated is not None:
+            response_text = str(delegated.get("text") or "")
+            metadata["delegated_to"] = "product_enrichment_bridge.prepare_complete_card"
+            write_preview = delegated.get("write_preview") or {}
+            if write_preview:
+                metadata["bitrix_write_preview"] = write_preview
+
+    return {"text": response_text, "metadata": metadata}

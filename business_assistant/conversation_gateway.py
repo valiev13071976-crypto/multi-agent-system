@@ -1154,6 +1154,18 @@ class WorkflowPandaConversationGateway:
                 conversation_id=str(request.conversation_id or ""),
                 artifact_service=self._artifact_service,
                 spreadsheet_ref=spreadsheet_refs_this_turn[0] if spreadsheet_refs_this_turn else None,
+                # Production defect closure (degraded raw-row card): the
+                # SAME existing deterministic capabilities the legacy
+                # CALL_PRODUCT_ENRICHMENT path below already uses -- never
+                # a second tool_gateway/bitrix_bridge/media_fetcher/cache
+                # instance. Lets the managed-agent boundary DELEGATE a
+                # resolved product selection into the existing Product
+                # Enrichment / controlled Bitrix write-plan pipeline
+                # instead of answering from the raw tool projection.
+                tool_gateway=self._tool_gateway,
+                bitrix_bridge=self._bitrix_bridge,
+                media_fetcher=self._media_fetcher,
+                enrichment_cache=self._enrichment_cache,
             )
             if managed_result is not None:
                 self._record_latency(t0, follow_up_ms)
