@@ -48,6 +48,7 @@ sys.path.insert(0, _PKGS_DIR)
 
 from agents import Agent, ModelSettings, RunConfig, RunContextWrapper, Runner, SQLiteSession, function_tool  # noqa: E402
 from agents.testing import ScriptedModel, assistant_message, function_call  # noqa: E402
+from openai.types.shared import Reasoning  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Step 2: only now append the repo root, so the existing, UNMODIFIED
@@ -395,13 +396,21 @@ def main() -> int:
         run_config_kwargs["model"] = _build_scripted_model(scripted_plan)
         agent = Agent(name="Panda Data Assistant (POC)", instructions=_INSTRUCTIONS, tools=_TOOLS)
     else:
-        model_name = os.environ.get("OPENAI_MODEL") or "gpt-4.1-mini"
+        # Current, SDK-documented, cost-efficient default for a tool-selection
+        # workload (see the SDK's own Models guide -- "gpt-5.6-luna ... for
+        # efficient, high-volume agent workloads"), overridable via the SAME
+        # OPENAI_MODEL env var Panda's existing adapter
+        # (agents/openai_agent.py) already uses. low/none reasoning +
+        # low verbosity keeps this live evaluation's spend minimal, per the
+        # cost-control requirement -- this is a semantic tool-selection task,
+        # not deep multi-step reasoning.
+        model_name = os.environ.get("OPENAI_MODEL") or "gpt-5.6-luna"
         agent = Agent(
             name="Panda Data Assistant (POC)",
             instructions=_INSTRUCTIONS,
             tools=_TOOLS,
             model=model_name,
-            model_settings=ModelSettings(),
+            model_settings=ModelSettings(reasoning=Reasoning(effort="none"), verbosity="low"),
         )
 
     result = Runner.run_sync(
@@ -422,6 +431,16 @@ def main() -> int:
         ),
     )
 
+    usage = getattr(getattr(result, "context_wrapper", None), "usage", None)
+    usage_payload = None
+    if usage is not None:
+        usage_payload = {
+            "requests": getattr(usage, "requests", None),
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+            "total_tokens": getattr(usage, "total_tokens", None),
+        }
+
     response = {
         "status": "COMPLETED",
         "final_output": result.final_output,
@@ -429,6 +448,8 @@ def main() -> int:
         "dataset_id": state.dataset_id,
         "shown_identifiers": state.shown_identifiers,
         "current_identifier": state.current_identifier,
+        "model": model_name if not scripted_plan else "SCRIPTED_MODEL_TEST_DOUBLE",
+        "usage": usage_payload,
     }
     sys.stdout.write(json.dumps(response))
     return 0

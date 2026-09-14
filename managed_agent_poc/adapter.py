@@ -30,6 +30,24 @@ class ManagedAgentPocUnavailableError(RuntimeError):
     """Raised when the isolated OpenAI Agents SDK install is missing."""
 
 
+class ManagedAgentPocNoApiKeyError(RuntimeError):
+    """Raised when a REAL-model turn (``test_scripted_plan`` omitted) is
+    requested but ``OPENAI_API_KEY`` is not present in the environment.
+
+    Deliberately checked and raised HERE, before the subprocess is even
+    launched -- never lets a real-model request silently attempt (and
+    fail) a network call, and never invents a workaround (no hardcoded
+    key, no silent fallback to a scripted/mocked decision)."""
+
+    def __init__(self):
+        super().__init__(
+            "OPENAI_API_KEY is not set in this environment -- refusing to "
+            "attempt a real-model managed-agent turn. Add it via Cloud "
+            "Agents \u2192 Secrets to run this live; no live evaluation "
+            "result may be claimed without it."
+        )
+
+
 @dataclass
 class ManagedAgentTurnResult:
     status: str
@@ -39,6 +57,8 @@ class ManagedAgentTurnResult:
     shown_identifiers: list = field(default_factory=list)
     current_identifier: str = ""
     error: str = ""
+    model: str = ""
+    usage: dict | None = None
 
 
 class ManagedAgentPOC:
@@ -67,6 +87,18 @@ class ManagedAgentPOC:
             return False, isolated_env.describe_unavailable()
         return True, ""
 
+    @staticmethod
+    def real_model_available() -> tuple[bool, str]:
+        """Whether a REAL (non-scripted) model turn can even be attempted.
+        Checks presence only -- never reads, logs, or returns the key
+        value itself."""
+        available, reason = ManagedAgentPOC.availability()
+        if not available:
+            return False, reason
+        if not os.environ.get("OPENAI_API_KEY"):
+            return False, "OPENAI_API_KEY is not set in this environment"
+        return True, ""
+
     def run_turn(
         self,
         *,
@@ -84,6 +116,8 @@ class ManagedAgentPOC:
             raise ManagedAgentPocDisabledError()
         if not isolated_env.is_installed():
             raise ManagedAgentPocUnavailableError(isolated_env.describe_unavailable())
+        if test_scripted_plan is None and not os.environ.get("OPENAI_API_KEY"):
+            raise ManagedAgentPocNoApiKeyError()
 
         request = {
             "text": text,
@@ -126,4 +160,6 @@ class ManagedAgentPOC:
             shown_identifiers=list(payload.get("shown_identifiers") or []),
             current_identifier=str(payload.get("current_identifier") or ""),
             error=str(payload.get("error") or ""),
+            model=str(payload.get("model") or ""),
+            usage=payload.get("usage"),
         )
