@@ -53,6 +53,28 @@ The created product is always written **inactive** (``active=False``): a
 controlled first production write must not go live on the storefront
 without a further, separate, explicit publish decision.
 
+TV product-write-contract defect closure (real products 989/990, "Телевизор
+LG 100MRGB96B6.ARUG" -- the base product was created as a SKU-parent
+("товар с предложениями") with a separate offer, splitting catalog data
+across two Bitrix elements, unlike the verified reference Aspro TV card
+which is a normal, non-variant catalog product with its own "Торговый
+каталог" tab directly on the element): ``SingleProductWriteRequest`` gains
+``has_variant_offer`` (default ``False``). This write path has never had
+any concept of genuine product variants (color/size options across
+multiple SKUs of "the same" item) -- every call is, and has always been,
+exactly ONE row -> ONE catalog entity -- so a real Bitrix offer/SKU
+(IBLOCK 15) is only ever created when a caller explicitly says this
+product genuinely has one (``has_variant_offer=True``); every existing
+caller leaves it at its default, so every current single-product write
+becomes a plain IBLOCK 14 product, matching the verified reference. See
+``integrations.bitrix.live_adapter.LiveBitrixAdapter._write_product_create_live``
+for the write-side gate and ``docs/bitrix-aspro-premier-integration.md``
+for the full evidence and unmapped-field consequences (ARTICLE/283 and
+MORE_PHOTO/280 are verified ONLY on the offers IBLOCK on this
+installation, so a simple product currently has no verified destination
+for article/SKU or gallery -- reported as unmapped, never guessed onto an
+IBLOCK 14 property).
+
 Product enrichment pipeline follow-up (``product_enrichment`` package):
 ``SingleProductWriteRequest`` also carries ``preview_picture``/
 ``detail_picture`` (each ``{"filename", "base64"}`` -- ALREADY downloaded/
@@ -101,12 +123,56 @@ STATUS_WRITE_FAILED = "WRITE_FAILED"
 STATUS_WRITE_PARTIAL_FAILURE = "WRITE_PARTIAL_FAILURE"
 STATUS_WRITE_NOT_PERFORMED = "WRITE_NOT_PERFORMED"
 
+# TV product-write-contract defect closure -- the two supported product
+# models for this single-product write path. ``PRODUCT_MODEL_SIMPLE`` is
+# the default for every request (no variant data has ever existed on this
+# path); ``PRODUCT_MODEL_SKU_OFFER`` only applies when a caller explicitly
+# sets ``SingleProductWriteRequest.has_variant_offer=True``.
+PRODUCT_MODEL_SIMPLE = "SIMPLE_PRODUCT"
+PRODUCT_MODEL_SKU_OFFER = "SKU_WITH_OFFER"
+
+_PRODUCT_MODEL_REASON_SIMPLE = (
+    "no_variant_dimensions_supplied_on_this_write_request -- this single-"
+    "product write path has never carried real variant/offer data (color/"
+    "size options across multiple SKUs of the SAME item); real Bitrix "
+    "admin evidence (a verified non-variant reference product shows its "
+    "own \"Торговый каталог\" tab with catalog/price fields directly on "
+    "the element, never a \"Предложения\" (offers) tab) confirms a "
+    "non-variant catalog item must be written as a plain IBLOCK 14 "
+    "product, never a SKU-parent + offer"
+)
+_PRODUCT_MODEL_REASON_SKU_OFFER = (
+    "has_variant_offer=True was explicitly supplied on this write request "
+    "(genuine variant dimensions requiring the offers/SKU mechanism, "
+    "IBLOCK 15)"
+)
+
 # Reasons reported to the user for fields that are sourced from the file but
 # have no verified write destination on this production installation --
 # never a guessed/invented Bitrix property id.
 _NO_EAN_DESTINATION = (
     "no_verified_bitrix_property_for_ean_on_this_installation "
     "(neither IBLOCK 14 nor 15's known real properties include one)"
+)
+# TV product-write-contract defect closure: ARTICLE (283) and MORE_PHOTO
+# (280) are verified ONLY on the OFFERS iblock (15) on this installation
+# (integrations.bitrix.schema.OFFER_PROPERTIES) -- there is still no
+# verified IBLOCK 14 (base product) destination for either. Now that a
+# non-variant write defaults to the SIMPLE product model (no offer ever
+# created -- see PRODUCT_MODEL_SIMPLE above), these two fields correctly
+# fall to sourced-but-unwritten rather than ever being guessed onto an
+# unverified IBLOCK 14 property. A further LIVE READ-ONLY discovery pass
+# would be required to confirm a genuine base-product destination for
+# either; until then this is reported honestly as unmapped.
+_NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT = (
+    "no_verified_bitrix_property_for_article/sku_on_a_simple_iblock_14_"
+    "product (ARTICLE/property283 is verified only on the OFFERS iblock "
+    "(15), which this write is not creating -- has_variant_offer=False)"
+)
+_NO_GALLERY_DESTINATION_SIMPLE_PRODUCT = (
+    "no_verified_bitrix_property_for_gallery_on_a_simple_iblock_14_product "
+    "(MORE_PHOTO/property280 is verified only on the OFFERS iblock (15), "
+    "which this write is not creating -- has_variant_offer=False)"
 )
 # Purchase price DOES have a verified native Bitrix destination
 # (purchasingPrice/purchasingCurrency -- see integrations.bitrix.schema's
@@ -294,6 +360,16 @@ class SingleProductWriteRequest:
     # ``integrations.bitrix.schema.OFFER_PROPERTIES``); an empty tuple
     # means "no gallery images supplied", never a guessed one.
     gallery_pictures: Sequence[Mapping[str, str]] = field(default_factory=tuple)
+    # TV product-write-contract defect closure (real products 989/990):
+    # ``False`` (the default for every existing caller -- this write path
+    # has never had a concept of genuine product variants) means a plain
+    # IBLOCK 14 product is created, matching the verified reference Aspro
+    # TV card. Only set ``True`` when the caller genuinely has distinct
+    # variant dimensions (color/size options across multiple SKUs of the
+    # SAME item) requiring Bitrix's offers/SKU mechanism (IBLOCK 15) --
+    # never inferred from the mere presence of a ``sku``/article value,
+    # which every product (variant or not) always has.
+    has_variant_offer: bool = False
 
 
 def _first_column_value(row: dict, columns, role: str) -> str:
@@ -551,6 +627,14 @@ def _canonical_payload(
         "sku": request.sku,
         "price": {"currency": request.currency, "selling_price": retail_amount},
     }
+    if request.has_variant_offer:
+        # TV product-write-contract defect closure -- only ever included
+        # when explicitly True; the LIVE adapter's offer-creation gate
+        # (``bool(product_in.get("has_variant_offer"))``) already treats an
+        # absent key as False, so this key is omitted entirely for the
+        # (default, and currently only real) simple-product case rather
+        # than adding a new always-present key to every payload.
+        canonical["has_variant_offer"] = True
     if request.brand:
         # Property 100 / code BRAND is the verified, PANDA_MANAGED binding
         # for brand on this installation (integrations.bitrix.schema) --
@@ -760,6 +844,28 @@ def prepare_single_product_write(
         }
     assert action == SYNC_CREATE
 
+    # TV product-write-contract defect closure (real products 989/990):
+    # this write path has never carried genuine variant data, so it always
+    # resolves to the SIMPLE product model unless a caller explicitly
+    # opted into ``has_variant_offer`` -- see PRODUCT_MODEL_SIMPLE above.
+    product_model = PRODUCT_MODEL_SKU_OFFER if request.has_variant_offer else PRODUCT_MODEL_SIMPLE
+    product_model_reason = (
+        _PRODUCT_MODEL_REASON_SKU_OFFER if request.has_variant_offer else _PRODUCT_MODEL_REASON_SIMPLE
+    )
+    # Article/SKU has a verified destination on the FIXTURE store's own
+    # (offer-free) product object regardless of this flag (unaffected by
+    # this defect closure); on the LIVE bridge it is verified ONLY on the
+    # offers IBLOCK (15) -- see _NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT --
+    # so it only has a real destination there when an offer is actually
+    # being created.
+    article_has_destination = bridge.environment != ENV_LIVE or request.has_variant_offer
+    # Gallery (MORE_PHOTO/280) is verified ONLY on the offers IBLOCK too --
+    # same LIVE-only, offer-only gate as article/SKU above (module
+    # docstring item F2 in integrations.bitrix.schema).
+    gallery_has_destination = (
+        bridge.environment == ENV_LIVE and request.has_variant_offer and bool(media_fields.get("gallery_pictures"))
+    )
+
     category_display = request.subcategory or request.category_source
     not_written = [
         {"field": "ean", "value": request.ean, "reason": _NO_EAN_DESTINATION}
@@ -771,12 +877,19 @@ def prepare_single_product_write(
         {"field": "category", "value": category_display, "reason": _CATEGORY_ENV_UNSUPPORTED}
         if category_display and not category_has_destination
         else None,
+        {"field": "sku", "value": request.sku, "reason": _NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT}
+        if request.sku and not article_has_destination
+        else None,
         {
             "field": "gallery_pictures",
             "value": f"{len(request.gallery_pictures or ())} image(s)",
-            "reason": _GALLERY_ENV_UNSUPPORTED,
+            "reason": (
+                _NO_GALLERY_DESTINATION_SIMPLE_PRODUCT
+                if (bridge.environment == ENV_LIVE and not request.has_variant_offer)
+                else _GALLERY_ENV_UNSUPPORTED
+            ),
         }
-        if request.gallery_pictures and not (bridge.environment == ENV_LIVE and media_fields.get("gallery_pictures"))
+        if request.gallery_pictures and not gallery_has_destination
         else None,
     ]
     for key in unmapped_characteristics:
@@ -785,7 +898,9 @@ def prepare_single_product_write(
         )
     not_written = [item for item in not_written if item]
 
-    will_write = ["name", "article/sku", "retail_selling_price"]
+    will_write = ["name", "retail_selling_price"]
+    if article_has_destination:
+        will_write.insert(1, "article/sku")
     if request.brand:
         will_write.append("brand (property 100 / BRAND, verified PANDA_MANAGED)")
     if purchase_price_has_destination:
@@ -806,10 +921,9 @@ def prepare_single_product_write(
             f"media ({', '.join(main_media_keys)}, native previewPicture/detailPicture fileData fields, uploaded bytes -- never a hotlink)"
         )
     gallery_pictures = media_fields.get("gallery_pictures") or []
-    gallery_has_destination = bridge.environment == ENV_LIVE and bool(gallery_pictures)
     if gallery_has_destination:
         will_write.append(
-            f"gallery ({len(gallery_pictures)} image(s), offer property 280 / MORE_PHOTO, verified -- LIVE only, uploaded bytes -- never a hotlink)"
+            f"gallery ({len(gallery_pictures)} image(s), offer property 280 / MORE_PHOTO, verified -- LIVE only, requires has_variant_offer=True, uploaded bytes -- never a hotlink)"
         )
     written_characteristics = [k for k in request.characteristics if k not in unmapped_characteristics]
     if written_characteristics and characteristics_have_destination:
@@ -819,6 +933,11 @@ def prepare_single_product_write(
         "status": STATUS_REQUIRES_APPROVAL,
         "plan_action": SYNC_CREATE,
         "max_products": 1,
+        "product_model": {
+            "model": product_model,
+            "has_variant_offer": request.has_variant_offer,
+            "reason": product_model_reason,
+        },
         "target_product": {
             "title": title,
             "sku": sku,
@@ -916,6 +1035,7 @@ def execute_single_product_write(
             "bitrix_product_id": bitrix_id,
             "name": preview["target_product"]["title"],
             "sku": request.sku,
+            "product_model": preview.get("product_model"),
             "failed_step": write_result.get("failed_step"),
             "error": write_result.get("error"),
             "purchase_price_written": bool(created_product.get("purchase_price_written")),
@@ -945,6 +1065,7 @@ def execute_single_product_write(
         "bitrix_product_id": bitrix_id,
         "name": preview["target_product"]["title"],
         "sku": request.sku,
+        "product_model": preview.get("product_model"),
         "ean_source": request.ean or None,
         "brand": request.brand or None,
         "category_source": request.category_source or None,
@@ -1013,6 +1134,11 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
             f"Артикул/SKU: {result.get('sku')}",
             f"Розничная цена: {retail.get('amount')} {retail.get('currency')}",
         ]
+        product_model = result.get("product_model") or {}
+        if product_model.get("model") == PRODUCT_MODEL_SKU_OFFER:
+            lines.append("Модель товара: товар с торговым предложением (SKU/offer)")
+        elif product_model.get("model") == PRODUCT_MODEL_SIMPLE:
+            lines.append("Модель товара: обычный товар (без торговых предложений)")
         if result.get("brand"):
             lines.append(f"Бренд: {result.get('brand')}")
         if result.get("purchase_price_written"):

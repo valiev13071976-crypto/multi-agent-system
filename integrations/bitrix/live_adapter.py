@@ -18,8 +18,7 @@ from integrations.bitrix.errors import BitrixValidationError
 from integrations.bitrix.fixture_adapter import BitrixFixtureAdapter
 
 # First controlled production Bitrix product write: the base product name,
-# BRAND (property 100, verified PANDA_MANAGED on IBLOCK 14), the offer/SKU
-# article (property 283, verified PANDA_MANAGED on IBLOCK 15), the retail
+# BRAND (property 100, verified PANDA_MANAGED on IBLOCK 14), the retail
 # selling price, and (Block 5.6 follow-up defect closure) the native
 # purchasingPrice/purchasingCurrency product fields all have a verified
 # real write destination on this installation -- see
@@ -27,12 +26,24 @@ from integrations.bitrix.fixture_adapter import BitrixFixtureAdapter
 # table (the source of truth this module reuses, rather than re-deriving/
 # guessing its own property ids). EAN/GTIN and category still have no
 # verified destination and remain unwritten.
+#
+# TV product-write-contract defect closure (real products 989/990): the
+# offer/SKU article (property 283) and gallery (property 280 / MORE_PHOTO)
+# are verified PANDA_MANAGED properties on IBLOCK 15 (offers), but an
+# offer/SKU is now only ever created -- and these two only ever written --
+# when ``has_variant_offer=True`` (see ``_write_product_create_live``
+# below). The DEFAULT, non-variant product model never creates an offer,
+# matching the verified reference Aspro TV card (a plain catalog product,
+# never a SKU-parent + offer), and leaves article/SKU and gallery
+# correctly unmapped rather than guessed onto an unverified IBLOCK 14
+# property.
 _BRAND_PROPERTY = schema.catalog_property(code="BRAND")
 _ARTICLE_PROPERTY = schema.offer_property(code="ARTICLE")
 # Gallery follow-up defect closure ("Gallery/photogallery fields visible
 # in Aspro are empty even though Panda prepared gallery images"):
 # MORE_PHOTO (offer property 280, IBLOCK 15 -- schema.OFFER_PROPERTIES)
-# is the verified PANDA_MANAGED gallery destination; its multi-value FILE
+# is the verified PANDA_MANAGED gallery destination (for a genuine
+# variant/offer product only -- see above); its multi-value FILE
 # property WRITE shape (an array of ``{"value": {"fileData": [name,
 # base64]}}`` entries) is Bitrix's own documented ``catalog.*`` REST
 # contract for multiple file-type properties -- the SAME method family
@@ -434,11 +445,26 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
     ) -> dict:
         """Real, minimal LIVE create for exactly the fields this
         installation's schema binding has verified a destination for:
-        name, BRAND (property 100), article/SKU (offer property 283), the
-        retail selling price, and (Block 5.6 follow-up defect closure) the
-        native ``purchasingPrice``/``purchasingCurrency`` product fields.
-        EAN/category are never written here -- ``controlled_bitrix_write``
-        already never includes them in the canonical payload this reads.
+        name, BRAND (property 100), the retail selling price, and (Block
+        5.6 follow-up defect closure) the native ``purchasingPrice``/
+        ``purchasingCurrency`` product fields. EAN/category are never
+        written here -- ``controlled_bitrix_write`` already never includes
+        them in the canonical payload this reads.
+
+        TV product-write-contract defect closure: article/SKU (offer
+        property 283) and gallery (offer property 280 / MORE_PHOTO) are
+        verified ONLY on the offers IBLOCK (15) -- they are only actually
+        written when ``has_variant_offer`` is True, which also gates
+        whether an offer/SKU (IBLOCK 15) is created at all. A plain,
+        non-variant product (the default -- see
+        ``business_assistant.controlled_bitrix_write.
+        SingleProductWriteRequest.has_variant_offer``) never creates an
+        offer, matching the verified reference Aspro TV card's structure,
+        and correctly leaves article/SKU and gallery unmapped rather than
+        guessed onto an unverified IBLOCK 14 property (see
+        ``business_assistant.controlled_bitrix_write``'s
+        ``_NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT``/
+        ``_NO_GALLERY_DESTINATION_SIMPLE_PRODUCT``).
 
         Idempotency/duplicate-protection design note: a FRESH
         ``LiveBitrixAdapter`` is constructed on every
@@ -465,6 +491,17 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         active = bool(payload.get("active", False))
         brand = str((product_in.get("properties") or {}).get("brand") or "").strip()
         sku = str(product_in.get("sku") or product_in.get("article") or "").strip()
+        # TV product-write-contract defect closure (real products 989/990,
+        # "Телевизор LG 100MRGB96B6.ARUG" -- created as a SKU-parent with a
+        # separate offer, unlike the verified reference Aspro TV card,
+        # which is a plain, non-variant catalog product): a real Bitrix
+        # offer/SKU (IBLOCK 15) is only ever created when the caller
+        # explicitly says this product genuinely has one -- never merely
+        # because ``sku``/article has a value (every product, variant or
+        # not, always has one). See
+        # ``business_assistant.controlled_bitrix_write.
+        # SingleProductWriteRequest.has_variant_offer``.
+        has_variant_offer = bool(product_in.get("has_variant_offer"))
         price_field = product_in.get("price") or {}
         retail_amount = (
             str(price_field.get("selling_price") or "").strip() if isinstance(price_field, dict) else ""
@@ -563,7 +600,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         # existing offer never re-sends fields, exactly like article_written
         # only being set once the offer step is reached without error).
         gallery_written = 0
-        if sku:
+        if sku and has_variant_offer:
             try:
                 existing_offer = self._find_offer_by_parent(product_id, credential_ref=credential_ref)
                 if existing_offer is None:
