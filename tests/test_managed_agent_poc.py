@@ -372,10 +372,19 @@ class ManagedAgentOrchestrationTests(_EnabledFlagMixin, unittest.TestCase):
 
 
 class ProductionIsolationTests(unittest.TestCase):
-    """Confirms this POC never touches, imports, or is imported by any
-    existing production module -- the "beside the architecture, not
-    inside it" requirement, checked mechanically rather than by
-    inspection alone."""
+    """Confirms this POC touches production through exactly ONE sanctioned
+    adapter/boundary file -- the PR #74 integration block explicitly wires
+    ``business_assistant/conversation_gateway.py`` to
+    ``managed_agent_poc/panda_bridge.py`` (behind ``PANDA_MANAGED_AGENT_
+    ENABLED``, default false) -- and that every OTHER existing production
+    module, and ``main.py`` itself, remains completely decoupled: still
+    "beside the architecture, not inside it", except for that one deliberate
+    seam."""
+
+    # The ONE sanctioned coupling point this integration block adds. Any
+    # OTHER production file referencing managed_agent_poc would mean the
+    # "one narrow adapter/boundary" requirement was violated.
+    _SANCTIONED_ADAPTER_RELPATH = os.path.join("business_assistant", "conversation_gateway.py")
 
     def test_main_py_does_not_reference_managed_agent_poc(self):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -383,7 +392,7 @@ class ProductionIsolationTests(unittest.TestCase):
             source = fh.read()
         self.assertNotIn("managed_agent_poc", source)
 
-    def test_no_production_module_imports_managed_agent_poc(self):
+    def test_exactly_one_production_module_references_managed_agent_poc(self):
         repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
         production_dirs = (
             "business_assistant",
@@ -394,6 +403,7 @@ class ProductionIsolationTests(unittest.TestCase):
             "artifacts",
         )
         pattern = re.compile(r"\bmanaged_agent_poc\b")
+        referencing_files: list[str] = []
         for dirname in production_dirs:
             directory = os.path.join(repo_root, dirname)
             if not os.path.isdir(directory):
@@ -402,11 +412,35 @@ class ProductionIsolationTests(unittest.TestCase):
                 for fname in files:
                     if not fname.endswith(".py"):
                         continue
-                    with open(os.path.join(root, fname), encoding="utf-8") as fh:
+                    path = os.path.join(root, fname)
+                    with open(path, encoding="utf-8") as fh:
                         content = fh.read()
-                    self.assertNotRegex(
-                        content, pattern, f"{os.path.join(root, fname)} must not reference managed_agent_poc"
-                    )
+                    if pattern.search(content):
+                        referencing_files.append(os.path.relpath(path, repo_root))
+        self.assertEqual(
+            referencing_files,
+            [self._SANCTIONED_ADAPTER_RELPATH],
+            "exactly one production file -- the sanctioned integration boundary -- may "
+            f"reference managed_agent_poc; found: {referencing_files}",
+        )
+
+    def test_sanctioned_adapter_only_imports_panda_bridge_not_the_poc_internals(self):
+        """The gateway must couple to ONE narrow module
+        (``managed_agent_poc.panda_bridge``), never reach past it into the
+        POC's own internals (``runtime_subprocess``, ``adapter``,
+        ``state_store``, ...) directly."""
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        path = os.path.join(repo_root, self._SANCTIONED_ADAPTER_RELPATH)
+        with open(path, encoding="utf-8") as fh:
+            content = fh.read()
+        self.assertIn("managed_agent_poc.panda_bridge", content)
+        for forbidden in (
+            "managed_agent_poc.adapter",
+            "managed_agent_poc.runtime_subprocess",
+            "managed_agent_poc.state_store",
+            "managed_agent_poc.isolated_env",
+        ):
+            self.assertNotIn(forbidden, content, f"{path} must reach the POC only through panda_bridge, not {forbidden}")
 
     def test_agents_package_still_resolves_to_pandas_own_package(self):
         # This process (normal Panda test process) must resolve `agents`
