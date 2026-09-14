@@ -281,6 +281,16 @@ def _request(**overrides) -> SingleProductWriteRequest:
         # category/section pass it explicitly.
         brand=TARGET_BRAND,
         purchase_price=TARGET_PURCHASE_PRICE,
+        # TV product-write-contract defect closure: every test in this
+        # file was written against, and specifically verifies, the
+        # offer/SKU (IBLOCK 15) write mechanics -- ``has_variant_offer``
+        # now defaults to False on ``SingleProductWriteRequest`` itself
+        # (real products 989/990 defect closure -- a non-variant product
+        # must never get an offer), so this file's own default must
+        # explicitly opt back in to keep exercising that mechanism. See
+        # ``tests/test_bitrix_tv_simple_product_contract.py`` for the
+        # NEW default (no offer) behavior this change introduces.
+        has_variant_offer=True,
     )
     base.update(overrides)
     return SingleProductWriteRequest(**base)

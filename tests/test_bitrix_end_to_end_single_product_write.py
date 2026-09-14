@@ -329,7 +329,16 @@ class OneProductEndToEndGovernedWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.get("mutated"))
         self.assertEqual(result.get("bitrix_product_id"), str(CREATED_PRODUCT_ID))
         self.assertEqual(transport.count("catalog.product.add"), 1)
-        self.assertEqual(transport.count("catalog.product.offer.add"), 1)
+        # TV product-write-contract defect closure (real products 989/990):
+        # this real production flow (XLSX row -> enrichment -> confirmation)
+        # has never carried genuine variant/offer data, so it correctly
+        # resolves to the SIMPLE product model (no offer/SKU element,
+        # IBLOCK 15, is ever created) -- matching the verified reference
+        # Aspro TV card, never a SKU-parent + offer.
+        product_model = result.get("product_model") or {}
+        self.assertEqual(product_model.get("model"), "SIMPLE_PRODUCT")
+        self.assertFalse(product_model.get("has_variant_offer"))
+        self.assertEqual(transport.count("catalog.product.offer.add"), 0)
         self.assertEqual(transport.count("catalog.price.add"), 1)
         # No enrichment/search re-run on the confirmation turn.
         self.assertEqual(len(search_provider.queries), searches_after_card)
@@ -365,11 +374,15 @@ class OneProductEndToEndGovernedWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(schema.PICTURE_FILE_DATA_KEY, preview_picture)
         self.assertNotIn(MAIN_IMAGE_URL, str(preview_picture))
         self.assertIn(schema.DETAIL_PICTURE_FIELD, product_fields)
-        # offer/SKU -> verified offer property, linked to the base product
-        offer_fields = transport.payload_for("catalog.product.offer.add")
-        self.assertEqual(offer_fields["parentId"], CREATED_PRODUCT_ID)
-        article_binding = next(b for b in schema.OFFER_PROPERTIES if b.code == "ARTICLE")
-        self.assertEqual(offer_fields[article_binding.select_key], TARGET_SKU)
+        # TV product-write-contract defect closure: article/SKU (property
+        # 283) and gallery (property 280/MORE_PHOTO) are verified ONLY on
+        # the offers IBLOCK (15), which this SIMPLE-product write never
+        # creates -- no offer call is ever made, and neither field is ever
+        # guessed onto an unverified IBLOCK 14 property.
+        self.assertEqual(transport.payload_for("catalog.product.offer.add"), {})
+        not_written_fields_early = {item.get("field") for item in result.get("not_written") or []}
+        self.assertIn("sku", not_written_fields_early)
+        self.assertEqual(result.get("gallery_written"), 0)
         # retail price -> its own installation-specific price type
         price_fields = transport.payload_for("catalog.price.add")
         self.assertEqual(price_fields["price"], USER_RETAIL_PRICE_RUB)
