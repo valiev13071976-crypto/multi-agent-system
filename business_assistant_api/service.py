@@ -450,6 +450,15 @@ class BusinessAssistantApiService:
                 # workflow engine unchanged -- only non-batch attachments
                 # get the new attachment->conversational preference.
                 attachments_prefer_conversational=(rec.workload_class != WORKLOAD_BATCH),
+                # Production defect closure (generic product-workflow
+                # conversation continuity): let intent classification
+                # consult whether a product/XLSX task is already active
+                # for THIS conversation (see BusinessAssistantService.
+                # submit_request / WorkflowPandaConversationGateway.
+                # has_active_product_context) so a follow-up turn with no
+                # attachment of its own still reaches the conversational
+                # pipeline that holds that task's state.
+                conversation_id=norm.conversation_id,
             )
             rec.ba_request_id = ba_req.request_id
 
@@ -535,6 +544,12 @@ class BusinessAssistantApiService:
                 # workflow engine unchanged -- only non-batch attachments
                 # get the new attachment->conversational preference.
                 attachments_prefer_conversational=(rec.workload_class != WORKLOAD_BATCH),
+                # Production defect closure (generic product-workflow
+                # conversation continuity): see the identical comment in
+                # ``submit()`` above -- ``submit_async`` must forward the
+                # SAME conversation identity so the async path behaves
+                # identically.
+                conversation_id=norm.conversation_id,
             )
             rec.ba_request_id = ba_req.request_id
 

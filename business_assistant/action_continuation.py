@@ -1816,6 +1816,38 @@ def resolve_action_turn(
             request_id=request_id,
         )
 
+    # Production defect closure (generic product-workflow conversation
+    # continuity): ``is_bitrix_write_plan_question`` above only fires when
+    # the SAME turn also names "Bitrix"/"Aspro" -- a later "Покажи
+    # окончательный план записи." follow-up on an ALREADY active, already-
+    # selected product task never repeats that word (the whole
+    # conversation is already unambiguously about the ONE governed Bitrix
+    # write this task tracks), so it fell through to the generic
+    # continuation heuristics below and, once mis-detected as an unrelated
+    # new task, degraded into the legacy business workflow's generic
+    # summary instead of re-showing the write plan. Reuses the EXACT SAME
+    # write-plan-ask shape (``_is_write_plan_ask``/``_WRITE_PLAN_RE``)
+    # ``is_bitrix_write_plan_question`` already tests -- only the
+    # additional Bitrix/Aspro target-mention requirement is waived, and
+    # only when an active FAMILY_EXCEL task already carries a resolved
+    # product (``bitrix_product_fields``), i.e. never for a brand-new
+    # conversation with no established product context at all.
+    if (
+        active is not None
+        and active.family == FAMILY_EXCEL
+        and not has_spreadsheet_attachment
+        and dict(active.parameters.get("bitrix_product_fields") or {}).get("sku")
+        and not is_explicit_bitrix_write_confirmation(current)
+        and not is_explicit_product_enrichment_request(current)
+        and _is_write_plan_ask(current)
+    ):
+        return resolve_bitrix_write_plan_question(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
+
     if follow_up is not None and follow_up.kind in {KIND_TRANSFORM, KIND_REFERENT}:
         resolved_family = (
             detect_family(current, active, has_spreadsheet_attachment=has_spreadsheet_attachment)
@@ -2292,6 +2324,17 @@ def resolve_action_turn(
         args: dict[str, Any] = {"text": effective_text}
         if has_dataset:
             args["dataset_id"] = inherited_dataset_id
+            # Production defect closure (generic product-workflow
+            # conversation continuity): forward the currently selected
+            # product's row identity so ``execute_nl_request`` can resolve
+            # "another/previous/refine the current product" navigation
+            # against the SAME dataset (see ``data_intel.service``'s
+            # ``_next_distinct_row_hit``/``_row_hit_by_source_row``) --
+            # never included for a brand-new dataset (a fresh attachment
+            # always starts a clean selection).
+            row_selection = dict(task.parameters.get("bitrix_row_selection") or {})
+            if row_selection:
+                args["current_selection"] = row_selection
 
         cap_status = inspect_capability(gateway, contract.tool_id)
         if cap_status != CAPABILITY_AVAILABLE_AND_AUTHORIZED:

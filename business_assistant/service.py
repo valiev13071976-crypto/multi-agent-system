@@ -181,6 +181,17 @@ class BusinessAssistantService:
         budget_limit: Decimal | None = None,
         source_is_untrusted: bool = False,
         attachments_prefer_conversational: bool = True,
+        # Production defect closure (generic product-workflow conversation
+        # continuity): the SAME conversation identity ``respond_
+        # conversationally``/``respond_conversationally_async`` already use
+        # to resolve the active FAMILY_EXCEL task, made available here too
+        # so intent classification can consult whether a product/XLSX task
+        # is ALREADY active for it (see ``WorkflowPandaConversationGateway.
+        # has_active_product_context``) instead of relying solely on this
+        # turn's own attachment presence/wording. Defaults to "" so every
+        # existing caller that never passes it keeps the exact prior
+        # behavior.
+        conversation_id: str = "",
     ) -> BusinessRequest:
         tenant = require_tenant_id(tenant_id)
         # Injection in untrusted external content must not escalate
@@ -200,8 +211,18 @@ class BusinessAssistantService:
         # LLM/conversational path) -- see WORKLOAD_BATCH routing. Defaults to
         # True so every other existing caller (tests, direct
         # BusinessAssistantService use) keeps the new, correct behavior.
+        has_active_product_task = False
+        if conversation_id and self.conversation_gateway is not None:
+            try:
+                has_active_product_task = self.conversation_gateway.has_active_product_context(
+                    tenant_id=tenant, owner_id=user_id, conversation_id=conversation_id
+                )
+            except Exception:
+                has_active_product_task = False
         intent = classify_intent(
-            text, has_attachments=bool(artifact_refs) and attachments_prefer_conversational
+            text,
+            has_attachments=bool(artifact_refs) and attachments_prefer_conversational,
+            has_active_product_task=has_active_product_task,
         )
         constraints = extract_constraints(text)
         if read_only:

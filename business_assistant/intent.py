@@ -149,7 +149,9 @@ def requires_business_integration(text: str) -> bool:
     return False
 
 
-def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
+def is_conversational(
+    text: str, *, has_attachments: bool = False, has_active_product_task: bool = False
+) -> bool:
     """General knowledge / reasoning / chat — not business data/action integration."""
     raw = (text or "").strip()
     if not raw:
@@ -189,6 +191,27 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     # requires_business_integration below) still overrides this and stays
     # on the governed business-workflow path unchanged.
     if has_attachments and not any(
+        w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all")
+    ):
+        return True
+
+    # Production defect closure (generic product-workflow conversation
+    # continuity -- root cause of the "Задача выполнена..." misroute on a
+    # follow-up with NO attachment): each of the narrower is_explicit_*
+    # exceptions below was independently working around the SAME gap --
+    # once a product/XLSX task is already active for this conversation
+    # (established on an earlier turn -- see WorkflowPandaConversationGateway
+    # .has_active_product_context, the ONLY place that inspects the shared
+    # ActiveTaskStore), the wording of a LATER follow-up turn must never by
+    # itself decide whether Panda can continue that SAME task -- only the
+    # caller-supplied state of the conversation does. Mirrors the
+    # attachment-presence check immediately above it exactly (same explicit
+    # immediate-write/publish-verb exception, so this can never itself
+    # imply write approval): the difference is durable conversation state
+    # instead of this turn's own attachment. Generalizes over EVERY future
+    # follow-up phrasing at once instead of requiring a new hand-written
+    # escape hatch per sentence.
+    if has_active_product_task and not any(
         w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all")
     ):
         return True
@@ -278,8 +301,12 @@ def is_conversational(text: str, *, has_attachments: bool = False) -> bool:
     return False
 
 
-def classify_intent(text: str, *, has_attachments: bool = False) -> str:
-    if is_conversational(text, has_attachments=has_attachments):
+def classify_intent(
+    text: str, *, has_attachments: bool = False, has_active_product_task: bool = False
+) -> str:
+    if is_conversational(
+        text, has_attachments=has_attachments, has_active_product_task=has_active_product_task
+    ):
         return INTENT_CONVERSATIONAL
     t = (text or "").casefold()
     if any(w in t for w in ("только анализ", "только проанализируй", "analyze only", "read only", "ничего не меняй")):

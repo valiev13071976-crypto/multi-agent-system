@@ -203,7 +203,12 @@ class DataIntelToolAdapter:
         if not dataset_id:
             raise ToolArgumentInvalidError()
 
-        result = self._svc.execute_nl_request(dataset_id, text, tenant_id=tenant)
+        result = self._svc.execute_nl_request(
+            dataset_id,
+            text,
+            tenant_id=tenant,
+            current_selection=args.get("current_selection"),
+        )
         if result.get("status") == "OK" and result.get("wants_workbook"):
             reg = self._svc.register_generated_workbook(
                 result["dataset_id"],
