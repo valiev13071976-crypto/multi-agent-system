@@ -83,6 +83,7 @@ def wire_panda_conversation_gateway(
     tool_gateway=None,
     artifact_service=None,
     bitrix_product_bridge=None,
+    action_store=None,
 ) -> bool:
     """Attach Panda conversational gateway; return False when engine unavailable."""
     log = logger or logging.getLogger(__name__)
@@ -114,5 +115,16 @@ def wire_panda_conversation_gateway(
         tool_gateway=gateway,
         artifact_service=artifact_service,
         bitrix_product_bridge=bridge,
+        # Production regression closure (request-scoped/process-lifetime
+        # active-task loss): pass the caller's durable store when one is
+        # supplied (main.py wires a SqliteActiveTaskStore backed by the
+        # same "shared SQLite, survives restart/redeploy" pattern already
+        # used for FinOps budget/provider-governor state) so this
+        # conversation's active product/XLSX task keeps existing across a
+        # process restart the same way its dataset, artifacts, and
+        # conversation history already do. None (every existing caller,
+        # e.g. tests that construct their own ActiveTaskStore/mock)
+        # preserves the exact prior default (in-memory ActiveTaskStore).
+        action_store=action_store,
     )
     return True
