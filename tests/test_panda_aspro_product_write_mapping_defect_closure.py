@@ -47,6 +47,26 @@ report does not have to take it on faith):
     the base product's "Артикул" field staying empty is the CORRECT
     structural model (schema.py: "Do not blindly move a value merely
     because a field exists"), not a defect to invent a fix for.
+
+TV product-write-contract defect closure follow-up (real products 989/990
+themselves -- this file's own ``TARGET_TITLE``/``TARGET_SKU`` constants ARE
+that exact real product): the base product THIS FILE models was, until
+this closure, always created as a SKU-parent + offer purely because a
+``sku`` value was supplied -- never because the product genuinely had
+variant dimensions. ``BaseProductVsOfferSeparationTests`` and
+``MediaAndGalleryMappingTests`` below now assert the CORRECTED default
+(``has_variant_offer`` defaults to ``False`` on every
+``SingleProductWriteRequest`` -- see ``business_assistant
+.controlled_bitrix_write``): this exact product is written as a plain,
+non-variant IBLOCK 14 product, matching the verified reference Aspro TV
+card ("Телевизор Folket HF-42", a normal catalog product with its own
+"Торговый каталог" tab, never a "Предложения" tab); article/SKU and
+gallery correctly fall to sourced-but-unwritten (verified only on IBLOCK
+15) rather than ever being guessed onto an unverified IBLOCK 14 property.
+A second test in each class explicitly opts into ``has_variant_offer=True``
+to prove the pre-existing offer/SKU + gallery mechanism still works
+byte-for-byte, unchanged, for a caller that genuinely has one.
+
   - Characteristics: only 5 canonical keys
     (screen_diagonal_cm/screen_resolution/operating_system/
     smart_tv_support/color) have a verified Bitrix property destination
@@ -204,27 +224,70 @@ class PriceDisplayDefectClosureTests(unittest.TestCase):
 
 
 class BaseProductVsOfferSeparationTests(unittest.TestCase):
-    """Item 1/2 of the report: proves EXACTLY which fields land on the
-    base product vs. the offer/SKU, per the installed schema -- never
-    guessed, never blindly duplicated onto both."""
+    """Item 1/2 of the report, PLUS the TV product-write-contract defect
+    closure itself: this exact product (real products 989/990, "Телевизор
+    LG 100MRGB96B6.ARUG") has no genuine variant/offer dimensions, so with
+    ``has_variant_offer`` defaulting to False, it must be written as a
+    plain, non-variant IBLOCK 14 product -- never a SKU-parent + offer --
+    matching the verified reference Aspro TV card. Article/SKU (property
+    283) and gallery are verified ONLY on IBLOCK 15 (offers), so they
+    correctly have no destination for this default, non-variant model and
+    must be reported sourced-but-unwritten, never guessed onto an
+    unverified IBLOCK 14 property. A second test proves the pre-existing
+    offer/SKU mechanism is untouched -- it still works exactly as before
+    for a caller that explicitly supplies ``has_variant_offer=True``
+    (a genuinely distinct variant dimension), never removed, only gated."""
 
-    def test_article_sku_only_on_offer_never_on_base_product(self):
+    def test_default_non_variant_tv_creates_no_offer_and_leaves_article_unmapped(self):
         result, transport = _execute(_control_product_request())
         self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertEqual(result["product_model"]["model"], "SIMPLE_PRODUCT")
+        self.assertFalse(result["product_model"]["has_variant_offer"])
+
+        product_calls = [b for m, b in transport.calls if m == "catalog.product.add"]
+        offer_calls = [b for m, b in transport.calls if m == "catalog.product.offer.add"]
+        self.assertEqual(len(product_calls), 1)
+        # No offer/SKU (IBLOCK 15) element is ever created for this
+        # default, non-variant product -- the root-cause fix itself.
+        self.assertEqual(offer_calls, [])
+
+        # ARTICLE (property 283) is verified ONLY on IBLOCK 15 (offers),
+        # which this write never creates -- must never be guessed onto
+        # ANY base-product property, and must be reported unwritten.
+        article_property = schema.offer_property(code="ARTICLE")
+        self.assertNotIn(article_property.select_key, product_calls[0]["fields"])
+        # Not merely "absent under the ARTICLE property key" -- absent
+        # from ANY property-shaped key on the base product (the title
+        # itself legitimately contains the SKU substring, so this checks
+        # every propertyN field specifically rather than the whole
+        # serialized payload).
+        for key, value in product_calls[0]["fields"].items():
+            if key.startswith("property"):
+                self.assertNotEqual(str(value), TARGET_SKU)
+        unwritten_fields = {item["field"] for item in result["not_written"]}
+        self.assertIn("sku", unwritten_fields)
+
+        # BRAND (property 100) is verified on IBLOCK 14 (base product)
+        # regardless of the product model -- unaffected by this closure.
+        brand_property = schema.catalog_property(code="BRAND")
+        self.assertEqual(product_calls[0]["fields"][brand_property.select_key], TARGET_BRAND)
+
+    def test_explicit_variant_offer_still_creates_offer_with_article_only_there(self):
+        """The pre-existing offer/SKU mechanism, unchanged, for a caller
+        that genuinely has a variant dimension."""
+        result, transport = _execute(_control_product_request(has_variant_offer=True))
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertEqual(result["product_model"]["model"], "SKU_WITH_OFFER")
 
         product_calls = [b for m, b in transport.calls if m == "catalog.product.add"]
         offer_calls = [b for m, b in transport.calls if m == "catalog.product.offer.add"]
         self.assertEqual(len(product_calls), 1)
         self.assertEqual(len(offer_calls), 1)
 
-        # ARTICLE (property 283) is verified ONLY on IBLOCK 15 (offers) --
-        # the base product must never carry it under any key.
         article_property = schema.offer_property(code="ARTICLE")
         self.assertNotIn(article_property.select_key, product_calls[0]["fields"])
         self.assertEqual(offer_calls[0]["fields"][article_property.select_key], TARGET_SKU)
 
-        # BRAND (property 100) is verified ONLY on IBLOCK 14 (base
-        # product) -- the offer must never carry it.
         brand_property = schema.catalog_property(code="BRAND")
         self.assertEqual(product_calls[0]["fields"][brand_property.select_key], TARGET_BRAND)
         self.assertNotIn(brand_property.select_key, offer_calls[0]["fields"])
@@ -250,8 +313,13 @@ class CategoryPersistenceTests(unittest.TestCase):
         product_calls = [b for m, b in transport.calls if m == "catalog.product.add"]
         self.assertEqual(product_calls[0]["fields"][schema.SECTION_FIELD], TV_SECTION_ID)
 
+        # TV product-write-contract defect closure: this exact product
+        # (a non-variant TV, ``has_variant_offer`` defaulting to False)
+        # never creates an offer at all -- there is no offer element for
+        # SECTION_FIELD to be absent FROM, which is itself part of the
+        # proof (see BaseProductVsOfferSeparationTests below).
         offer_calls = [b for m, b in transport.calls if m == "catalog.product.offer.add"]
-        self.assertNotIn(schema.SECTION_FIELD, offer_calls[0]["fields"])
+        self.assertEqual(offer_calls, [])
 
         # Read-back verification (execute_single_product_write's own
         # independent governed read) must have confirmed it too.
@@ -294,9 +362,16 @@ class DescriptionMappingTests(unittest.TestCase):
 
 
 class MediaAndGalleryMappingTests(unittest.TestCase):
-    """Item 5 of the report: preview/detail on the base product, gallery
-    on the offer via the verified MORE_PHOTO property (280) using
-    Bitrix's own documented multi-value FILE property write shape."""
+    """Item 5 of the report: preview/detail always land on the base
+    product (unaffected by the product-model closure -- previewPicture/
+    detailPicture are native IBLOCK 14 fields, not offer properties).
+    Gallery (MORE_PHOTO, property 280) is verified ONLY on the offers
+    IBLOCK (15): for this default, non-variant TV (``has_variant_offer``
+    defaulting to False, no offer ever created) it correctly has no
+    destination and must be reported unwritten, never guessed onto an
+    unverified IBLOCK 14 property. A second test proves gallery still
+    writes to the offer exactly as before when the caller explicitly has
+    a genuine variant (``has_variant_offer=True``)."""
 
     def test_preview_and_detail_pictures_on_base_product(self):
         result, transport = _execute(_control_product_request())
@@ -311,8 +386,30 @@ class MediaAndGalleryMappingTests(unittest.TestCase):
             {schema.PICTURE_FILE_DATA_KEY: [DETAIL_PICTURE["filename"], DETAIL_PICTURE["base64"]]},
         )
 
-    def test_gallery_maps_to_offer_more_photo_never_base_product(self):
+    def test_default_non_variant_tv_never_writes_gallery_and_reports_it_unmapped(self):
         result, transport = _execute(_control_product_request())
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertEqual(result["gallery_written"], 0)
+
+        # No offer is ever created for this default, non-variant product
+        # -- there is no MORE_PHOTO call to make at all.
+        offer_calls = [b for m, b in transport.calls if m == "catalog.product.offer.add"]
+        self.assertEqual(offer_calls, [])
+        product_calls = [b for m, b in transport.calls if m == "catalog.product.add"]
+        more_photo = schema.offer_property(code="MORE_PHOTO")
+        self.assertNotIn(more_photo.select_key, product_calls[0]["fields"])
+
+        unwritten_fields = {item["field"] for item in result["not_written"]}
+        self.assertIn("gallery_pictures", unwritten_fields)
+        # Never guessed onto ANY base-product property either.
+        serialized = json.dumps(product_calls)
+        for pic in GALLERY_PICTURES:
+            self.assertNotIn(pic["base64"], serialized)
+
+    def test_explicit_variant_offer_still_maps_gallery_to_offer_more_photo(self):
+        """The pre-existing gallery/MORE_PHOTO mechanism, unchanged, for a
+        caller that genuinely has a variant dimension."""
+        result, transport = _execute(_control_product_request(has_variant_offer=True))
         self.assertEqual(result["gallery_written"], len(GALLERY_PICTURES))
 
         product_calls = [b for m, b in transport.calls if m == "catalog.product.add"]
@@ -329,8 +426,8 @@ class MediaAndGalleryMappingTests(unittest.TestCase):
             ],
         )
 
-    def test_no_gallery_supplied_means_no_more_photo_call_at_all(self):
-        result, transport = _execute(_control_product_request(gallery_pictures=()))
+    def test_no_gallery_supplied_with_variant_offer_means_no_more_photo_call_at_all(self):
+        result, transport = _execute(_control_product_request(has_variant_offer=True, gallery_pictures=()))
         self.assertEqual(result["gallery_written"], 0)
         offer_calls = [b for m, b in transport.calls if m == "catalog.product.offer.add"]
         more_photo = schema.offer_property(code="MORE_PHOTO")

@@ -215,6 +215,14 @@ def format_write_plan_text(
         f"Товар: {write_request.title}",
         f"Артикул: {write_request.sku}",
     ]
+    product_model = write_preview.get("product_model") or {}
+    if product_model.get("model") == "SKU_WITH_OFFER":
+        lines.append("Модель товара: товар с торговым предложением (SKU/offer, IBLOCK 15)")
+    elif product_model.get("model") == "SIMPLE_PRODUCT":
+        lines.append(
+            "Модель товара: обычный товар без торговых предложений (IBLOCK 14) — "
+            "нет данных о вариантах товара для этой записи"
+        )
     if write_request.brand:
         lines.append(f"Бренд: {write_request.brand}")
     if write_request.ean:
@@ -256,9 +264,26 @@ def format_write_plan_text(
         lines.append("  - нет подготовленных изображений")
     gallery_pictures = tuple(write_request.gallery_pictures or ())
     if gallery_pictures:
-        lines.append(
-            f"  - галерея: {len(gallery_pictures)} изображени(й) (загружается в Bitrix через MORE_PHOTO/офер, не ссылка)"
+        # TV product-write-contract defect closure: MORE_PHOTO (gallery,
+        # offer property 280) is verified ONLY on the offers IBLOCK (15),
+        # which this write only ever creates when the request genuinely
+        # has a variant dimension (``has_variant_offer=True``). The
+        # default -- and current -- SIMPLE product model has no offer, so
+        # gallery correctly has no destination and must never be reported
+        # as "will be written" just because images were prepared.
+        gallery_not_written = any(
+            item.get("field") == "gallery_pictures" for item in write_preview.get("will_not_write") or []
         )
+        if write_request.has_variant_offer and not gallery_not_written:
+            lines.append(
+                f"  - галерея: {len(gallery_pictures)} изображени(й) (загружается в Bitrix через MORE_PHOTO/офер, не ссылка)"
+            )
+        else:
+            lines.append(
+                f"  - галерея: {len(gallery_pictures)} изображени(й) подготовлено, но НЕ будет записано "
+                "(MORE_PHOTO/280 проверен только на офере/IBLOCK 15, а этот товар записывается как "
+                "обычный товар без торгового предложения — нет проверенного назначения на IBLOCK 14)"
+            )
     else:
         gallery_count = int((preview.get("media") or {}).get("gallery_image_count") or 0)
         if gallery_count:
