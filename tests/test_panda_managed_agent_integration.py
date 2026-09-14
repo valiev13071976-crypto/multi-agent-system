@@ -39,8 +39,10 @@ from __future__ import annotations
 import io
 import os
 import shutil
+import subprocess
 import tempfile
 import unittest
+from unittest import mock
 
 from openpyxl import Workbook
 
@@ -147,6 +149,71 @@ class PandaBridgeUnitTests(unittest.TestCase):
                 self.assertTrue(path.startswith(tmp), path)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+
+class EnsureInstalledBootstrapUnitTests(unittest.TestCase):
+    """Fast, no-network unit checks of ``isolated_env.ensure_installed()``'s
+    caching/idempotency logic (the real, network-hitting install itself is
+    exercised separately by ``ProductionDefectSelfHealingBootstrapTests``
+    below) -- verifies it is a true no-op once installed, and attempted at
+    most once per process per target directory even when it keeps failing
+    (so a deployment with no PyPI egress never pays a retry cost on every
+    turn)."""
+
+    def setUp(self):
+        self._old_pkgs_dir = os.environ.get(isolated_env.PKGS_DIR_ENV_VAR)
+        self._old_attempted = dict(isolated_env._bootstrap_attempted)
+
+    def tearDown(self):
+        if self._old_pkgs_dir is None:
+            os.environ.pop(isolated_env.PKGS_DIR_ENV_VAR, None)
+        else:
+            os.environ[isolated_env.PKGS_DIR_ENV_VAR] = self._old_pkgs_dir
+        isolated_env._bootstrap_attempted.clear()
+        isolated_env._bootstrap_attempted.update(self._old_attempted)
+
+    def test_no_op_and_no_subprocess_call_when_already_installed(self):
+        with mock.patch.object(isolated_env, "is_installed", return_value=True):
+            with mock.patch.object(isolated_env, "_pip_install_target") as pip_mock:
+                self.assertTrue(isolated_env.ensure_installed())
+                pip_mock.assert_not_called()
+
+    def test_attempts_at_most_once_per_directory_on_persistent_failure(self):
+        tmp_dir = tempfile.mkdtemp(prefix="ensure_installed_fail_")
+        try:
+            os.environ[isolated_env.PKGS_DIR_ENV_VAR] = tmp_dir
+            isolated_env._bootstrap_attempted.pop(tmp_dir, None)
+            failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="no network")
+            with mock.patch.object(isolated_env, "is_installed", return_value=False):
+                with mock.patch.object(isolated_env, "_pip_install_target", return_value=failed) as pip_mock:
+                    self.assertFalse(isolated_env.ensure_installed())
+                    self.assertFalse(isolated_env.ensure_installed())
+                    self.assertFalse(isolated_env.ensure_installed())
+                    self.assertEqual(
+                        pip_mock.call_count,
+                        1,
+                        "a persistently failing install must be attempted at most once per process/directory",
+                    )
+        finally:
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+    def test_different_directories_get_independent_attempts(self):
+        dir_a = tempfile.mkdtemp(prefix="ensure_installed_a_")
+        dir_b = tempfile.mkdtemp(prefix="ensure_installed_b_")
+        try:
+            failed = subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="")
+            with mock.patch.object(isolated_env, "is_installed", return_value=False):
+                with mock.patch.object(isolated_env, "_pip_install_target", return_value=failed) as pip_mock:
+                    os.environ[isolated_env.PKGS_DIR_ENV_VAR] = dir_a
+                    isolated_env._bootstrap_attempted.pop(dir_a, None)
+                    isolated_env.ensure_installed()
+                    os.environ[isolated_env.PKGS_DIR_ENV_VAR] = dir_b
+                    isolated_env._bootstrap_attempted.pop(dir_b, None)
+                    isolated_env.ensure_installed()
+                    self.assertEqual(pip_mock.call_count, 2)
+        finally:
+            shutil.rmtree(dir_a, ignore_errors=True)
+            shutil.rmtree(dir_b, ignore_errors=True)
 
 
 class FeatureFlagOffRegressionTests(unittest.IsolatedAsyncioTestCase):
@@ -397,6 +464,119 @@ class FeatureFlagOnLiveBoundaryTests(unittest.IsolatedAsyncioTestCase):
         # bitrix_product_bridge at all, so a mutation would be structurally
         # impossible even if the model tried -- there is nothing to call.
         self.assertIsNone(getattr(self.runtime.gateway, "_bitrix_bridge", None))
+
+
+@unittest.skipUnless(_HAS_KEY, _LIVE_SKIP_REASON)
+class ProductionDefectSelfHealingBootstrapTests(unittest.IsolatedAsyncioTestCase):
+    """Production-faithful reproduction + fix verification for the real
+    Railway defect report: ``PANDA_MANAGED_AGENT_ENABLED=true`` in a
+    container that NEVER ran ``scripts/setup_isolated_env.py`` (Railway/
+    Nixpacks only ever runs ``pip install -r requirements.txt``) still got
+    the old generic ``data_intel`` "В таблице N строк и M столбцов ...
+    средняя ..." analysis on the exact production sentence. Reproduces
+    this by pointing ``PANDA_MANAGED_AGENT_POC_PKGS_DIR`` at a brand-new,
+    never-provisioned directory (never touched by any earlier test/dev
+    setup in this process) and proves the fix
+    (``isolated_env.ensure_installed()``, called lazily from
+    ``panda_bridge.maybe_respond_via_managed_agent``) makes the SAME
+    production request, through the SAME real
+    ``WorkflowPandaConversationGateway.respond()`` entry point, self-heal
+    and enter managed-agent routing instead."""
+
+    async def asyncSetUp(self):
+        import managed_agent_poc.panda_bridge as panda_bridge_module
+
+        self.tmp = tempfile.mkdtemp()
+        self.fresh_pkgs_dir = tempfile.mkdtemp(prefix="never_provisioned_pkgs_")
+        self._old_pkgs_dir = os.environ.get(isolated_env.PKGS_DIR_ENV_VAR)
+        os.environ[isolated_env.PKGS_DIR_ENV_VAR] = self.fresh_pkgs_dir
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+        self.runtime = _RealLegacyRuntime(self.tmp)
+        self._old_timeout = panda_bridge_module.DEFAULT_TURN_TIMEOUT_S
+        panda_bridge_module.DEFAULT_TURN_TIMEOUT_S = 180.0
+
+    async def asyncTearDown(self):
+        import managed_agent_poc.panda_bridge as panda_bridge_module
+
+        panda_bridge_module.DEFAULT_TURN_TIMEOUT_S = self._old_timeout
+        os.environ.pop(ENABLED_ENV_VAR, None)
+        os.environ.pop("PANDA_DATA_DIR", None)
+        os.environ.pop("PANDA_MANAGED_AGENT_POC_ENABLED", None)
+        if self._old_pkgs_dir is None:
+            os.environ.pop(isolated_env.PKGS_DIR_ENV_VAR, None)
+        else:
+            os.environ[isolated_env.PKGS_DIR_ENV_VAR] = self._old_pkgs_dir
+        shutil.rmtree(self.tmp, ignore_errors=True)
+        shutil.rmtree(self.fresh_pkgs_dir, ignore_errors=True)
+
+    async def test_root_cause_reproduced_in_isolation_before_any_bootstrap(self):
+        """Documents the exact root cause on its own, with no gateway
+        involved yet: a never-provisioned pkgs dir makes
+        ``ManagedAgentPOC.real_model_available()`` report unavailable --
+        this alone, silently swallowed by the pre-fix ``return None``, is
+        why real production fell back to the legacy path on every turn.
+        Sets the SAME inner opt-in flag ``maybe_respond_via_managed_agent``
+        always sets first, so this isolates ONLY the missing-SDK defect
+        (not an unrelated "disabled" reason)."""
+        from managed_agent_poc.adapter import ManagedAgentPOC
+
+        os.environ["PANDA_MANAGED_AGENT_POC_ENABLED"] = "true"
+        self.assertFalse(isolated_env.is_installed())
+        available, reason = ManagedAgentPOC.real_model_available()
+        self.assertFalse(available)
+        self.assertIn("not installed", reason)
+
+    async def test_production_faithful_turn_self_heals_and_enters_managed_agent_routing(self):
+        """Requirement B, reproduced production-faithfully against a
+        pkgs dir that starts completely unprovisioned (never just the
+        already-working happy path): the exact real production message,
+        with a real attached spreadsheet, through the real conversational
+        entry point, must self-heal and enter managed-agent routing."""
+        artifact_id = self.runtime.upload(tenant_id="tenant-selfheal", conversation_id="conv-selfheal")
+        request = ConversationRequest(
+            text=(
+                "Подготовь один телевизор из этого прайса для Bitrix/Aspro. "
+                "Ничего пока не записывай и не публикуй."
+            ),
+            tenant_id="tenant-selfheal",
+            user_id="user-a",
+            request_id="req-selfheal-1",
+            conversation_id="conv-selfheal",
+            attachment_refs=(artifact_id,),
+        )
+        result = await self.runtime.gateway.respond(request)
+
+        self.assertTrue(
+            isolated_env.is_installed(),
+            "the lazy bootstrap must have installed the SDK into the previously-empty pkgs dir",
+        )
+        self.assertEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
+        self.assertEqual(result.metadata.get("managed_agent_tool"), "select_product")
+        self.assertFalse(result.metadata.get("mutated"))
+        # The exact regression this closes: the old generic data_intel
+        # "В таблице N строк и M столбцов ... средняя ..." analysis (see
+        # data_intel.service._analyze_only_summary) must never be what
+        # comes back once the managed-agent path is genuinely eligible.
+        self.assertNotIn("строк и", result.text)
+        self.assertNotIn("столбцов", result.text)
+
+        r2 = await self.runtime.gateway.respond(
+            ConversationRequest(
+                text="Этот уже был. Дай другой.",
+                tenant_id="tenant-selfheal",
+                user_id="user-a",
+                request_id="req-selfheal-2",
+                conversation_id="conv-selfheal",
+            )
+        )
+        self.assertEqual(
+            r2.metadata.get("action_decision"),
+            "MANAGED_AGENT",
+            "the follow-up must reuse the durable managed-agent dataset state, with no re-upload",
+        )
+        self.assertEqual(r2.metadata.get("managed_agent_tool"), "select_product")
+        self.assertFalse(r2.metadata.get("mutated"))
 
 
 if __name__ == "__main__":
