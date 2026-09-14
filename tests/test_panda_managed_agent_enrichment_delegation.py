@@ -1025,6 +1025,167 @@ class ManagedAgentRealSubprocessContractTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("catalog.product.add", [m for m, _ in self.transport.calls])
 
 
+@unittest.skipUnless(_SDK_AVAILABLE, _LIVE_SKIP_REASON)
+class ManagedAgentArticleRoleSkuIdentityLossTests(unittest.IsolatedAsyncioTestCase):
+    """Production defect closure #3 -- REAL Railway evidence after #80:
+
+        MANAGED_PRODUCT_SELECTED tool=select_product
+            has_sku=False has_name=True has_retail_price=False
+        PRODUCT_PREPARATION_DELEGATION_FAILED reason=missing_title_or_sku
+
+    even though the price-list row DOES have an identifier column with
+    value ``100MRGB96B6.ARUG`` -- it is simply headed "Артикул", which
+    ``data_intel.mapping`` classifies as the DISTINCT semantic role
+    ``ROLE_ARTICLE`` (see ``data_intel/mapping.py``: ``"артикул":
+    ROLE_ARTICLE``), not ``ROLE_SKU``. This is EXACTLY the same fallback
+    the existing, already-proven ``data_intel.service._row_lookup_
+    result`` has always used for its own ``product_fields["sku"]``:
+    ``_role_value(row, table, ROLE_SKU) or _role_value(row, table,
+    ROLE_ARTICLE)``. ``managed_agent_poc.runtime_subprocess.
+    _row_product_fields`` (the tool-output row-projection ``select_
+    product`` itself returns) had NO mapping for ``ROLE_ARTICLE`` at
+    all, so the value was silently dropped before it ever reached
+    ``select_product``'s returned dict -- proven directly below.
+
+    CRITICAL ACCEPTANCE ASSERTION: this test does NOT mock away the
+    extraction/canonicalization boundary being fixed. It drives the
+    REAL, unmocked ``ManagedAgentPOC.run_turn()`` (only the MODEL's tool-
+    selection DECISION is scripted via the SDK's own no-API-key
+    ``ScriptedModel`` testing utility -- exactly the same convention
+    ``tests/test_managed_agent_poc.py``'s own ``ManagedAgentOrchestration
+    Tests`` already uses -- the tool's OWN business logic,
+    ``select_product``/``_row_product_fields``, executes for real
+    against a real ingested XLSX row), then feeds that REAL tool-call
+    output through the REAL, unmocked ``panda_bridge._selected_product_
+    raw_fields``/``_canonical_fields_and_retail_price``/``_delegate_to_
+    existing_product_preparation`` -- proving the fix all the way
+    through to ``prepare_complete_card`` being reached, not merely that
+    a hand-crafted dict happens to contain a "sku" key."""
+
+    ARTICLE_HEADER_SKU = "100MRGB96B6.ARUG"
+    ARTICLE_HEADER_NAME = "Телевизор LG 100MRGB96B6.ARUG"
+    ARTICLE_HEADER_EAN = "8806096796849"
+    ARTICLE_HEADER_PURCHASE_PRICE = "717790.30"
+
+    def setUp(self):
+        # NOTE: ``poc.run_turn`` is driven DIRECTLY (not through
+        # ``panda_bridge.maybe_respond_via_managed_agent``) so this uses
+        # the isolated-subprocess-adapter's OWN flag
+        # (``managed_agent_poc.flags.FLAG_ENV_VAR`` ==
+        # "PANDA_MANAGED_AGENT_POC_ENABLED") -- the SAME one ``tests/
+        # test_managed_agent_poc.py``'s ``_EnabledFlagMixin`` uses --
+        # never ``panda_bridge.ENABLED_ENV_VAR``
+        # ("PANDA_MANAGED_AGENT_ENABLED"), which only gates the separate
+        # Panda-conversation-gateway integration boundary.
+        from managed_agent_poc.flags import FLAG_ENV_VAR
+
+        os.environ[FLAG_ENV_VAR] = "true"
+        self.addCleanup(lambda: os.environ.pop(FLAG_ENV_VAR, None))
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.tmp, ignore_errors=True))
+
+        # The EXACT real production column header ("Артикул", not "sku")
+        # for the control row from the task -- 100MRGB96B6.ARUG / EAN
+        # 8806096796849 / purchase price 717790.30/717790.20/717790.3
+        # (all reported in different production log lines for the same
+        # control row; this fixture uses the XLSX/task-stated value).
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["Артикул", "product_name", "category", "brand", "ean", "purchase_price"])
+        ws.append(
+            [
+                self.ARTICLE_HEADER_SKU,
+                self.ARTICLE_HEADER_NAME,
+                CATEGORY,
+                BRAND,
+                self.ARTICLE_HEADER_EAN,
+                self.ARTICLE_HEADER_PURCHASE_PRICE,
+            ]
+        )
+        buf = io.BytesIO()
+        wb.save(buf)
+        self.xlsx_path = os.path.join(self.tmp, FILENAME)
+        with open(self.xlsx_path, "wb") as fh:
+            fh.write(buf.getvalue())
+
+        self.poc = ManagedAgentPOC(
+            dataset_store_path=os.path.join(self.tmp, "dataset.sqlite3"),
+            session_db_path=os.path.join(self.tmp, "session.sqlite3"),
+            state_store_path=os.path.join(self.tmp, "state.sqlite3"),
+        )
+
+    async def test_article_role_sku_survives_select_product_and_reaches_delegation_guard(self):
+        from managed_agent_poc.panda_bridge import (
+            _canonical_fields_and_retail_price,
+            _delegate_to_existing_product_preparation,
+            _selected_product_raw_fields,
+        )
+
+        # Step 1 -- the REAL ``select_product`` tool output (only the
+        # model's DECISION to call this tool is scripted; the tool's own
+        # ``_row_product_fields`` runs unmodified against the real
+        # ingested "Артикул" row).
+        turn_result = self.poc.run_turn(
+            text=PRODUCTION_TEXT,
+            tenant_id="tenant-article-role",
+            conversation_id="conv-article-role-1",
+            artifact_bytes_path=self.xlsx_path,
+            artifact_filename=FILENAME,
+            test_scripted_plan=[
+                {"call_tool": "select_product", "arguments": {"identifier": None}},
+                {"final_output": "Product prepared, not written to Bitrix."},
+            ],
+        )
+        self.assertEqual(turn_result.status, "COMPLETED")
+        select_output = turn_result.tool_calls[0]["output"]
+        self.assertEqual(select_output.get("status"), "SELECTED")
+        # Proves the REAL fix inside ``select_product``/``_row_product_
+        # fields`` itself -- before this fix, ``select_output`` had a
+        # "name" key but NO "sku" key at all (the exact real production
+        # shape logged as ``has_sku=False has_name=True``).
+        self.assertTrue(select_output.get("name"))
+        self.assertEqual(select_output.get("sku"), self.ARTICLE_HEADER_SKU)
+
+        # Step 2 -- the REAL extraction/canonicalization boundary.
+        raw_fields = _selected_product_raw_fields(turn_result.tool_calls)
+        self.assertIsNotNone(raw_fields)
+        self.assertTrue(raw_fields.get("name"))
+        self.assertEqual(raw_fields.get("sku"), self.ARTICLE_HEADER_SKU)
+
+        product_fields, _retail_price = _canonical_fields_and_retail_price(raw_fields)
+        self.assertEqual(product_fields["sku"], self.ARTICLE_HEADER_SKU)
+        self.assertTrue(product_fields["title"])
+
+        # Step 3 -- proves the call now passes beyond the existing
+        # ``missing_title_or_sku`` guard and actually reaches the
+        # EXISTING ``prepare_complete_card`` (observed here via a patch
+        # that records invocation + echoes back the received
+        # ``product_fields`` verbatim, without reimplementing or
+        # short-circuiting any of its own business logic).
+        received: dict = {}
+
+        async def _fake_prepare_complete_card(*, tenant_id, product_fields, **kwargs):
+            received["tenant_id"] = tenant_id
+            received["product_fields"] = product_fields
+            return {"text": "PREPARED", "write_preview": {}}
+
+        with mock.patch(
+            "business_assistant.product_enrichment_bridge.prepare_complete_card",
+            new=_fake_prepare_complete_card,
+        ):
+            delegated, reason = await _delegate_to_existing_product_preparation(
+                raw_fields,
+                tenant_id="tenant-article-role",
+                timeout_s=30.0,
+            )
+
+        self.assertEqual(reason, "")
+        self.assertIsNotNone(delegated)
+        self.assertEqual(delegated.get("text"), "PREPARED")
+        self.assertNotEqual(reason, "missing_title_or_sku")
+        self.assertEqual(received.get("product_fields", {}).get("sku"), self.ARTICLE_HEADER_SKU)
+
+
 @unittest.skipUnless(_SDK_AVAILABLE and _HAS_KEY, _LIVE_SKIP_REASON)
 class LiveRealSubprocessDelegationTests(unittest.IsolatedAsyncioTestCase):
     """Production defect closure #2 -- the strongest possible version of
