@@ -49,13 +49,46 @@ mapping code. It reuses only:
 Zero mutation capability is exposed: the 3 tools this module can reach
 are exactly the read-only set proven in PR #74's live evaluation. There
 is no write/publish/price-mutation/Telegram tool anywhere on this path.
+
+Production defect closure (real Railway production, ``PANDA_MANAGED_
+AGENT_ENABLED=true``, real XLSX attachment: the managed-agent path was
+silently never entered -- every eligible turn still got the old generic
+Excel min/max/average analysis): root cause was that the isolated OpenAI
+Agents SDK install this module's ``ManagedAgentPOC.real_model_available()``
+depends on was never provisioned in the deployed container (Railway/
+Nixpacks builds only ever run ``pip install -r requirements.txt``; the
+one-time ``scripts/setup_isolated_env.py`` step was manual-only and
+nothing in the deploy path called it) -- so ``available`` was always
+``False`` on every single production request, and the existing fail-open
+``return None`` below (correct in isolation -- an optional feature must
+degrade, never outage) silently swallowed that specific, fixable,
+non-secret reason with no trace in any log. Two additive fixes, both
+still fully fail-open and still gated by the SAME outer flag:
+1. ``isolated_env.ensure_installed()`` is now called here, lazily, before
+   the availability check -- a self-healing, at-most-once-per-process
+   bootstrap of the exact SAME one-time install (see that module for why
+   this is safe: idempotent, never retried after one attempt, a fast
+   no-op once already installed).
+2. A fallback for ANY reason (still/again unavailable, disabled,
+   subprocess error, timeout, non-COMPLETED result) is now logged via the
+   standard ``logging`` module at WARNING -- text only ever drawn from
+   already-secret-free sources (``describe_unavailable()``'s static
+   message, an exception's type name, a bounded/redacted stderr tail)
+   so this fallback is finally OBSERVABLE in production logs without
+   ever risking a leaked ``OPENAI_API_KEY``/``BITRIX_WEBHOOK_URL``/
+   Telegram secret.
 """
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import tempfile
+
+from managed_agent_poc import isolated_env
+
+logger = logging.getLogger(__name__)
 
 ENABLED_ENV_VAR = "PANDA_MANAGED_AGENT_ENABLED"
 
@@ -123,6 +156,21 @@ def _has_existing_managed_agent_dataset(*, tenant_id: str, conversation_id: str)
     return bool(persisted.dataset_id)
 
 
+def _redact_for_log(text: str) -> str:
+    """Defensive scrub applied to EVERY string this module logs (never the
+    raw exception/subprocess text directly): strips any occurrence of the
+    current process's own ``OPENAI_API_KEY`` value, if set, before the
+    text is handed to ``logging``. Diagnostic log text here is already
+    drawn only from secret-free sources (see module docstring), but this
+    is a zero-cost extra guard against ever repeating the prior incident
+    where a key was accidentally printed while debugging."""
+    safe = str(text or "")
+    key = os.environ.get("OPENAI_API_KEY") or ""
+    if key:
+        safe = safe.replace(key, "[REDACTED]")
+    return safe[:1000]
+
+
 def _is_eligible_turn(*, tenant_id: str, conversation_id: str, has_spreadsheet_attachment: bool) -> bool:
     """Eligibility is decided ENTIRELY from state/attachment presence --
     never from the text of the message (no ``is_explicit_*``, no
@@ -175,8 +223,24 @@ async def maybe_respond_via_managed_agent(
 
     from managed_agent_poc.adapter import ManagedAgentPOC
 
-    available, _reason = ManagedAgentPOC.real_model_available()
+    # Production defect closure: self-healing, lazy, at-most-once-per-
+    # process bootstrap of the isolated SDK install this availability
+    # check depends on (see module + isolated_env.py docstrings). A no-op
+    # in any environment where it is already installed (e.g. this repo's
+    # own tests/dev sandbox), so this call is safe to make unconditionally
+    # here.
+    isolated_env.ensure_installed()
+
+    available, reason = ManagedAgentPOC.real_model_available()
     if not available:
+        logger.warning(
+            "managed_agent_poc: eligible turn (tenant=%s, conversation has "
+            "attachment=%s) fell back to the legacy conversational path -- "
+            "managed-agent runtime unavailable: %s",
+            _safe_path_component(tenant_id),
+            spreadsheet_ref is not None,
+            _redact_for_log(reason),
+        )
         return None
 
     dataset_path, session_path, state_path = _durable_paths(
@@ -228,7 +292,14 @@ async def maybe_respond_via_managed_agent(
                 timeout_s=effective_timeout,
             ),
         )
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "managed_agent_poc: eligible turn (tenant=%s) fell back to the "
+            "legacy conversational path -- run_turn raised %s: %s",
+            _safe_path_component(tenant_id),
+            type(exc).__name__,
+            _redact_for_log(str(exc)),
+        )
         return None
     finally:
         if tmp_path:
@@ -238,6 +309,13 @@ async def maybe_respond_via_managed_agent(
                 pass
 
     if turn_result is None or turn_result.status != "COMPLETED":
+        logger.warning(
+            "managed_agent_poc: eligible turn (tenant=%s) fell back to the "
+            "legacy conversational path -- run_turn returned status=%s error=%s",
+            _safe_path_component(tenant_id),
+            getattr(turn_result, "status", None),
+            _redact_for_log(getattr(turn_result, "error", "")),
+        )
         return None
 
     selected_tool = turn_result.tool_calls[0]["tool"] if turn_result.tool_calls else ""
