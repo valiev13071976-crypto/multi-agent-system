@@ -213,6 +213,21 @@ PRODUCTION_TEXT = (
     "поля, для которых действительно нет подтверждённого места записи в Bitrix/Aspro."
 )
 ANOTHER_ONE_TEXT = "Этот уже был. Дай другой."
+# The real production follow-up request (production defect closure #4):
+# "показать финальный план записи уже подготовленной карточки, без
+# записи", explicitly asking for the deterministic controlled Bitrix
+# write-plan (SIMPLE_PRODUCT, exact section ID, purchase/retail price,
+# verified destinations, #77 unmapped fields) -- never a write/update/
+# publication.
+WRITE_PLAN_TEXT = (
+    "Покажи финальный план записи уже подготовленной карточки товара в "
+    "Bitrix/Aspro, без записи: модель товара (обычный товар или товар с "
+    "торговым предложением), точный раздел каталога и его ID, закупочную "
+    "цену, розничную цену, рассчитанную по существующим правилам Panda, "
+    "и для каждого подготовленного поля укажи, подтверждено ли для него "
+    "место записи в Bitrix/Aspro. Ничего не записывай, не обновляй и не "
+    "публикуй."
+)
 FULL_CARD_FOR_NEW_PRODUCT_TEXT = (
     "Подготовь для этого товара полную карточку для Bitrix/Aspro: розничная цена, раздел "
     "каталога, основное изображение, галерея, анонс, подробное описание и характеристики. "
@@ -615,23 +630,38 @@ class ManagedAgentDelegatesToExistingProductPreparationTests(unittest.IsolatedAs
 
         self.assertEqual(r3.metadata.get("action_decision"), "MANAGED_AGENT")
         self.assertEqual(r3.metadata.get("managed_agent_tool"), "explain_bitrix_write_plan")
+        # Production defect closure #4: SHOW_WRITE_PLAN (this tool) is a
+        # DISTINCT semantic action from PREPARE_PRODUCT (``select_product``,
+        # asserted in the OTHER test in this class) and must delegate into
+        # the existing deterministic WRITE-PLAN renderer, never
+        # ``prepare_complete_card``'s own full-card preview text.
         self.assertEqual(
             r3.metadata.get("delegated_to"),
-            "product_enrichment_bridge.prepare_complete_card",
+            "product_enrichment_bridge.format_write_plan_text",
         )
         self.assertFalse(r3.metadata.get("mutated"))
 
-        # Turn 3's prepared card is PRODUCT B, never stale PRODUCT A.
+        # Turn 3's write plan is for PRODUCT B, never stale PRODUCT A --
+        # reusing turn 2's already-selected/already-enriched product,
+        # never re-selecting or losing identity.
         self.assertIn(PRODUCT_B_SKU, r3.text)
         self.assertIn(PRODUCT_B_EAN, r3.text)
         self.assertIn(PRODUCT_B_RETAIL_PRICE, r3.text)
         self.assertNotIn(PRODUCT_A_SKU, r3.text)
         self.assertNotIn(PRODUCT_A_EAN, r3.text)
 
+        # This is a genuine WRITE PLAN (``format_write_plan_text``), not
+        # the generic full-card preview: SIMPLE_PRODUCT contract text,
+        # the resolved section ID, and the field-by-field write/no-write
+        # breakdown are all present.
+        self.assertIn("ЧТО БУДЕТ ЗАПИСАНО В BITRIX/ASPRO", r3.text)
+        self.assertIn("SIMPLE_PRODUCT", r3.metadata.get("bitrix_write_preview", {}).get("product_model", {}).get("model", ""))
+        self.assertIn(f"ID {TV_SECTION_ID}", r3.text)
+
         write_preview = r3.metadata.get("bitrix_write_preview") or {}
         self.assertEqual(write_preview.get("status"), "REQUIRES_APPROVAL")
-        self.assertIn("НЕ будет записано (нет проверенного назначения в Bitrix):", r3.text)
-        self.assertIn("sku", r3.text)
+        self.assertIn("НЕ будет записано: sku", r3.text)
+        self.assertIn("НЕ будет записано: ean", r3.text)
 
         # ZERO Bitrix mutation across the whole 3-turn flow.
         self.assertNotIn("catalog.product.add", [m for m, _ in self.transport.calls])
@@ -1184,6 +1214,254 @@ class ManagedAgentArticleRoleSkuIdentityLossTests(unittest.IsolatedAsyncioTestCa
         self.assertEqual(delegated.get("text"), "PREPARED")
         self.assertNotEqual(reason, "missing_title_or_sku")
         self.assertEqual(received.get("product_fields", {}).get("sku"), self.ARTICLE_HEADER_SKU)
+
+
+@unittest.skipUnless(_SDK_AVAILABLE, _LIVE_SKIP_REASON)
+class ManagedAgentShowWritePlanDelegationTests(unittest.IsolatedAsyncioTestCase):
+    """Production defect closure #4 -- REAL Railway evidence after #81:
+
+    for a SHOW_WRITE_PLAN follow-up turn ("покажи финальный план записи
+    ..."), Railway proved:
+
+        MANAGED_PRODUCT_SELECTED tool=explain_bitrix_write_plan
+            has_sku=True has_name=True
+        PRODUCT_PREPARATION_DELEGATION_STARTED
+        PRODUCT_PREPARATION_DELEGATION_SUCCEEDED
+
+    yet the user-visible response was still the generic prepared-card
+    preview, not a deterministic Bitrix/Aspro write plan. Root cause:
+    ``select_product`` (PREPARE_PRODUCT) and ``explain_bitrix_write_plan``
+    (SHOW_WRITE_PLAN) -- two DISTINCT semantic actions -- were both
+    delegated into the exact same ``prepare_complete_card`` function,
+    which always renders ``format_combined_preview_text``, never the
+    write-plan text. This class proves the corrected dispatch: SHOW_
+    WRITE_PLAN now delegates into the EXISTING, unmodified
+    ``product_enrichment_bridge.format_write_plan_text`` renderer (the
+    SAME one ``WorkflowPandaConversationGateway._explain_bitrix_write_
+    plan`` already uses for the legacy conversational path) instead.
+
+    CRITICAL ACCEPTANCE ASSERTION: uses the ACTUAL real ``ManagedAgentPOC``
+    serialized tool-call contract, never a hand-typed guess. A throwaway
+    ``ManagedAgentPOC`` instance (scripted only in which tool the MODEL
+    decides to call, via the SDK's own no-API-key ``ScriptedModel`` --
+    the tool's OWN business logic, ``select_product``/``explain_bitrix_
+    write_plan``/``_row_product_fields``, executes for REAL against a
+    real ingested XLSX row) captures the literal ``tool_calls`` shape
+    for BOTH turns; those REAL, captured dicts -- never hand-crafted --
+    are then replayed through the FULL, real
+    ``WorkflowPandaConversationGateway.respond()`` entry point (only
+    ``ManagedAgentPOC.run_turn`` itself is replaced, exactly as much of
+    the boundary as every other test in this file replaces, so no live
+    OpenAI call is required here)."""
+
+    async def asyncSetUp(self):
+        self.transport = _RecordingTransport(sections=[TV_SECTION, ELECTRONICS_SECTION])
+        self.live_env = _LiveEnv()
+        self.live_env.__enter__()
+        self.http_patch = mock.patch.object(BoundedHttpClient, "request", side_effect=self.transport)
+        self.http_patch.start()
+        self.bridge, _activation = _bridge_and_activation()
+
+        self.tmp = tempfile.mkdtemp()
+        self._old_data_dir = os.environ.get("PANDA_DATA_DIR")
+        self._old_flag = os.environ.get(ENABLED_ENV_VAR)
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+
+        self.panda, self.artifact_service = _panda(
+            bitrix_bridge=self.bridge,
+            search_provider=FakeSearchProvider(
+                {f"{BRAND} {PRODUCT_A_SKU}": [fake_result(RESEARCH_URL_A, title=f"LG {PRODUCT_A_SKU}")]}
+            ),
+            scrape_fetch_handler=_scrape_fetch_handler,
+            media_fetcher=FakeImageFetcher({IMAGE_URL_A: _png_bytes()}),
+        )
+
+    async def asyncTearDown(self):
+        self.http_patch.stop()
+        self.live_env.__exit__(None, None, None)
+        if self._old_data_dir is None:
+            os.environ.pop("PANDA_DATA_DIR", None)
+        else:
+            os.environ["PANDA_DATA_DIR"] = self._old_data_dir
+        if self._old_flag is None:
+            os.environ.pop(ENABLED_ENV_VAR, None)
+        else:
+            os.environ[ENABLED_ENV_VAR] = self._old_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _capture_real_tool_calls(self, xlsx_path: str) -> tuple[list, list]:
+        """Drives a throwaway, real ``ManagedAgentPOC`` (only the MODEL's
+        tool-selection DECISION is scripted; ``select_product``/
+        ``explain_bitrix_write_plan``/``_row_product_fields`` themselves
+        run unmodified against the real ingested XLSX row) to capture the
+        LITERAL ``tool_calls`` shape for turn 1 (select/prepare) and turn
+        2 (show write plan), on the SAME conversation so turn 2's
+        ``explain_bitrix_write_plan(identifier=None)`` genuinely resolves
+        against turn 1's own persisted ``current_identifier`` -- never a
+        hand-typed dict."""
+        from managed_agent_poc.flags import FLAG_ENV_VAR
+
+        old_flag = os.environ.get(FLAG_ENV_VAR)
+        os.environ[FLAG_ENV_VAR] = "true"
+        try:
+            capture_poc = ManagedAgentPOC(
+                dataset_store_path=os.path.join(self.tmp, "capture_dataset.sqlite3"),
+                session_db_path=os.path.join(self.tmp, "capture_session.sqlite3"),
+                state_store_path=os.path.join(self.tmp, "capture_state.sqlite3"),
+            )
+            turn1 = capture_poc.run_turn(
+                text=PRODUCTION_TEXT,
+                tenant_id="tenant-a",
+                conversation_id="conv-write-plan-capture",
+                artifact_bytes_path=xlsx_path,
+                artifact_filename=FILENAME,
+                test_scripted_plan=[
+                    {"call_tool": "select_product", "arguments": {"identifier": None}},
+                    {"final_output": "Товар подготовлен, в Bitrix не записан."},
+                ],
+            )
+            assert turn1.status == "COMPLETED", turn1
+            assert turn1.tool_calls[0]["output"]["status"] == "SELECTED", turn1.tool_calls
+            turn2 = capture_poc.run_turn(
+                text=WRITE_PLAN_TEXT,
+                tenant_id="tenant-a",
+                conversation_id="conv-write-plan-capture",
+                test_scripted_plan=[
+                    {"call_tool": "explain_bitrix_write_plan", "arguments": {"identifier": None}},
+                    {"final_output": "План записи показан, ничего не записано."},
+                ],
+            )
+            assert turn2.status == "COMPLETED", turn2
+            assert turn2.tool_calls[0]["output"]["status"] == "WRITE_PLAN", turn2.tool_calls
+        finally:
+            if old_flag is None:
+                os.environ.pop(FLAG_ENV_VAR, None)
+            else:
+                os.environ[FLAG_ENV_VAR] = old_flag
+        return turn1.tool_calls, turn2.tool_calls
+
+    async def test_prepare_then_show_write_plan_delegates_to_existing_write_plan_capability(self):
+        artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant="tenant-a",
+            owner="u1",
+            conv="conv-write-plan-1",
+            filename=FILENAME,
+            content=_xlsx_bytes(),
+        )
+        xlsx_path = os.path.join(self.tmp, "capture_" + FILENAME)
+        with open(xlsx_path, "wb") as fh:
+            fh.write(_xlsx_bytes())
+
+        real_tool_calls_turn1, real_tool_calls_turn2 = self._capture_real_tool_calls(xlsx_path)
+        real_sku = real_tool_calls_turn1[0]["output"]["sku"]
+        self.assertEqual(real_sku, PRODUCT_A_SKU)
+        self.assertEqual(real_tool_calls_turn2[0]["tool"], "explain_bitrix_write_plan")
+        self.assertEqual(real_tool_calls_turn2[0]["output"]["would_write"]["sku"], PRODUCT_A_SKU)
+
+        plan = [
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": real_tool_calls_turn1, "final_output": "irrelevant-1"},
+            {"current_identifier": PRODUCT_A_SKU, "tool_calls": real_tool_calls_turn2, "final_output": "irrelevant-2"},
+        ]
+
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn(plan)):
+            # TURN 1 -- prepares the FULL card; asserts the fixture's
+            # SKU/EAN/descriptions/characteristics/main image/gallery are
+            # all present in the prepared state.
+            r1 = await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-write-plan-1",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+            self.assertEqual(r1.metadata.get("managed_agent_tool"), "select_product")
+            self.assertEqual(r1.metadata.get("delegated_to"), "product_enrichment_bridge.prepare_complete_card")
+            self.assertIn(PRODUCT_A_SKU, r1.text)
+            self.assertIn(PRODUCT_A_EAN, r1.text)
+            self.assertIn("Характеристики:", r1.text)
+            self.assertNotIn("Характеристики: 0", r1.text)
+            self.assertIn("Главное изображение подготовлено: да", r1.text)
+
+            calls_before_turn2 = len(self.transport.calls)
+
+            # TURN 2 -- the REAL captured ``explain_bitrix_write_plan``
+            # tool call now must produce a genuine deterministic
+            # controlled Bitrix write plan, not the full-card preview.
+            r2 = await self.panda.respond(
+                ConversationRequest(
+                    text=WRITE_PLAN_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-2",
+                    conversation_id="conv-write-plan-1",
+                )
+            )
+            calls_after_turn2 = len(self.transport.calls)
+
+        self.assertEqual(r2.metadata.get("action_decision"), "MANAGED_AGENT")
+        self.assertEqual(r2.metadata.get("managed_agent_tool"), "explain_bitrix_write_plan")
+        # Delegated into the EXISTING deterministic write-plan renderer,
+        # never ``prepare_complete_card``'s own combined full-card preview.
+        self.assertEqual(r2.metadata.get("delegated_to"), "product_enrichment_bridge.format_write_plan_text")
+        self.assertEqual(r2.metadata.get("preparation_status"), "PREPARED")
+
+        text = r2.text
+        # This is a WRITE PLAN, not the generic ``format_combined_preview_
+        # text``/full-card rendering (that text always starts with
+        # "ПОДГОТОВЛЕННАЯ КАРТОЧКА"/enrichment-preview wording -- see
+        # ``product_enrichment.preview.format_enrichment_preview_text``).
+        self.assertIn("ЧТО БУДЕТ ЗАПИСАНО В BITRIX/ASPRO", text)
+        self.assertNotIn("format_combined_preview_text", text)
+
+        # SIMPLE_PRODUCT (#77) present, never SKU_WITH_OFFER.
+        write_preview = r2.metadata.get("bitrix_write_preview") or {}
+        self.assertEqual(write_preview.get("product_model", {}).get("model"), "SIMPLE_PRODUCT")
+        self.assertIn("обычный товар без торговых предложений", text)
+
+        # Exact resolved section ID present (existing category resolver,
+        # never invented).
+        self.assertEqual(write_preview.get("target_product", {}).get("resolved_section_id"), TV_SECTION_ID)
+        self.assertIn(f"ID {TV_SECTION_ID}", text)
+
+        # Purchase price and the EXISTING deterministic retail price
+        # (the fixture's own "розница" column -- never a new coefficient,
+        # never a hard-coded/model-generated price) both present.
+        self.assertIn(PRODUCT_A_PURCHASE_PRICE, text)
+        self.assertIn(PRODUCT_A_RETAIL_PRICE, text)
+        self.assertNotIn("коэффициент", text.lower())
+
+        # Verified writable fields listed (identity/pricing/category/
+        # content/media/characteristics), and #77's unmapped fields
+        # (EAN, sku/article on a SIMPLE_PRODUCT) reported HONESTLY --
+        # never a false "all fields mapped"/"Нет таких полей".
+        self.assertIn("Поля записи (по текущей политике записи):", text)
+        self.assertIn("НЕ будет записано: sku", text)
+        self.assertIn("НЕ будет записано: ean", text)
+        self.assertNotIn("Нет таких полей", text)
+
+        # Product Enrichment was NOT unnecessarily re-run: turn 2 added
+        # exactly ONE new Bitrix call (the read-only ``catalog.section.
+        # list`` ``prepare_single_product_write`` itself always performs),
+        # and zero new research/media network calls -- the SAME
+        # ``EnrichmentCache`` instance turn 1 already populated is reused
+        # (cache hit), so no repeated LG product-page fetch or image
+        # download happens for turn 2.
+        self.assertEqual(calls_after_turn2 - calls_before_turn2, 1)
+        self.assertEqual([m for m, _ in self.transport.calls][-1], "catalog.section.list")
+
+        # Zero real Bitrix mutation across BOTH turns.
+        methods_called = [m for m, _ in self.transport.calls]
+        self.assertNotIn("catalog.product.add", methods_called)
+        self.assertEqual(self.transport.product_add_count, 0)
+        self.assertEqual(self.transport.offer_add_count, 0)
+        self.assertEqual(self.transport.price_add_count, 0)
+        self.assertFalse(r1.metadata.get("mutated"))
+        self.assertFalse(r2.metadata.get("mutated"))
 
 
 @unittest.skipUnless(_SDK_AVAILABLE and _HAS_KEY, _LIVE_SKIP_REASON)
