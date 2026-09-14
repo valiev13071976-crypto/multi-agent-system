@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import replace
+from typing import Mapping
 
 from data_intel.analysis import analyze_margin, detect_anomalies
 from data_intel.business_process import (
@@ -173,6 +174,137 @@ def _first_row_hit(rows: list[dict], table) -> tuple[dict, str, str] | None:
         if value:
             return (row, col.source_name, value)
     return (row, "__row_index__", "1")
+
+
+def _row_identifier_hit(row: dict, table, fallback_value: str) -> tuple[dict, str, str]:
+    candidates = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
+    for col in candidates:
+        value = str(row.get(col.source_name) or "").strip()
+        if value:
+            return (row, col.source_name, value)
+    return (row, "__row_index__", fallback_value)
+
+
+# Production defect closure (generic product-workflow conversation
+# continuity): a follow-up turn with NO attachment and no explicit
+# SKU/EAN/model identifier still needs to resolve WHICH row of the
+# already-parsed dataset the user means, from semantic intent rather than
+# a literal sentence match -- e.g. "Возьми другой телевизор.", "Покажи
+# следующую позицию.", "Вернись к предыдущему товару.", "Нет, этот не
+# нужен." are all different wordings of the SAME underlying dataset
+# navigation actions (CHANGE_PRODUCT / previous-product), never a
+# per-sentence rule. Two independent, truncated word-STEM groups (never a
+# full literal phrase -- mirrors the SAME convention every other
+# stem-based signal in this codebase already uses, e.g.
+# ``business_assistant.action_continuation``'s own ``_CORRECTION_STEMS``
+# for the identical "reject current, want something else" shape in the
+# image-generation family) so many independent real-world phrasings match
+# without enumerating each one:
+#   - an explicit "a DIFFERENT one" word (any inflection of
+#     "другой"/"следующий"/"смени"/"поменяй"/another/next/different), OR
+#   - an explicit rejection of the CURRENTLY selected item ("уже
+#     был"/"уже создавали"/"не подходит"/"не нужен"/"не то"/"нет, этот" /
+#     already exists/not needed/not this one).
+_PRODUCT_CHANGE_ALT_STEMS = (
+    "друг",
+    "следующ",
+    "смен",
+    "поменя",
+    "иной вариант",
+    "another",
+    "next one",
+    "next product",
+    "next item",
+    "different one",
+    "different product",
+)
+_PRODUCT_CHANGE_REJECT_RE = re.compile(
+    r"уже\s+был|уже\s+создав|уже\s+добавля|не\s+подходит|не\s+подойд[её]т|"
+    r"не\s+нужен|не\s+нужна|не\s+нужно|не\s+то\b|нет,?\s+этот|"
+    r"already\s+(created|exists|added)|not\s+needed|not\s+this\s+one|no\s+good",
+    re.I,
+)
+# The SAME "return to what was there before" shape as
+# ``business_assistant.action_continuation``'s own ``_CORRECTION_STEMS``/
+# image-history convention, generalized to dataset row navigation: any
+# inflection of "предыдущий"/"назад"/"верни(сь)"/previous/back.
+_PRODUCT_PREVIOUS_STEMS = ("предыдущ", "верни", "назад", "previous", "go back", "back to")
+
+_ORDINAL_ROW_STEMS: tuple[tuple[str, int], ...] = (
+    ("втор", 1),
+    ("трет", 2),
+    ("четв", 3),
+    ("пят", 4),
+    ("шест", 5),
+    ("second", 1),
+    ("third", 2),
+    ("fourth", 3),
+    ("fifth", 4),
+)
+
+
+def _wants_different_product(text: str) -> bool:
+    blob = (text or "").casefold()
+    if not blob:
+        return False
+    if any(stem in blob for stem in _PRODUCT_CHANGE_ALT_STEMS):
+        return True
+    return bool(_PRODUCT_CHANGE_REJECT_RE.search(blob))
+
+
+def _wants_previous_product(text: str) -> bool:
+    blob = (text or "").casefold()
+    return any(stem in blob for stem in _PRODUCT_PREVIOUS_STEMS)
+
+
+def _wants_ordinal_row_index(text: str) -> int | None:
+    """Generalizes ``_wants_first_row``'s "the Nth product" shape to
+    ordinals beyond "first" (already handled, unchanged, by ``_wants_
+    first_row``/``_first_row_hit`` above) -- e.g. "Подготовь теперь второй
+    товар.". Zero-based row index, or ``None`` when no ordinal >= 2nd is
+    named."""
+    blob = (text or "").casefold()
+    if not blob:
+        return None
+    for stem, index in _ORDINAL_ROW_STEMS:
+        if stem in blob:
+            return index
+    return None
+
+
+def _row_hit_at_index(rows: list[dict], table, index: int) -> tuple[dict, str, str] | None:
+    if index < 0 or index >= len(rows):
+        return None
+    return _row_identifier_hit(rows[index], table, str(index + 1))
+
+
+def _row_hit_by_source_row(rows: list[dict], table, source_row) -> tuple[dict, str, str] | None:
+    if source_row in (None, ""):
+        return None
+    for row in rows:
+        if row.get("__source_row") == source_row:
+            return _row_identifier_hit(row, table, str(source_row))
+    return None
+
+
+def _next_distinct_row_hit(
+    rows: list[dict], table, *, exclude_source_row
+) -> tuple[dict, str, str] | None:
+    """Deterministic dataset-order "the next product" resolution -- never
+    a re-shuffled/random pick, and never the SAME row already selected.
+    Wraps back to the first row after the last one, so a workbook with N
+    products supports N-1 consecutive "another one" requests before
+    cycling."""
+    if len(rows) <= 1:
+        return None
+    try:
+        positions = [r.get("__source_row") for r in rows]
+        current_idx = positions.index(exclude_source_row)
+    except ValueError:
+        current_idx = -1
+    next_idx = (current_idx + 1) % len(rows)
+    row = rows[next_idx]
+    return _row_identifier_hit(row, table, str(row.get("__source_row") or next_idx + 1))
 
 
 def _extract_user_supplied_price(text: str) -> str | None:
@@ -790,9 +922,37 @@ class DataIntelligenceService:
             "product_fields": product_fields,
             "retail_price_preview": str(retail_price) if retail_price not in (None, "") else "",
             "summary_text": "\n".join(lines),
+            # Production defect closure (generic product-workflow
+            # conversation continuity): the row's own stable ingestion
+            # index, so a LATER follow-up turn with no attachment/no
+            # identifier of its own (see ``_next_distinct_row_hit``/
+            # ``_row_hit_by_source_row`` above) can resolve "another
+            # product"/"the previous product" deterministically against
+            # THIS same already-parsed dataset -- persisted by the caller
+            # (``WorkflowPandaConversationGateway._invoke_tool``) onto the
+            # conversation's active task, never re-derived by guessing.
+            "row_source_row": row.get("__source_row"),
         }
 
-    def execute_nl_request(self, dataset_id: str, text: str, *, tenant_id: str) -> dict:
+    def execute_nl_request(
+        self,
+        dataset_id: str,
+        text: str,
+        *,
+        tenant_id: str,
+        # Production defect closure (generic product-workflow conversation
+        # continuity): the CURRENTLY selected product's stable row identity
+        # (``{"source_row": ..., "history": [...]}``) from the conversation's
+        # active task -- optional and additive. Absent/empty for every
+        # pre-existing caller (default), so a fresh "analyze this
+        # spreadsheet"/first-lookup turn is completely unaffected. Only
+        # consulted in the SAME fallback zone ``_find_row_by_identifier``/
+        # ``_wants_first_row`` already occupy (an nl_ops-unsupported free-
+        # text turn that names no fresh identifier) -- never overrides a
+        # genuine filter/sort/dedup transform (tried first, unchanged,
+        # below) or an explicit identifier/first-row match (unchanged).
+        current_selection: Mapping | None = None,
+    ) -> dict:
         """Compile the free-text ``text`` into a bounded deterministic
         operation plan and apply it to ``dataset_id`` (Block 5.1 section 5/6).
 
@@ -820,9 +980,56 @@ class DataIntelligenceService:
                 "candidates": list(exc.candidates),
             }
         except UnsupportedOperationError:
+            current_source_row = None
+            selection_history: list = []
+            if isinstance(current_selection, Mapping):
+                current_source_row = current_selection.get("source_row")
+                selection_history = list(current_selection.get("history") or [])
+
             row_hit = _find_row_by_identifier(text, rows, table)
+            # Production defect closure (generic product-workflow
+            # conversation continuity): when a product is ALREADY selected
+            # (``current_selection`` present), an explicit CHANGE/PREVIOUS-
+            # product navigation stem in THIS turn is a stronger, more
+            # specific signal than a plain "first row"/ordinal match, and
+            # must be resolved BEFORE it -- ``resolve_action_turn``'s own
+            # separate, pre-existing, generically useful continuation-text
+            # merge (for short follow-ups that carry no identifying content
+            # of their own, e.g. "Продолжай...") legitimately concatenates
+            # the PRIOR turn's raw wording onto this turn's text, so an
+            # earlier "возьми первый товар..." selection would otherwise
+            # keep re-matching ``_wants_first_row`` on every later turn and
+            # silently mask a real, explicit "возьми другой"/"следующий"
+            # request. No selection yet (a brand-new dataset reference)
+            # is completely unaffected -- this branch only ever fires once
+            # a row is already active.
+            if row_hit is None and current_source_row not in (None, ""):
+                if _wants_previous_product(text) and selection_history:
+                    row_hit = _row_hit_by_source_row(rows, table, selection_history[-1])
+                elif _wants_different_product(text):
+                    row_hit = _next_distinct_row_hit(
+                        rows, table, exclude_source_row=current_source_row
+                    )
             if row_hit is None and _wants_first_row(text):
                 row_hit = _first_row_hit(rows, table)
+            if row_hit is None:
+                ordinal_index = _wants_ordinal_row_index(text)
+                if ordinal_index is not None:
+                    row_hit = _row_hit_at_index(rows, table, ordinal_index)
+            if (
+                row_hit is None
+                and current_source_row not in (None, "")
+                and not _wants_previous_product(text)
+            ):
+                # Not a table-wide identifier/ordinal/navigation request at
+                # all (e.g. "Покажи для него цену, EAN и точный раздел
+                # Bitrix.") -- a plain refinement/inquiry about the
+                # CURRENTLY selected product must keep showing THAT SAME
+                # product rather than falling back to a generic whole-table
+                # summary (requirement: "Do not silently return the same
+                # current product when ANOTHER product was requested" --
+                # none was, here).
+                row_hit = _row_hit_by_source_row(rows, table, current_source_row)
             if row_hit is not None:
                 return self._row_lookup_result(dataset_id, row_hit, text, table)
             return self._analyze_only_summary(dataset_id, desc, rows, table, tenant_id=tenant_id)

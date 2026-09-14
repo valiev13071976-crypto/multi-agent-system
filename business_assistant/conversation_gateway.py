@@ -321,6 +321,44 @@ class WorkflowPandaConversationGateway:
         self._media_fetcher = media_fetcher
         self.last_action_decision = None
 
+    def has_active_product_context(
+        self, *, tenant_id: str, owner_id: str, conversation_id: str
+    ) -> bool:
+        """True when this conversation already carries a durable product/
+        XLSX working context (an active FAMILY_EXCEL task with a parsed
+        dataset) established on an EARLIER turn -- the "conversation ->
+        active product task -> source dataset" boundary a later attachment-
+        less follow-up must resolve against instead of re-uploading.
+
+        Production defect closure (generic conversation/task-continuity
+        root cause): every new follow-up phrasing on an already active
+        product task previously needed its OWN narrow ``is_explicit_*``
+        escape hatch in ``business_assistant.intent.is_conversational`` --
+        each one individually recognizing that ITS specific wording must
+        reach ``WorkflowPandaConversationGateway`` rather than the
+        attachment-blind legacy business-workflow engine (see PRs #62-#69).
+        This is the single, general, STATE-based (not phrase-based) signal
+        those escape hatches were each independently working around: once a
+        product/XLSX task is already active for this conversation, ANY
+        later wording -- regardless of exact phrasing -- should stay on the
+        SAME conversational path that already holds the state needed to
+        resolve it. Callers still gate this behind their own explicit
+        immediate-write/publish-verb exception, mirroring the existing
+        attachment-presence check it sits alongside; this method itself
+        never grants write approval -- an actual governed Bitrix write
+        still requires ``resolve_action_turn``'s own explicit confirmation
+        predicate downstream, completely unaffected by this check."""
+        if not conversation_id:
+            return False
+        from business_assistant.action_continuation import FAMILY_EXCEL
+
+        task = self._action_store.get(
+            tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id
+        )
+        if task is None or task.family != FAMILY_EXCEL:
+            return False
+        return bool(str(task.parameters.get("dataset_id") or "").strip())
+
     def _record_latency(self, t0: float, follow_up_ms: int) -> None:
         router_obj = getattr(self._run_router, "__self__", None)
         if router_obj is None:
@@ -539,6 +577,7 @@ class WorkflowPandaConversationGateway:
             # column is which (see resolve_bitrix_write_confirmation).
             if str(data.get("status") or "") == "ROW_FOUND":
                 product_fields = data.get("product_fields")
+                new_source_row = data.get("row_source_row")
                 if isinstance(product_fields, dict) and product_fields:
                     if task.parameters.get("bitrix_product_fields") != dict(product_fields):
                         # Product enrichment pipeline follow-up: a NEW
@@ -549,6 +588,32 @@ class WorkflowPandaConversationGateway:
                         task.parameters.pop("bitrix_enrichment_write_request", None)
                         task.parameters.pop("bitrix_enrichment_characteristic_status", None)
                         task.parameters.pop("bitrix_enrichment_preview", None)
+                        # Production defect closure (generic product-
+                        # workflow conversation continuity): track the row
+                        # navigation history (see ``data_intel.service``'s
+                        # ``_row_hit_by_source_row``/``_next_distinct_row_
+                        # hit``) so a LATER "вернись к предыдущему товару"
+                        # follow-up can resolve deterministically -- taken
+                        # verbatim from the PRIOR selection, never guessed.
+                        prior_selection = dict(task.parameters.get("bitrix_row_selection") or {})
+                        prior_source_row = prior_selection.get("source_row")
+                        history = list(prior_selection.get("history") or [])
+                        if prior_source_row not in (None, "") and prior_source_row != new_source_row:
+                            history.append(prior_source_row)
+                        if new_source_row not in (None, ""):
+                            task.parameters["bitrix_row_selection"] = {
+                                "source_row": new_source_row,
+                                "history": history,
+                            }
+                    elif new_source_row not in (None, ""):
+                        # SAME product re-surfaced (e.g. a plain refinement
+                        # question about "него") -- keep the existing
+                        # selection/history unchanged, just ensure it stays
+                        # populated for later navigation.
+                        selection = dict(task.parameters.get("bitrix_row_selection") or {})
+                        selection.setdefault("source_row", new_source_row)
+                        selection.setdefault("history", [])
+                        task.parameters["bitrix_row_selection"] = selection
                     task.parameters["bitrix_product_fields"] = dict(product_fields)
                     changed = True
                 retail_preview = str(data.get("retail_price_preview") or "")
