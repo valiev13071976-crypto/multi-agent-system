@@ -242,6 +242,42 @@ def _redact_for_log(text: str) -> str:
 _PRODUCT_RESOLVING_TOOLS = ("select_product", "explain_bitrix_write_plan")
 
 
+def _iter_resolved_product_calls(tool_calls: list):
+    """Shared scan (used by BOTH ``_selected_product_raw_fields`` and
+    ``_resolved_product_tool`` below) that yields ``(tool_name,
+    resolved_fields)`` for every tool call in this turn that ACTUALLY
+    resolved a specific product -- ``select_product``'s own ``SELECTED``
+    status, or ``explain_bitrix_write_plan``'s own ``WRITE_PLAN``
+    status -- in call order. A call that does not resolve a product
+    (``NOT_FOUND``/``NO_PRODUCT_SELECTED``, or any other tool) is simply
+    skipped, never recorded.
+
+    Production defect closure #5 (competing-path defect after PR #82):
+    the ONE thing this shared scan exists to guarantee is that "which
+    fields to delegate" and "which tool produced that resolution" can
+    NEVER describe two different tool calls within the same turn --
+    before this helper existed, ``maybe_respond_via_managed_agent`` used
+    ``turn_result.tool_calls[0]["tool"]`` for that second question, which
+    silently disagreed with this scan whenever the turn's FIRST tool
+    call was a distinct, unrelated, or failed attempt (e.g. a model that
+    tries ``explain_bitrix_write_plan`` first -- gets ``NO_PRODUCT_
+    SELECTED`` on a brand-new conversation -- and only then calls
+    ``select_product``, which succeeds)."""
+    for call in tool_calls or []:
+        if not isinstance(call, Mapping):
+            continue
+        tool = str(call.get("tool") or "")
+        output = call.get("output")
+        if tool not in _PRODUCT_RESOLVING_TOOLS or not isinstance(output, Mapping):
+            continue
+        if tool == "select_product" and output.get("status") == "SELECTED":
+            yield tool, {k: v for k, v in output.items() if k not in ("status", "matched_by")}
+        elif tool == "explain_bitrix_write_plan" and output.get("status") == "WRITE_PLAN":
+            would_write = output.get("would_write")
+            if isinstance(would_write, Mapping):
+                yield tool, dict(would_write)
+
+
 def _selected_product_raw_fields(tool_calls: list) -> dict | None:
     """Finds the LAST tool call in this turn that resolved a specific
     product -- ``select_product``'s own ``SELECTED`` status, or
@@ -254,20 +290,26 @@ def _selected_product_raw_fields(tool_calls: list) -> dict | None:
     NOT_FOUND/NO_PRODUCT_SELECTED lookup) -- the caller must then fall
     back to the model's own ``final_output`` text unchanged."""
     resolved: dict | None = None
-    for call in tool_calls or []:
-        if not isinstance(call, Mapping):
-            continue
-        tool = str(call.get("tool") or "")
-        output = call.get("output")
-        if tool not in _PRODUCT_RESOLVING_TOOLS or not isinstance(output, Mapping):
-            continue
-        if tool == "select_product" and output.get("status") == "SELECTED":
-            resolved = {k: v for k, v in output.items() if k not in ("status", "matched_by")}
-        elif tool == "explain_bitrix_write_plan" and output.get("status") == "WRITE_PLAN":
-            would_write = output.get("would_write")
-            if isinstance(would_write, Mapping):
-                resolved = dict(would_write)
+    for _tool, fields in _iter_resolved_product_calls(tool_calls):
+        resolved = fields
     return resolved
+
+
+def _resolved_product_tool(tool_calls: list) -> str:
+    """The name of the tool call that produced the CURRENT resolution --
+    i.e. the exact SAME call ``_selected_product_raw_fields`` used above
+    (both are driven by ``_iter_resolved_product_calls``, so they can
+    never disagree) -- NOT necessarily ``tool_calls[0]``. This is the
+    routing signal ``maybe_respond_via_managed_agent`` must use to
+    distinguish PREPARE_PRODUCT (``select_product``) from SHOW_WRITE_PLAN
+    (``explain_bitrix_write_plan``); see ``_iter_resolved_product_calls``'s
+    own docstring for the exact competing-path defect this closes.
+    Returns ``""`` when no product was resolved this turn (mirrors
+    ``_selected_product_raw_fields``'s own ``None`` in that case)."""
+    tool = ""
+    for name, _fields in _iter_resolved_product_calls(tool_calls):
+        tool = name
+    return tool
 
 
 def _canonical_fields_and_retail_price(raw: Mapping) -> tuple[dict, str]:
@@ -774,11 +816,27 @@ async def maybe_respond_via_managed_agent(
         )
         # Production defect closure #4: PREPARE_PRODUCT and SHOW_WRITE_PLAN
         # are two distinct semantic actions -- dispatch on the ALREADY
-        # observable ``selected_tool`` (no phrase/regex/stem routing; this
-        # is the exact same tool-name signal #79/#80/#81 already log)
+        # observable resolved-product tool (no phrase/regex/stem routing;
+        # this is the exact same tool-name signal #79/#80/#81 already log)
         # instead of always delegating into ``prepare_complete_card``'s
         # own full-card preview text.
-        is_write_plan_request = selected_tool == "explain_bitrix_write_plan"
+        #
+        # Production defect closure #5 (competing-path defect found after
+        # #82 shipped): this MUST be the tool that actually produced
+        # ``raw_fields`` above (``_resolved_product_tool`` -- the exact
+        # same scan ``_selected_product_raw_fields`` used), never
+        # ``selected_tool``/``tool_calls[0]``. A real turn can contain
+        # MORE than one tool call (the Agents SDK's own agentic loop --
+        # already proven live for other shapes in
+        # ``ManagedAgentRealSubprocessContractTests``); when the model's
+        # FIRST call is a distinct/failed attempt (e.g.
+        # ``explain_bitrix_write_plan`` returning ``NO_PRODUCT_SELECTED``
+        # on a brand-new conversation) and only a LATER call actually
+        # resolves the product (``select_product`` -> ``SELECTED``),
+        # ``tool_calls[0]`` silently disagreed with the resolution this
+        # dispatch must honor -- wrongly diverting a genuine PREPARE_
+        # PRODUCT/full-card turn into the SHOW_WRITE_PLAN renderer.
+        is_write_plan_request = _resolved_product_tool(turn_result.tool_calls) == "explain_bitrix_write_plan"
         delegate = _delegate_to_existing_write_plan if is_write_plan_request else _delegate_to_existing_product_preparation
         _log_event(EVENT_PRODUCT_PREPARATION_DELEGATION_STARTED, tenant_id=tenant_id)
         try:
