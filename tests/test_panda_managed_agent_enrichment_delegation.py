@@ -77,6 +77,81 @@ fake that reproduces the SAME tool-call shapes already proven live in
 ``tests/test_panda_managed_agent_integration.py`` -- this test asserts
 DELEGATION into the existing capabilities, it does not re-implement or
 guess their expected business output).
+
+==================================================================
+PRODUCTION DEFECT CLOSURE #2 (real production, AFTER the above fix
+shipped as PR #79): the returned card was STILL degraded/raw-row-like.
+==================================================================
+
+Proven root cause: the fix above (delegation) is functionally correct --
+it was verified, in this same defect closure, against the REAL, live
+``ManagedAgentPOC.run_turn()`` output (a genuine OpenAI Agents SDK call,
+not a hand-crafted double) for multiple representative price-list
+shapes, including the exact shape that reproduces the reported
+production symptom (a price list with NO distinct retail-price column):
+delegation into ``prepare_complete_card`` fired correctly and replaced
+the raw model text every single time this was exercised directly. The
+remaining, still-open gap is that ``_delegate_to_existing_product_
+preparation`` had exactly ONE way to fail closed and completely silent:
+any exception raised by the existing pipeline (real research/media-fetch
+network I/O, a real Bitrix connection issue, or any other real-deployment-
+specific condition this sandbox's fixtures/mocks do not reproduce) was
+caught and converted into a bare ``None`` -- and the caller's ONLY
+fallback for that ``None`` was to re-present the turn's ORIGINAL raw
+Managed Agent tool/model text, with NO signal anywhere (to the user or in
+metadata) that the "completed card" being shown was actually never
+produced by the deterministic pipeline at all. This is hypothesis (F)
+from the task: "the delegation throws and #79's fail-open silently
+returns the old raw Managed Agent output" -- and it is the exact
+mechanism that explains the reported symptom (a model-synthesized
+"розничная цена не рассчитана (нужен расчёт по правилам Panda)" /
+"Поля без подтверждённого места записи в Bitrix/Aspro: Нет таких полей"
+text, which is recognizably the RAW model's own free-form summary of an
+unresolved tool projection, not ``format_combined_preview_text``'s fixed,
+deterministic rendering).
+
+Fix (this change, ``managed_agent_poc/panda_bridge.py``):
+1. Safe, non-secret, greppable diagnostic events (``EVENT_MANAGED_
+   PRODUCT_SELECTED`` / ``EVENT_PRODUCT_PREPARATION_DELEGATION_STARTED``
+   / ``_SUCCEEDED`` / ``_FAILED`` / ``_REQUIRED_BUT_NOT_REACHED``) at
+   every decision point, so a future occurrence in production is finally
+   directly observable instead of indistinguishable from a genuine
+   success.
+2. ``_delegate_to_existing_product_preparation`` now returns
+   ``(result, reason)`` instead of a bare ``result | None`` -- ``reason``
+   is one of a small, static set of non-secret codes
+   (``"missing_title_or_sku"``, ``"timeout"``,
+   ``f"exception:{type(exc).__name__}"``) a caller/operator can act on.
+3. THE central contract fix (Step 2 of the task): when a product WAS
+   resolved this turn (i.e. complete preparation was semantically
+   required) but delegation fails for ANY reason, ``maybe_respond_via_
+   managed_agent`` no longer silently falls back to the raw Managed
+   Agent tool/model text. It now returns an EXPLICIT, honest
+   ``_controlled_preparation_failure_text`` -- only the already-confirmed
+   raw identity fields, a clear "preparation not completed" statement,
+   and the safe failure reason -- plus ``metadata["preparation_status"]
+   == "FAILED"`` (vs. ``"PREPARED"`` on success). This is a semantic/
+   tool-state distinction (a product WAS resolved this turn), never
+   phrase matching, and never touches the separate, correct behavior for
+   a pure spreadsheet-analysis turn (no product resolved -> the model's
+   own output is still returned unchanged, see
+   ``test_no_product_resolved_falls_back_to_raw_model_output_unchanged``).
+4. A bounded delegation timeout (``DEFAULT_DELEGATION_TIMEOUT_S``) so a
+   slow real dependency degrades to the same explicit failure contract
+   instead of hanging the turn indefinitely.
+
+New tests below prove: the honest failure contract fires end to end
+through the real ``WorkflowPandaConversationGateway.respond()`` entry
+point when delegation raises (``ManagedAgentDelegationFailureContractTests``);
+and the delegation success path is verified against a LITERAL, real-
+subprocess-captured ``tool_calls``/``final_output`` shape, not a
+hand-crafted guess (``ManagedAgentRealSubprocessContractTests`` --
+this is exactly the "test double differed from real ManagedAgentPOC
+output" gap the task asked to close). A further LIVE test (skipped
+cleanly without a real ``OPENAI_API_KEY``/installed SDK, same convention
+as ``tests/test_panda_managed_agent_integration.py``) exercises a REAL,
+non-mocked ``ManagedAgentPOC.run_turn()`` call end to end through the
+full delegation boundary (``LiveRealSubprocessDelegationTests``).
 """
 
 from __future__ import annotations
@@ -92,6 +167,7 @@ from openpyxl import Workbook
 
 from business_assistant.conversation_gateway import ConversationRequest
 from integrations.production.http import BoundedHttpClient
+from managed_agent_poc import isolated_env
 from managed_agent_poc.adapter import ManagedAgentPOC, ManagedAgentTurnResult
 from managed_agent_poc.panda_bridge import ENABLED_ENV_VAR, _durable_paths
 from managed_agent_poc.state_store import ConversationStateStore, PersistedState
@@ -99,6 +175,10 @@ from product_enrichment.media_fetch import FakeImageFetcher
 from tests.test_bitrix_live_product_create_write import _bridge_and_activation, _LiveEnv, _RecordingTransport
 from tests.test_panda_product_enrichment_conversational import _panda, _register_upload
 from tools.search.fake_provider import FakeSearchProvider, fake_result
+
+_SDK_AVAILABLE = isolated_env.is_installed()
+_HAS_KEY = bool(os.environ.get("OPENAI_API_KEY"))
+_LIVE_SKIP_REASON = "isolated OpenAI Agents SDK not installed or OPENAI_API_KEY not set in this environment"
 
 FILENAME = "LG_TV.xlsx"
 
@@ -632,8 +712,9 @@ class PandaBridgeDelegationUnitTests(unittest.IsolatedAsyncioTestCase):
     async def test_delegate_returns_none_without_title_or_sku(self):
         from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
 
-        result = await _delegate_to_existing_product_preparation({"category": "TV"}, tenant_id="tenant-a")
+        result, reason = await _delegate_to_existing_product_preparation({"category": "TV"}, tenant_id="tenant-a")
         self.assertIsNone(result)
+        self.assertEqual(reason, "missing_title_or_sku")
 
     async def test_delegate_calls_existing_prepare_complete_card_exactly_once(self):
         from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
@@ -642,11 +723,12 @@ class PandaBridgeDelegationUnitTests(unittest.IsolatedAsyncioTestCase):
             "business_assistant.product_enrichment_bridge.prepare_complete_card",
             new=mock.AsyncMock(return_value={"text": "OK", "write_preview": {}}),
         ) as mocked:
-            result = await _delegate_to_existing_product_preparation(
+            result, reason = await _delegate_to_existing_product_preparation(
                 {"name": "LG TV", "sku": "S1", "ean": "111", "category": "TV", "brand": "LG", "purchase_price": "100", "retail_price": "150"},
                 tenant_id="tenant-a",
             )
         self.assertEqual(result, {"text": "OK", "write_preview": {}})
+        self.assertEqual(reason, "")
         mocked.assert_awaited_once()
         _args, kwargs = mocked.call_args
         self.assertEqual(kwargs["tenant_id"], "tenant-a")
@@ -657,16 +739,393 @@ class PandaBridgeDelegationUnitTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_delegate_fails_open_when_existing_pipeline_raises(self):
+        """Production defect closure #2's own hypothesis (F): if the
+        EXISTING pipeline itself raises for any reason, delegation must
+        report an EXPLICIT, non-secret reason code (never silently return
+        a bare ``None`` a caller could mistake for a different failure
+        mode)."""
         from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
 
         with mock.patch(
             "business_assistant.product_enrichment_bridge.prepare_complete_card",
             new=mock.AsyncMock(side_effect=RuntimeError("boom")),
         ):
-            result = await _delegate_to_existing_product_preparation(
+            result, reason = await _delegate_to_existing_product_preparation(
                 {"name": "LG TV", "sku": "S1"}, tenant_id="tenant-a"
             )
         self.assertIsNone(result)
+        self.assertEqual(reason, "exception:RuntimeError")
+
+    async def test_delegate_reports_timeout_instead_of_hanging(self):
+        """A slow real dependency (real research/media-fetch network I/O
+        in a real deployment) must degrade to an explicit ``"timeout"``
+        reason within the bounded ``timeout_s``, never hang the turn."""
+        import asyncio
+
+        from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
+
+        async def _hangs(**_kwargs):
+            await asyncio.sleep(10.0)
+            return {"text": "too late"}
+
+        with mock.patch(
+            "business_assistant.product_enrichment_bridge.prepare_complete_card",
+            new=_hangs,
+        ):
+            result, reason = await _delegate_to_existing_product_preparation(
+                {"name": "LG TV", "sku": "S1"}, tenant_id="tenant-a", timeout_s=0.05
+            )
+        self.assertIsNone(result)
+        self.assertEqual(reason, "timeout")
+
+    def test_controlled_preparation_failure_text_never_claims_completed_card(self):
+        """Step 2 contract fix: the honest failure message must surface
+        ONLY the raw fields already confirmed by the price list, and must
+        explicitly say retail price/media/characteristics/Bitrix mapping
+        were NOT prepared -- never silently presenting them as ready or
+        omitting the failure entirely (the exact defect real production
+        exposed)."""
+        from managed_agent_poc.panda_bridge import _controlled_preparation_failure_text
+
+        text = _controlled_preparation_failure_text(
+            {
+                "name": "Телевизор LG 100MRGB96B6.ARUG",
+                "sku": "100MRGB96B6.ARUG",
+                "ean": "8806096796849",
+                "brand": "LG",
+                "category": "Телевизоры",
+                "purchase_price": "717790.30",
+            },
+            reason="exception:RuntimeError",
+        )
+        self.assertIn("НЕ ЗАВЕРШЕНА", text)
+        self.assertIn("100MRGB96B6.ARUG", text)
+        self.assertIn("8806096796849", text)
+        self.assertIn("exception:RuntimeError", text)
+        self.assertIn("НЕ подготовлены", text)
+        self.assertIn("ничего не записано", text.lower())
+        # Never a false claim that every field has a confirmed Bitrix
+        # destination, and never a fabricated retail price/section.
+        self.assertNotIn("Нет таких полей", text)
+
+
+class ManagedAgentDelegationFailureContractTests(unittest.IsolatedAsyncioTestCase):
+    """Production defect closure #2 -- STEP 2: when a product IS resolved
+    this turn but the existing deterministic preparation pipeline itself
+    fails, the turn must return an EXPLICIT controlled preparation
+    failure, never the raw, un-enriched Managed Agent tool/model
+    projection silently presented as if it were the completed card (this
+    is the exact defect the real production run exposed AFTER #79 already
+    shipped delegation -- #79's own unit test never exercised the
+    "delegation raises" branch end to end through ``maybe_respond_via_
+    managed_agent``, only through the lower-level helper in isolation)."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old_data_dir = os.environ.get("PANDA_DATA_DIR")
+        self._old_flag = os.environ.get(ENABLED_ENV_VAR)
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+        self.panda, self.artifact_service = _panda()
+
+    async def asyncTearDown(self):
+        if self._old_data_dir is None:
+            os.environ.pop("PANDA_DATA_DIR", None)
+        else:
+            os.environ["PANDA_DATA_DIR"] = self._old_data_dir
+        if self._old_flag is None:
+            os.environ.pop(ENABLED_ENV_VAR, None)
+        else:
+            os.environ[ENABLED_ENV_VAR] = self._old_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_delegation_exception_returns_explicit_failure_not_raw_echo(self):
+        artifact_id = await _register_upload(
+            self.artifact_service, tenant="tenant-a", owner="u1", conv="conv-fail-1", filename=FILENAME, content=_xlsx_bytes()
+        )
+        raw_model_text = f"Товар {PRODUCT_A_NAME}, категория {CATEGORY}, закупочная цена {PRODUCT_A_PURCHASE_PRICE}."
+        plan = [
+            {
+                "current_identifier": PRODUCT_A_SKU,
+                "tool_calls": [
+                    {
+                        "tool": "select_product",
+                        "output": {
+                            "status": "SELECTED",
+                            "matched_by": "next_unspecified",
+                            **_raw_tool_fields(
+                                name=PRODUCT_A_NAME,
+                                sku=PRODUCT_A_SKU,
+                                ean=PRODUCT_A_EAN,
+                                purchase_price=PRODUCT_A_PURCHASE_PRICE,
+                                retail_price=PRODUCT_A_RETAIL_PRICE,
+                            ),
+                        },
+                    }
+                ],
+                "final_output": raw_model_text,
+            }
+        ]
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn(plan)), mock.patch(
+            "business_assistant.product_enrichment_bridge.prepare_complete_card",
+            new=mock.AsyncMock(side_effect=RuntimeError("simulated real-production dependency failure")),
+        ):
+            result = await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-fail-1",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+
+        # The exact defect real production exposed: the raw model/tool
+        # text must NEVER be silently presented as the completed card.
+        self.assertNotEqual(result.text, raw_model_text)
+        self.assertIn("НЕ ЗАВЕРШЕНА", result.text)
+        self.assertIn(PRODUCT_A_SKU, result.text)
+        self.assertIn(PRODUCT_A_EAN, result.text)
+        self.assertNotIn("Нет таких полей", result.text)
+
+        self.assertEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
+        self.assertEqual(result.metadata.get("preparation_status"), "FAILED")
+        self.assertEqual(result.metadata.get("preparation_failure_reason"), "exception:RuntimeError")
+        self.assertNotIn("delegated_to", result.metadata)
+        self.assertFalse(result.metadata.get("mutated"))
+
+
+class ManagedAgentRealSubprocessContractTests(unittest.IsolatedAsyncioTestCase):
+    """Production defect closure #2 -- CRITICAL ACCEPTANCE ASSERTION:
+    exercises the REAL, serialized ``ManagedAgentPOC.run_turn()`` output
+    shape captured from an ACTUAL run of the isolated OpenAI Agents SDK
+    subprocess against a production-shaped LG_TV-style price list (NOT a
+    hand-crafted test double that might silently drift from what the real
+    runtime actually serializes -- exactly the gap #79's own test left
+    open: it only ever exercised ``_make_fake_run_turn``'s hand-crafted
+    tool-call shape, so a subtle mismatch between that shape and the real
+    subprocess's own serialization would never have been caught).
+
+    The literal ``tool_calls``/``final_output`` fixtures below were
+    captured verbatim from real ``ManagedAgentPOC.run_turn()`` calls (see
+    the PR description for the exact reproduction commands) against a
+    representative production-shaped price-list row that has NO distinct
+    retail-price column (reproducing the reported "розничная цена не
+    рассчитана" / "не найдено в прайсе" production symptom). No live
+    OpenAI call is required to run this test -- only ``ManagedAgentPOC.
+    run_turn`` is replaced, exactly as much of the boundary as #79's own
+    test replaced, but with the REAL, not reconstructed, serialized
+    shape."""
+
+    async def asyncSetUp(self):
+        self.transport = _RecordingTransport(sections=[TV_SECTION, ELECTRONICS_SECTION])
+        self.live_env = _LiveEnv()
+        self.live_env.__enter__()
+        self.http_patch = mock.patch.object(BoundedHttpClient, "request", side_effect=self.transport)
+        self.http_patch.start()
+        self.bridge, _activation = _bridge_and_activation()
+
+        self.tmp = tempfile.mkdtemp()
+        self._old_data_dir = os.environ.get("PANDA_DATA_DIR")
+        self._old_flag = os.environ.get(ENABLED_ENV_VAR)
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+
+        self.panda, self.artifact_service = _panda(
+            bitrix_bridge=self.bridge,
+            search_provider=FakeSearchProvider({}),
+            media_fetcher=FakeImageFetcher({}),
+        )
+
+    async def asyncTearDown(self):
+        self.http_patch.stop()
+        self.live_env.__exit__(None, None, None)
+        if self._old_data_dir is None:
+            os.environ.pop("PANDA_DATA_DIR", None)
+        else:
+            os.environ["PANDA_DATA_DIR"] = self._old_data_dir
+        if self._old_flag is None:
+            os.environ.pop(ENABLED_ENV_VAR, None)
+        else:
+            os.environ[ENABLED_ENV_VAR] = self._old_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_real_subprocess_shape_without_retail_price_column_still_delegates(self):
+        """Captured verbatim from a REAL ``ManagedAgentPOC.run_turn()``
+        call against a price list with sku/product_name/category/brand/
+        ean/purchase_price columns but NO retail-price column (the exact
+        shape that reproduced the reported production symptom locally:
+        ``final_output`` reads "Розничная цена: не определена в прайсе",
+        "Основное изображение: не найдено в прайсе" -- proving this was
+        the RAW model synthesis, not the deterministic pipeline's own
+        rendering)."""
+        real_tool_calls = [
+            {
+                "tool": "select_product",
+                "output": {
+                    "status": "SELECTED",
+                    "matched_by": "next_unspecified",
+                    "sku": PRODUCT_A_SKU,
+                    "name": PRODUCT_A_NAME,
+                    "category": CATEGORY,
+                    "brand": BRAND,
+                    "ean": PRODUCT_A_EAN,
+                    "purchase_price": PRODUCT_A_PURCHASE_PRICE,
+                },
+            }
+        ]
+        real_final_output = (
+            "Подготовлена карточка товара на основе прайса:\n\n"
+            f"- **Название:** {PRODUCT_A_NAME}\n"
+            f"- **Артикул:** `{PRODUCT_A_SKU}`\n"
+            f"- **EAN:** `{PRODUCT_A_EAN}`\n"
+            f"- **Бренд:** {BRAND}\n"
+            f"- **Закупочная цена:** {PRODUCT_A_PURCHASE_PRICE}\n"
+            "- **Розничная цена:** не определена в прайсе\n"
+            f"- **Раздел каталога:** {CATEGORY}\n"
+            "- **Основное изображение:** не найдено в прайсе\n"
+            "- **Галерея:** не найдена\n\n"
+            "**Поля без подтверждённого места записи в Bitrix/Aspro:** "
+            "розничная цена, изображения и галерея, характеристики.\n\n"
+            "В Bitrix/Aspro ничего не записывалось и не публиковалось."
+        )
+        plan = [{"current_identifier": PRODUCT_A_SKU, "tool_calls": real_tool_calls, "final_output": real_final_output}]
+
+        artifact_id = await _register_upload(
+            self.artifact_service, tenant="tenant-a", owner="u1", conv="conv-real-1", filename=FILENAME, content=_xlsx_bytes()
+        )
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn(plan)):
+            result = await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-real-1",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+
+        # This is the EXACT real production regression: the raw model
+        # synthesis must NEVER be the final response once a product was
+        # resolved -- delegation into the existing deterministic pipeline
+        # must have replaced it.
+        self.assertNotEqual(result.text, real_final_output)
+        self.assertEqual(result.metadata.get("delegated_to"), "product_enrichment_bridge.prepare_complete_card")
+        self.assertEqual(result.metadata.get("preparation_status"), "PREPARED")
+        self.assertIn(PRODUCT_A_SKU, result.text)
+        self.assertIn(PRODUCT_A_EAN, result.text)
+        # No fake/derived retail price: the real pipeline honestly reports
+        # the SAME missing-retail-price state the raw row itself had,
+        # never inventing one, and never asking the user for a pricing
+        # coefficient (Step 4's own requirement).
+        self.assertNotIn("коэффициент", result.text.lower())
+        self.assertFalse(result.metadata.get("mutated"))
+        self.assertNotIn("catalog.product.add", [m for m, _ in self.transport.calls])
+
+
+@unittest.skipUnless(_SDK_AVAILABLE and _HAS_KEY, _LIVE_SKIP_REASON)
+class LiveRealSubprocessDelegationTests(unittest.IsolatedAsyncioTestCase):
+    """Production defect closure #2 -- the strongest possible version of
+    the "critical acceptance assertion": a REAL, non-mocked
+    ``ManagedAgentPOC.run_turn()`` call (genuine OpenAI Agents SDK
+    subprocess, real model) through the FULL, real
+    ``WorkflowPandaConversationGateway.respond()`` entry point, proving
+    the delegation boundary against the actual runtime contract rather
+    than any hand-crafted or previously-captured double. Skips cleanly
+    (never errors) when the isolated SDK is not installed or no
+    ``OPENAI_API_KEY`` is set, exactly like ``tests/test_panda_managed_
+    agent_integration.py`` already does for the same reason. Zero real
+    Bitrix mutation (mocked HTTP transport, same as every other test in
+    this file); zero real web/media network calls (no search provider,
+    ``FakeImageFetcher`` with no fixtures -- only the OpenAI model call
+    itself is real)."""
+
+    async def asyncSetUp(self):
+        self.transport = _RecordingTransport(sections=[TV_SECTION, ELECTRONICS_SECTION])
+        self.live_env = _LiveEnv()
+        self.live_env.__enter__()
+        self.http_patch = mock.patch.object(BoundedHttpClient, "request", side_effect=self.transport)
+        self.http_patch.start()
+        self.bridge, _activation = _bridge_and_activation()
+
+        self.tmp = tempfile.mkdtemp()
+        self._old_data_dir = os.environ.get("PANDA_DATA_DIR")
+        self._old_flag = os.environ.get(ENABLED_ENV_VAR)
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+
+        self.panda, self.artifact_service = _panda(
+            bitrix_bridge=self.bridge,
+            search_provider=FakeSearchProvider({}),
+            media_fetcher=FakeImageFetcher({}),
+        )
+
+    async def asyncTearDown(self):
+        self.http_patch.stop()
+        self.live_env.__exit__(None, None, None)
+        if self._old_data_dir is None:
+            os.environ.pop("PANDA_DATA_DIR", None)
+        else:
+            os.environ["PANDA_DATA_DIR"] = self._old_data_dir
+        if self._old_flag is None:
+            os.environ.pop(ENABLED_ENV_VAR, None)
+        else:
+            os.environ[ENABLED_ENV_VAR] = self._old_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    async def test_live_production_request_delegates_to_existing_preparation_pipeline(self):
+        """The EXACT real production first-turn request/attachment shape
+        (a price list with sku/product_name/category/brand/ean/
+        purchase_price columns and NO distinct retail-price column --
+        the shape verified to reproduce the reported production symptom
+        when delegation is bypassed) driven through a REAL model call,
+        asserting the final response is the deterministic pipeline's own
+        rendering, never the model's raw free-form synthesis."""
+        wb = Workbook()
+        ws = wb.active
+        ws.append(["sku", "product_name", "category", "brand", "ean", "purchase_price"])
+        ws.append([PRODUCT_A_SKU, PRODUCT_A_NAME, CATEGORY, BRAND, PRODUCT_A_EAN, PRODUCT_A_PURCHASE_PRICE])
+        buf = io.BytesIO()
+        wb.save(buf)
+
+        artifact_id = await _register_upload(
+            self.artifact_service, tenant="tenant-a", owner="u1", conv="conv-live-1", filename=FILENAME, content=buf.getvalue()
+        )
+        result = await self.panda.respond(
+            ConversationRequest(
+                text=PRODUCTION_TEXT,
+                tenant_id="tenant-a",
+                user_id="u1",
+                request_id="req-1",
+                conversation_id="conv-live-1",
+                attachment_refs=(artifact_id,),
+            )
+        )
+
+        self.assertEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
+        self.assertIn(result.metadata.get("managed_agent_tool"), ("select_product", "explain_bitrix_write_plan"))
+        self.assertFalse(result.metadata.get("mutated"))
+        # Either the deterministic pipeline prepared the card, or it
+        # failed and reported an EXPLICIT, honest failure -- either way,
+        # the raw model's own free-form synthesis (asking the user for a
+        # pricing coefficient, claiming "Нет таких полей") must never be
+        # silently presented as the completed card.
+        self.assertIn(result.metadata.get("preparation_status"), ("PREPARED", "FAILED"))
+        if result.metadata.get("preparation_status") == "PREPARED":
+            self.assertEqual(
+                result.metadata.get("delegated_to"), "product_enrichment_bridge.prepare_complete_card"
+            )
+            self.assertIn(PRODUCT_A_SKU, result.text)
+            self.assertIn(PRODUCT_A_EAN, result.text)
+        else:
+            self.assertIn("НЕ ЗАВЕРШЕНА", result.text)
+            self.assertIn(PRODUCT_A_SKU, result.text)
+        self.assertNotIn("коэффициент", result.text.lower())
+        self.assertNotIn("Нет таких полей", result.text)
+        self.assertNotIn("catalog.product.add", [m for m, _ in self.transport.calls])
+        self.assertEqual(self.transport.product_add_count, 0)
 
 
 if __name__ == "__main__":

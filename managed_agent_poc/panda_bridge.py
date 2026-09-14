@@ -81,6 +81,7 @@ still fully fail-open and still gated by the SAME outer flag:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
@@ -98,6 +99,53 @@ ENABLED_ENV_VAR = "PANDA_MANAGED_AGENT_ENABLED"
 # without changing the production call site in conversation_gateway.py
 # (which never passes ``timeout_s`` and always gets this value).
 DEFAULT_TURN_TIMEOUT_S = 60.0
+
+# Production defect closure #2 (real production still showed a degraded
+# raw-row card after #79's delegation was added): the delegation call
+# into the EXISTING ``prepare_complete_card`` pipeline has NO bound of
+# its own -- it may perform real research/media-fetch network I/O in a
+# real deployment (unlike this repo's own tests, which use fixtures/
+# Null providers). A module-level constant (mirrors ``DEFAULT_TURN_
+# TIMEOUT_S`` above) so a slow/hanging real dependency degrades to an
+# explicit, honest ``PRODUCT_PREPARATION_DELEGATION_FAILED`` (see
+# ``_delegate_to_existing_product_preparation``) instead of either
+# hanging the whole turn or -- the actual reported defect -- silently
+# falling back to presenting the raw, un-enriched tool/model projection
+# as if it were the completed card.
+DEFAULT_DELEGATION_TIMEOUT_S = 45.0
+
+# Safe, non-secret, greppable diagnostic event names (production defect
+# closure #2's own requirement: an OBSERVABLE execution decision at each
+# stage of the delegation boundary, so a real production occurrence of
+# this defect can be pinpointed to one of the documented root-cause
+# hypotheses instead of staying silent). Logged via the standard
+# ``logging`` module only, at INFO/WARNING -- never printed, never
+# returned to the end user, never containing an API key, Bitrix webhook
+# secret, Telegram secret, user credential, or a full environment dump;
+# see ``_redact_for_log``/``_safe_path_component`` for the same scrubbing
+# already used by every other log line in this module.
+EVENT_MANAGED_PRODUCT_SELECTED = "MANAGED_PRODUCT_SELECTED"
+EVENT_PRODUCT_PREPARATION_DELEGATION_STARTED = "PRODUCT_PREPARATION_DELEGATION_STARTED"
+EVENT_PRODUCT_PREPARATION_DELEGATION_SUCCEEDED = "PRODUCT_PREPARATION_DELEGATION_SUCCEEDED"
+EVENT_PRODUCT_PREPARATION_DELEGATION_FAILED = "PRODUCT_PREPARATION_DELEGATION_FAILED"
+EVENT_PRODUCT_PREPARATION_REQUIRED_BUT_NOT_REACHED = "PRODUCT_PREPARATION_REQUIRED_BUT_NOT_REACHED"
+
+
+def _log_event(event: str, *, tenant_id: str, level: int = logging.INFO, **safe_fields) -> None:
+    """ONE consistent, greppable log line per diagnostic event (see the
+    ``EVENT_*`` constants above). ``safe_fields`` values are stringified
+    and passed through ``_redact_for_log`` -- callers must only ever pass
+    already-non-secret data (a reason code, a tool name, a boolean, an
+    exception class name -- never a raw exception message that might
+    embed a URL/token, never any environment variable value)."""
+    parts = " ".join(f"{k}={_redact_for_log(str(v))}" for k, v in safe_fields.items())
+    logger.log(
+        level,
+        "managed_agent_poc: %s tenant=%s%s",
+        event,
+        _safe_path_component(tenant_id),
+        f" {parts}" if parts else "",
+    )
 
 
 def managed_agent_enabled(env: dict | None = None) -> bool:
@@ -256,7 +304,8 @@ async def _delegate_to_existing_product_preparation(
     bitrix_bridge=None,
     media_fetcher=None,
     enrichment_cache=None,
-) -> dict | None:
+    timeout_s: float | None = None,
+) -> tuple[dict | None, str]:
     """Delegates a managed-agent-resolved product selection into the
     EXISTING, unmodified deterministic Product Enrichment / controlled
     Bitrix write-plan pipeline
@@ -267,34 +316,115 @@ async def _delegate_to_existing_product_preparation(
     ``_canonical_fields_and_retail_price``) and calls straight through to
     the SAME capability the legacy CALL_PRODUCT_ENRICHMENT decision
     already uses. Never mutates Bitrix (``prepare_complete_card`` itself
-    is read-only -- see its own docstring). Returns ``None`` (never
-    raises) when the resolved fields lack a title/sku the existing
-    pipeline requires, or when the existing pipeline itself raises for
-    any reason -- callers must fall back to the raw tool/model output
-    unchanged, exactly like every other failure mode in this module."""
+    is read-only -- see its own docstring).
+
+    Returns ``(result, reason)``. ``result`` is the ``prepare_complete_
+    card`` dict on success and ``reason`` is ``""``. On failure ``result``
+    is ``None`` (never raises) and ``reason`` is one of a small, static,
+    non-secret set of codes a caller/operator can act on:
+    - ``"missing_title_or_sku"``: the resolved fields lack a title/sku the
+      existing pipeline requires (upstream data problem, not a bug here);
+    - ``"timeout"``: the existing pipeline did not finish within
+      ``timeout_s`` (real research/media-fetch network I/O can be slow in
+      a real deployment; see ``DEFAULT_DELEGATION_TIMEOUT_S``);
+    - ``f"exception:{type(exc).__name__}"``: the existing pipeline itself
+      raised -- production defect closure #2's own hypothesis (F): this
+      is exactly the case the prior version of this function swallowed
+      with no trace at all. Callers must fall back to an EXPLICIT,
+      honest controlled-preparation-failure response, never silently
+      re-present the raw tool/model output as if it were the completed
+      card (see ``_controlled_preparation_failure_text``)."""
     from business_assistant.product_enrichment_bridge import prepare_complete_card
 
     product_fields, retail_price = _canonical_fields_and_retail_price(raw_fields)
     if not product_fields.get("title") or not product_fields.get("sku"):
-        return None
+        return None, "missing_title_or_sku"
+    coro = prepare_complete_card(
+        tenant_id=tenant_id,
+        product_fields=product_fields,
+        retail_price=retail_price,
+        bitrix_bridge=bitrix_bridge,
+        tool_gateway=tool_gateway,
+        media_fetcher=media_fetcher,
+        cache=enrichment_cache,
+    )
     try:
-        return await prepare_complete_card(
-            tenant_id=tenant_id,
-            product_fields=product_fields,
-            retail_price=retail_price,
-            bitrix_bridge=bitrix_bridge,
-            tool_gateway=tool_gateway,
-            media_fetcher=media_fetcher,
-            cache=enrichment_cache,
-        )
-    except Exception:  # noqa: BLE001 -- an optional enrichment delegation must never crash a turn
+        if timeout_s is not None:
+            result = await asyncio.wait_for(coro, timeout=timeout_s)
+        else:
+            result = await coro
+        return result, ""
+    except asyncio.TimeoutError:
         logger.warning(
             "managed_agent_poc: delegation into product_enrichment_bridge.prepare_complete_card "
-            "failed for tenant=%s -- falling back to the raw managed-agent tool output",
+            "timed out after %.1fs for tenant=%s -- falling back to an explicit controlled "
+            "preparation failure (never the raw managed-agent tool output)",
+            float(timeout_s or 0.0),
             _safe_path_component(tenant_id),
+        )
+        return None, "timeout"
+    except Exception as exc:  # noqa: BLE001 -- an optional enrichment delegation must never crash a turn
+        logger.warning(
+            "managed_agent_poc: delegation into product_enrichment_bridge.prepare_complete_card "
+            "failed for tenant=%s with %s -- falling back to an explicit controlled preparation "
+            "failure (never the raw managed-agent tool output)",
+            _safe_path_component(tenant_id),
+            type(exc).__name__,
             exc_info=True,
         )
-        return None
+        return None, f"exception:{type(exc).__name__}"
+
+
+def _controlled_preparation_failure_text(raw_fields: Mapping, *, reason: str) -> str:
+    """Production defect closure #2's central contract fix: renders an
+    EXPLICIT, honest "preparation did not complete" message instead of
+    ever silently presenting the Managed Agent's raw, un-enriched tool/
+    model projection as though it were the finished product card (the
+    exact defect real production exposed after #79: a raw-row card with
+    an unresolved retail price and near-empty media/characteristics,
+    presented as if it were complete, even falsely claiming ``"Нет таких
+    полей"`` for the read-only Bitrix mapping).
+
+    Only echoes fields ALREADY confirmed by the raw row projection itself
+    (never invented, never a fabricated price/category ID/characteristic)
+    and is explicit that retail price, media, characteristics, and the
+    Bitrix/Aspro mapping were NOT produced in this response."""
+    name = str(raw_fields.get("name") or raw_fields.get("title") or "")
+    sku = str(raw_fields.get("sku") or "")
+    ean = str(raw_fields.get("ean") or raw_fields.get("barcode") or "")
+    brand = str(raw_fields.get("brand") or "")
+    category = str(raw_fields.get("category") or "")
+    purchase_price = str(raw_fields.get("purchase_price") or "")
+
+    lines = [
+        "ПОДГОТОВКА ПОЛНОЙ КАРТОЧКИ ТОВАРА НЕ ЗАВЕРШЕНА.",
+        (
+            "Существующий конвейер Product Enrichment/подготовки товара не "
+            f"смог выполниться (причина: {reason or 'unknown'}). Ниже -- "
+            "только то, что уже подтверждено в прайсе; это НЕ подготовленная "
+            "карточка."
+        ),
+    ]
+    if name:
+        lines.append(f"Товар: {name}")
+    if sku:
+        lines.append(f"Артикул/SKU: {sku}")
+    if ean:
+        lines.append(f"EAN: {ean}")
+    if brand:
+        lines.append(f"Бренд: {brand}")
+    if category:
+        lines.append(f"Категория (из прайса, раздел Bitrix НЕ определён): {category}")
+    if purchase_price:
+        lines.append(f"Закупочная цена: {purchase_price}")
+    lines.append(
+        "Розничная цена, основное изображение, галерея, подробное описание, "
+        "характеристики и итоговый план записи в Bitrix/Aspro в этом ответе "
+        "НЕ подготовлены -- повторите запрос позже или обратитесь к "
+        "администратору, если это повторяется."
+    )
+    lines.append("В Bitrix/Aspro ничего не записано и не опубликовано.")
+    return "\n".join(lines)
 
 
 def _is_eligible_turn(*, tenant_id: str, conversation_id: str, has_spreadsheet_attachment: bool) -> bool:
@@ -482,21 +612,77 @@ async def maybe_respond_via_managed_agent(
         "mutated": False,
     }
 
-    raw_fields = _selected_product_raw_fields(turn_result.tool_calls)
-    if raw_fields is not None:
-        delegated = await _delegate_to_existing_product_preparation(
-            raw_fields,
+    # Production defect closure #2, step 1 (prove root cause before
+    # editing): wrapped so an unexpected bug in selection extraction
+    # itself is also OBSERVABLE (EVENT_PRODUCT_PREPARATION_REQUIRED_BUT_
+    # NOT_REACHED) rather than silently producing the exact "raw tool/
+    # model output presented as complete" defect this closure exists to
+    # eliminate.
+    try:
+        raw_fields = _selected_product_raw_fields(turn_result.tool_calls)
+    except Exception as exc:  # noqa: BLE001 -- selection extraction must never crash a turn
+        _log_event(
+            EVENT_PRODUCT_PREPARATION_REQUIRED_BUT_NOT_REACHED,
             tenant_id=tenant_id,
-            tool_gateway=tool_gateway,
-            bitrix_bridge=bitrix_bridge,
-            media_fetcher=media_fetcher,
-            enrichment_cache=enrichment_cache,
+            level=logging.WARNING,
+            stage="selection_extraction",
+            error=type(exc).__name__,
         )
+        raw_fields = None
+
+    if raw_fields is not None:
+        _log_event(
+            EVENT_MANAGED_PRODUCT_SELECTED,
+            tenant_id=tenant_id,
+            tool=selected_tool,
+            has_sku=bool(raw_fields.get("sku")),
+            has_name=bool(raw_fields.get("name") or raw_fields.get("title")),
+            has_retail_price=bool(raw_fields.get("retail_price") or raw_fields.get("price")),
+        )
+        _log_event(EVENT_PRODUCT_PREPARATION_DELEGATION_STARTED, tenant_id=tenant_id)
+        try:
+            delegated, reason = await _delegate_to_existing_product_preparation(
+                raw_fields,
+                tenant_id=tenant_id,
+                tool_gateway=tool_gateway,
+                bitrix_bridge=bitrix_bridge,
+                media_fetcher=media_fetcher,
+                enrichment_cache=enrichment_cache,
+                timeout_s=DEFAULT_DELEGATION_TIMEOUT_S,
+            )
+        except Exception as exc:  # noqa: BLE001 -- delegation must never crash a turn
+            _log_event(
+                EVENT_PRODUCT_PREPARATION_REQUIRED_BUT_NOT_REACHED,
+                tenant_id=tenant_id,
+                level=logging.WARNING,
+                stage="delegation_call",
+                error=type(exc).__name__,
+            )
+            delegated, reason = None, f"unexpected:{type(exc).__name__}"
+
         if delegated is not None:
+            _log_event(EVENT_PRODUCT_PREPARATION_DELEGATION_SUCCEEDED, tenant_id=tenant_id)
             response_text = str(delegated.get("text") or "")
             metadata["delegated_to"] = "product_enrichment_bridge.prepare_complete_card"
+            metadata["preparation_status"] = "PREPARED"
             write_preview = delegated.get("write_preview") or {}
             if write_preview:
                 metadata["bitrix_write_preview"] = write_preview
+        else:
+            _log_event(
+                EVENT_PRODUCT_PREPARATION_DELEGATION_FAILED,
+                tenant_id=tenant_id,
+                level=logging.WARNING,
+                reason=reason,
+            )
+            # Step 2 contract fix (the major error #79's production run
+            # exposed): a resolved product REQUIRES complete
+            # deterministic preparation. Never silently fall back to the
+            # raw, un-enriched Managed Agent tool/model projection as if
+            # it were the finished card -- report an explicit, honest
+            # controlled preparation failure instead.
+            response_text = _controlled_preparation_failure_text(raw_fields, reason=reason)
+            metadata["preparation_status"] = "FAILED"
+            metadata["preparation_failure_reason"] = reason
 
     return {"text": response_text, "metadata": metadata}
