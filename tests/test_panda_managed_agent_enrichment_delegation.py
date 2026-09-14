@@ -521,6 +521,133 @@ class ManagedAgentDelegatesToExistingProductPreparationTests(unittest.IsolatedAs
         self.assertEqual(self.transport.offer_add_count, 0)
         self.assertEqual(self.transport.price_add_count, 0)
 
+    async def test_full_card_request_not_diverted_to_write_plan_when_write_plan_tool_also_called_first(self):
+        """PRODUCTION DEFECT CLOSURE #5 (competing-path defect after PR
+        #82): PREPARE_PRODUCT (``select_product``) and SHOW_WRITE_PLAN
+        (``explain_bitrix_write_plan``) are two DISTINCT semantic actions
+        (see PR #82). Real ``ManagedAgentPOC.run_turn()`` output can
+        legitimately contain MORE THAN ONE tool call in a single turn --
+        the Agents SDK's own agentic loop lets the model call a tool,
+        see its result, and call ANOTHER tool before producing its final
+        answer (already proven live for other shapes in
+        ``ManagedAgentRealSubprocessContractTests``). For this turn's
+        full-card ``PRODUCTION_TEXT`` request, the model can reasonably
+        attempt ``explain_bitrix_write_plan`` FIRST (its own docstring
+        mentions confirming "the write plan / fields / category that
+        would be sent to Bitrix/Aspro", which overlaps with this
+        request's own "укажи только те поля, для которых действительно
+        нет подтверждённого места записи в Bitrix/Aspro" wording) --
+        that call fails with ``NO_PRODUCT_SELECTED`` (nothing has been
+        selected yet in this brand-new conversation) -- and only THEN
+        calls ``select_product``, which succeeds with ``SELECTED``.
+
+        Before this fix, ``maybe_respond_via_managed_agent`` computed its
+        PREPARE_PRODUCT-vs-SHOW_WRITE_PLAN routing decision from
+        ``turn_result.tool_calls[0]["tool"]`` -- the turn's FIRST tool
+        call -- while ``_selected_product_raw_fields`` (which decides
+        WHAT to delegate) scans for the LAST tool call that actually
+        resolved a product. For this exact shape those two disagree:
+        ``tool_calls[0]`` is ``explain_bitrix_write_plan`` (the failed
+        attempt) while the actual resolution came from ``select_product``
+        (the second call) -- so a genuine PREPARE_PRODUCT/full-card
+        action was WRONGLY routed into ``_delegate_to_existing_write_
+        plan``/``format_write_plan_text`` (the SHOW_WRITE_PLAN renderer)
+        instead of ``_delegate_to_existing_product_preparation``/
+        ``prepare_complete_card`` (the full-card renderer) -- the exact
+        "PREPARE_PRODUCT and SHOW_WRITE_PLAN collapse into the same
+        response" defect PR #82 already closed in the OTHER direction.
+
+        This must FAIL on current `main` before the fix (routes to
+        ``format_write_plan_text``) and PASS after it (routes to
+        ``prepare_complete_card``, the SAME deterministic full-card
+        result as the single-tool-call turn 1 test above)."""
+        artifact_id = await _register_upload(
+            self.artifact_service, tenant="tenant-a", owner="u1", conv="conv-competing", filename=FILENAME, content=_xlsx_bytes()
+        )
+
+        plan = [
+            {
+                "current_identifier": PRODUCT_A_SKU,
+                "tool_calls": [
+                    {
+                        "tool": "explain_bitrix_write_plan",
+                        "output": {
+                            "status": "NO_PRODUCT_SELECTED",
+                            "reason": "no product has been selected in this conversation yet",
+                        },
+                    },
+                    {
+                        "tool": "select_product",
+                        "output": {
+                            "status": "SELECTED",
+                            "matched_by": "next_unspecified",
+                            **_raw_tool_fields(
+                                name=PRODUCT_A_NAME,
+                                sku=PRODUCT_A_SKU,
+                                ean=PRODUCT_A_EAN,
+                                purchase_price=PRODUCT_A_PURCHASE_PRICE,
+                                retail_price=PRODUCT_A_RETAIL_PRICE,
+                            ),
+                        },
+                    },
+                ],
+                "final_output": f"Подготовлена карточка {PRODUCT_A_NAME}.",
+            }
+        ]
+
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=_make_fake_run_turn(plan)):
+            result = await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id="tenant-a",
+                    user_id="u1",
+                    request_id="req-1",
+                    conversation_id="conv-competing",
+                    attachment_refs=(artifact_id,),
+                )
+            )
+
+        self.assertEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
+        self.assertFalse(result.metadata.get("mutated"))
+
+        # THE authoritative assertion: a PREPARE_PRODUCT/full-card action
+        # must delegate into the full-card renderer -- never the
+        # write-plan renderer -- regardless of which OTHER tool the model
+        # also attempted earlier in the same turn.
+        self.assertEqual(
+            result.metadata.get("delegated_to"),
+            "product_enrichment_bridge.prepare_complete_card",
+            "a resolved select_product/PREPARE_PRODUCT turn must never be "
+            "diverted into the SHOW_WRITE_PLAN renderer just because an "
+            "earlier, failed tool call in the same turn was "
+            "explain_bitrix_write_plan",
+        )
+
+        text = result.text
+        self.assertNotIn("ЧТО БУДЕТ ЗАПИСАНО В BITRIX/ASPRO", text)
+
+        # The full, enriched deterministic PREPARED result -- identity,
+        # retail price, resolved category, media, characteristics, and
+        # honest #77 unmapped reporting -- exactly like the single-call
+        # turn 1 test above, never a shallower/different rendering.
+        self.assertIn(PRODUCT_A_SKU, text)
+        self.assertIn(PRODUCT_A_EAN, text)
+        self.assertIn(BRAND, text)
+        self.assertIn(PRODUCT_A_RETAIL_PRICE, text)
+        self.assertIn(str(TV_SECTION_ID), text)
+        self.assertIn("Характеристики:", text)
+        self.assertNotIn("Характеристики: 0", text)
+        self.assertIn("Главное изображение подготовлено: да", text)
+        self.assertIn("НЕ будет записано (нет проверенного назначения в Bitrix):", text)
+        self.assertIn("sku", text)
+
+        methods_called = [m for m, _ in self.transport.calls]
+        self.assertIn("catalog.section.list", methods_called)
+        self.assertNotIn("catalog.product.add", methods_called)
+        self.assertEqual(self.transport.product_add_count, 0)
+        self.assertEqual(self.transport.offer_add_count, 0)
+        self.assertEqual(self.transport.price_add_count, 0)
+
     async def test_multi_turn_another_one_then_full_card_prepares_product_b_not_stale_product_a(self):
         """Turn 1 selects product A. Turn 2 ("Этот уже был. Дай другой.")
         selects product B. Turn 3 asks for the full prepared Bitrix/Aspro
