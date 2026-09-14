@@ -375,6 +375,139 @@ async def _delegate_to_existing_product_preparation(
         return None, f"exception:{type(exc).__name__}"
 
 
+async def _delegate_to_existing_write_plan(
+    raw_fields: Mapping,
+    *,
+    tenant_id: str,
+    tool_gateway=None,
+    bitrix_bridge=None,
+    media_fetcher=None,
+    enrichment_cache=None,
+    timeout_s: float | None = None,
+) -> tuple[dict | None, str]:
+    """Production defect closure #4: PREPARE_PRODUCT (``select_product``)
+    and SHOW_WRITE_PLAN (``explain_bitrix_write_plan``) are two DISTINCT
+    semantic actions and must not collapse into the same response.
+
+    Real Railway evidence after #81: for a SHOW_WRITE_PLAN follow-up turn,
+    ``MANAGED_PRODUCT_SELECTED tool=explain_bitrix_write_plan`` and
+    ``PRODUCT_PREPARATION_DELEGATION_SUCCEEDED`` both fired, yet the
+    user-visible response was still the generic prepared-card preview.
+    Root cause: both tools were delegated into the exact SAME function
+    (``_delegate_to_existing_product_preparation`` ->
+    ``product_enrichment_bridge.prepare_complete_card`` ->
+    ``format_combined_preview_text``) -- there was no dispatch anywhere
+    in this module distinguishing which of the two semantic actions the
+    model actually chose, even though that decision is already fully
+    observable as ``selected_tool`` (the ``ManagedAgentPOC.run_turn()``
+    tool-call shape both #79/#80/#81 already log/consume -- see
+    ``maybe_respond_via_managed_agent``'s own ``selected_tool`` local).
+
+    This function instead delegates into the EXISTING, unmodified
+    deterministic controlled Bitrix write-plan RENDERER
+    (``business_assistant.product_enrichment_bridge.format_write_plan_
+    text`` -- the SAME one ``WorkflowPandaConversationGateway.
+    _explain_bitrix_write_plan`` already uses for the legacy
+    conversational path) instead of ``prepare_complete_card``'s own
+    combined full-card preview text. Owns NO pricing/category/media/
+    characteristics/Bitrix-mapping/SIMPLE_PRODUCT logic of its own --
+    only calls straight through to the same EXISTING functions
+    ``_invoke_product_enrichment``/``_explain_bitrix_write_plan`` already
+    call: ``run_enrichment``, ``build_enriched_write_request``,
+    ``prepare_single_product_write``, ``format_write_plan_text``.
+
+    Product Enrichment is NOT unnecessarily re-run: ``run_enrichment``
+    is called with the SAME ``enrichment_cache`` instance the caller's
+    earlier ``select_product``/PREPARE_PRODUCT turn already populated
+    (``product_enrichment.cache.EnrichmentCache``, keyed by
+    ``(tenant_id, identity_key)`` -- see ``product_enrichment.
+    orchestrator.enrich_product``'s own cache-hit branch) -- a product
+    already enriched earlier in this SAME conversation/process resolves
+    from that cache (``cache_hit=True``), so no additional research/
+    media-fetch network calls happen; only the (cheap, deterministic,
+    no-network) write-request build + read-only section/preview lookup +
+    text rendering run again. When no prior enrichment exists yet (e.g.
+    SHOW_WRITE_PLAN is the very first turn), this legitimately runs
+    enrichment once -- exactly the same as ``select_product`` already
+    does today.
+
+    Identical ``(result, reason)`` contract to ``_delegate_to_existing_
+    product_preparation`` above (see its own docstring for the meaning
+    of each ``reason`` code) so the caller's success/failure handling is
+    fully shared between the two semantic actions."""
+    from business_assistant.controlled_bitrix_write import prepare_single_product_write
+    from business_assistant.product_enrichment_bridge import (
+        build_enriched_write_request,
+        format_write_plan_text,
+        run_enrichment,
+        serialize_characteristic_status,
+    )
+    from product_enrichment.preview import enrichment_preview_dict
+
+    product_fields, retail_price = _canonical_fields_and_retail_price(raw_fields)
+    if not product_fields.get("title") or not product_fields.get("sku"):
+        return None, "missing_title_or_sku"
+
+    async def _build_and_render() -> dict:
+        enrichment = await run_enrichment(
+            tenant_id=tenant_id,
+            product_fields=product_fields,
+            tool_gateway=tool_gateway,
+            media_fetcher=media_fetcher,
+            cache=enrichment_cache,
+        )
+        write_request = build_enriched_write_request(
+            product_fields, tenant_id=tenant_id, retail_price=retail_price, enrichment=enrichment
+        )
+        write_preview: dict = {}
+        if bitrix_bridge is not None:
+            # Mirrors ``_explain_bitrix_write_plan``'s own reasoning
+            # exactly: always attempt the EXISTING, read-only
+            # ``prepare_single_product_write`` preview -- even when
+            # ``retail_price`` is still unknown -- so category/section
+            # resolution and the EAN echo are never hidden just because
+            # the price is not yet known.
+            try:
+                write_preview = prepare_single_product_write(
+                    bitrix_bridge, tenant_id=tenant_id, request=write_request
+                )
+            except Exception:  # noqa: BLE001 -- a read-only explanation must never fail on the preview call
+                write_preview = {}
+        text = format_write_plan_text(
+            write_request=write_request,
+            write_preview=write_preview,
+            characteristic_status=serialize_characteristic_status(enrichment),
+            enrichment_preview=enrichment_preview_dict(enrichment),
+        )
+        return {"text": text, "write_preview": write_preview}
+
+    try:
+        if timeout_s is not None:
+            result = await asyncio.wait_for(_build_and_render(), timeout=timeout_s)
+        else:
+            result = await _build_and_render()
+        return result, ""
+    except asyncio.TimeoutError:
+        logger.warning(
+            "managed_agent_poc: SHOW_WRITE_PLAN delegation into product_enrichment_bridge timed out "
+            "after %.1fs for tenant=%s -- falling back to an explicit controlled preparation failure "
+            "(never the raw managed-agent tool output)",
+            float(timeout_s or 0.0),
+            _safe_path_component(tenant_id),
+        )
+        return None, "timeout"
+    except Exception as exc:  # noqa: BLE001 -- an optional write-plan delegation must never crash a turn
+        logger.warning(
+            "managed_agent_poc: SHOW_WRITE_PLAN delegation into product_enrichment_bridge failed for "
+            "tenant=%s with %s -- falling back to an explicit controlled preparation failure (never the "
+            "raw managed-agent tool output)",
+            _safe_path_component(tenant_id),
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return None, f"exception:{type(exc).__name__}"
+
+
 def _controlled_preparation_failure_text(raw_fields: Mapping, *, reason: str) -> str:
     """Production defect closure #2's central contract fix: renders an
     EXPLICIT, honest "preparation did not complete" message instead of
@@ -639,9 +772,17 @@ async def maybe_respond_via_managed_agent(
             has_name=bool(raw_fields.get("name") or raw_fields.get("title")),
             has_retail_price=bool(raw_fields.get("retail_price") or raw_fields.get("price")),
         )
+        # Production defect closure #4: PREPARE_PRODUCT and SHOW_WRITE_PLAN
+        # are two distinct semantic actions -- dispatch on the ALREADY
+        # observable ``selected_tool`` (no phrase/regex/stem routing; this
+        # is the exact same tool-name signal #79/#80/#81 already log)
+        # instead of always delegating into ``prepare_complete_card``'s
+        # own full-card preview text.
+        is_write_plan_request = selected_tool == "explain_bitrix_write_plan"
+        delegate = _delegate_to_existing_write_plan if is_write_plan_request else _delegate_to_existing_product_preparation
         _log_event(EVENT_PRODUCT_PREPARATION_DELEGATION_STARTED, tenant_id=tenant_id)
         try:
-            delegated, reason = await _delegate_to_existing_product_preparation(
+            delegated, reason = await delegate(
                 raw_fields,
                 tenant_id=tenant_id,
                 tool_gateway=tool_gateway,
@@ -663,7 +804,11 @@ async def maybe_respond_via_managed_agent(
         if delegated is not None:
             _log_event(EVENT_PRODUCT_PREPARATION_DELEGATION_SUCCEEDED, tenant_id=tenant_id)
             response_text = str(delegated.get("text") or "")
-            metadata["delegated_to"] = "product_enrichment_bridge.prepare_complete_card"
+            metadata["delegated_to"] = (
+                "product_enrichment_bridge.format_write_plan_text"
+                if is_write_plan_request
+                else "product_enrichment_bridge.prepare_complete_card"
+            )
             metadata["preparation_status"] = "PREPARED"
             write_preview = delegated.get("write_preview") or {}
             if write_preview:
