@@ -1051,21 +1051,38 @@ class CharacteristicsWriteTests(unittest.TestCase):
         self.assertEqual(sorted(result["product"]["characteristics_written"]), sorted(characteristics))
 
     def test_unverified_characteristic_keys_are_never_written(self):
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up): "refresh_rate_hz"/"display_technology" are now
+        # VERIFIED keys (properties 147/248) and can no longer serve as
+        # "unverified" examples here -- "model_year"/"hdr_formats"/
+        # "panel_technology" remain genuinely unmapped.
         result, transport = _direct_write(
-            {"characteristics": {"refresh_rate_hz": "120", "display_technology": "OLED", "model_year": "2026"}}
+            {"characteristics": {"model_year": "2026", "hdr_formats": "Dolby Vision", "panel_technology": "OLED"}}
         )
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
         # None of these keys have a verified property destination -- must
-        # never appear anywhere in the outgoing fields dict.
+        # never appear anywhere in the outgoing fields dict. ``_direct_write``
+        # always supplies a ``sku`` (see helper above), which -- since
+        # SIMPLE_PRODUCT article/SKU now has a verified base-product
+        # destination (CML2_ARTICLE/241) -- IS expected as a propertyN
+        # field; that is not a characteristic and is excluded here.
+        simple_article = schema.catalog_property(code="CML2_ARTICLE")
         for key in list(product_body["fields"]):
-            self.assertFalse(key.startswith("property"), f"unexpected property field written: {key}={product_body['fields'][key]}")
+            if key.startswith("property"):
+                self.assertEqual(key, simple_article.select_key, f"unexpected property field written: {key}={product_body['fields'][key]}")
         self.assertEqual(result["product"]["characteristics_written"], [])
 
-    def test_no_characteristics_supplied_writes_no_property_fields(self):
+    def test_no_characteristics_supplied_writes_no_property_fields_other_than_article(self):
+        # ``_direct_write`` always supplies a ``sku`` -- see helper above
+        # -- so the verified base-product article destination
+        # (CML2_ARTICLE/241) is expected; no OTHER propertyN field exists
+        # with no characteristics supplied.
         _result, transport = _direct_write({})
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        simple_article = schema.catalog_property(code="CML2_ARTICLE")
         for key in list(product_body["fields"]):
-            self.assertFalse(key.startswith("property"))
+            if key.startswith("property"):
+                self.assertEqual(key, simple_article.select_key)
 
     def test_empty_characteristic_value_is_skipped_not_written(self):
         result, transport = _direct_write({"characteristics": {"screen_diagonal_cm": ""}})

@@ -88,16 +88,20 @@ class BridgeCharacteristicsToBitrixTests(unittest.TestCase):
         self.assertTrue(bridged["screen_diagonal_cm"].bitrix_writable)
 
     def test_unknown_key_kept_with_no_bitrix_property(self):
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up): "refresh_rate_hz" is now a VERIFIED key (property
+        # 147) and can no longer serve as an "unknown key" example here --
+        # "model_year" remains genuinely unmapped.
         chars = {
-            "refresh_rate_hz": NormalizedCharacteristic(
-                key="refresh_rate_hz", value="120", unit="Hz", confidence=CONFIDENCE_VERIFIED
+            "model_year": NormalizedCharacteristic(
+                key="model_year", value="2026", unit="", confidence=CONFIDENCE_VERIFIED
             )
         }
         bridged = bridge_characteristics_to_bitrix(chars)
-        self.assertIsNone(bridged["refresh_rate_hz"].bitrix_property_id)
-        self.assertFalse(bridged["refresh_rate_hz"].bitrix_writable)
+        self.assertIsNone(bridged["model_year"].bitrix_property_id)
+        self.assertFalse(bridged["model_year"].bitrix_writable)
         # Never dropped -- the source data survives in canonical enrichment data.
-        self.assertEqual(bridged["refresh_rate_hz"].value, "120")
+        self.assertEqual(bridged["model_year"].value, "2026")
 
     def test_unverified_confidence_characteristic_not_writable_even_if_bound(self):
         from product_enrichment.models import CONFIDENCE_UNVERIFIED

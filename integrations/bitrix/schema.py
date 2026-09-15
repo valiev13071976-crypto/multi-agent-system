@@ -222,6 +222,77 @@ resolved most of the still-missing product-card data:
      (``insufficient_scope`` -- exists but this webhook's granted scopes
      do not include it). SEO remains entirely deferred, exactly as before.
 
+SIMPLE_PRODUCT TV contract-alignment pass (Cursor Support ticket T-F79758
+follow-up; production reference element 992, IBLOCK 14, "Телевизор TCL
+65C8L (2026) 65\" 4K UHD SQD-Mini LED Smart TV" -- an ACTIVE, non-variant
+SIMPLE product, never element 130): a direct production inspection of both
+the reference element AND the real admin form configuration
+(``b_user_option`` row ``id=36``, ``category='form'``,
+``name='form_element_14'``) proves this installation actually has BASE-
+PRODUCT (IBLOCK 14) destinations for article/SKU and gallery -- unlike the
+OFFERS-only (IBLOCK 15) destinations the earlier TV product-write-contract
+defect closure above had verified:
+
+  H. ARTICLE (SIMPLE_PRODUCT) -- property 241, CODE ``CML2_ARTICLE``.
+     Reference element 992's ``PROPERTY_241`` = ``"TCL 65C8L"``, matching
+     the element's own article. Distinct from -- and never confused with
+     -- OFFER_PROPERTIES' ARTICLE (283), which remains the correct
+     destination ONLY when ``has_variant_offer=True`` creates a genuine
+     offer/SKU (IBLOCK 15). See ``CML2_ARTICLE_PROPERTY_ID``.
+
+  I. GALLERY (SIMPLE_PRODUCT) -- property 124, CODE ``MORE_PHOTO``,
+     MULTIPLE file-type property. Reference element 992 carries 8 gallery
+     files directly on PROPERTY_124. This is a DIFFERENT property id from
+     OFFER_PROPERTIES' MORE_PHOTO (280) -- same CODE, different IBLOCK,
+     never conflated. PROPERTY_128 (PHOTO_GALLERY) also exists on this
+     installation but the verified, actually-populated reference gallery
+     property is 124, not 128 -- 128 is intentionally left unmapped
+     (module docstring: never guess between two plausible destinations).
+     See ``SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_ID``.
+
+  J. TV CHARACTERISTICS (SIMPLE_PRODUCT) -- the production admin form
+     (``form_element_14``) exposes semantic Russian labels for legacy
+     property ids that ``catalog.productProperty.list``'s own generic
+     ``PROP_<id>``-style names/global ``b_iblock_property.NAME`` values do
+     NOT reveal (module docstring warning: those global names are
+     misleading for many legacy ids and must never be used to
+     reinterpret this binding). Cross-referencing the form's semantic
+     labels against reference element 992's actually-populated property
+     values below adds a bounded set of NEW verified TV characteristic
+     bindings (``CATALOG_CHARACTERISTICS``) -- every one confirmed by a
+     real, non-empty value on the reference element, never guessed from a
+     label alone. Two categories of previously-plausible bindings are
+     DELIBERATELY excluded here, per the same "never guess between two
+     plausible destinations" discipline as gallery/128 above:
+
+       - ``screen_resolution`` already has a verified binding (property
+         156) from the earlier Block 5.6 pass; the form also exposes a
+         differently-shaped resolution-like value on property 183 (a
+         combined display string on the reference element, not the same
+         value shape as 156's own verified reading) -- reusing the SAME
+         Panda-facing key name for a second, different property would be
+         exactly the "duplicate/legacy semantic field" ambiguity this
+         module refuses to resolve by guessing; property 183 is left
+         unmapped pending a dedicated follow-up verification.
+       - Property 154 is ALREADY bound (Block 5.6 pass) to
+         ``screen_diagonal_cm``/``PROP_2053``. The reference element's
+         actual PROPERTY_154 value ("Ethernet - RJ-45, USB Type-A, вход
+         HDMI, слот CI/CI+, CI, Антенный вход (RF)") shows this existing
+         binding's real-world semantics are a ports/interfaces list, not
+         a screen diagonal -- exactly the kind of misleading legacy
+         mapping this pass warns about, but changing an already-shipped,
+         already-tested PANDA_MANAGED binding used by the READ path too
+         is a schema correction outside this bounded write-contract
+         task's scope (no live verification is available to confirm the
+         correction, and it risks live production regressions for
+         unrelated already-working reads/writes). ``ports``/
+         ``interfaces`` are therefore deliberately left UNMAPPED here --
+         reported to a follow-up ticket, never silently reassigned.
+
+     Every binding actually added below is listed in
+     ``CATALOG_CHARACTERISTICS`` with its verified reference-element value
+     as inline evidence.
+
 See ``SECTION_FIELD``, ``resolve_section_id``, ``CharacteristicBinding``/
 ``CATALOG_CHARACTERISTICS``/``map_characteristics_to_properties``, and the
 native physical/content field constants below for the concrete bindings;
@@ -643,6 +714,17 @@ CML2_LINK_PROPERTY_CODE = "CML2_LINK"
 # How catalog.product.offer.list actually exposes that same relationship.
 CML2_LINK_REST_FIELD = "parentId"
 
+# SIMPLE_PRODUCT TV contract-alignment pass (module docstring items H/I,
+# ticket T-F79758 follow-up, production reference element 992/IBLOCK 14):
+# the BASE-PRODUCT (non-offer) article/SKU and gallery destinations --
+# distinct property ids from OFFER_PROPERTIES' ARTICLE(283)/MORE_PHOTO(280)
+# below, which remain correct ONLY for a genuine ``has_variant_offer=True``
+# offer/SKU element.
+CML2_ARTICLE_PROPERTY_ID = 241
+CML2_ARTICLE_PROPERTY_CODE = "CML2_ARTICLE"
+SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_ID = 124
+SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_CODE = "MORE_PHOTO"
+
 
 @dataclass(frozen=True)
 class PropertyBinding:
@@ -693,6 +775,47 @@ CATALOG_PRODUCT_PROPERTIES: tuple[PropertyBinding, ...] = (
     PropertyBinding(206, "PROP_301", PANDA_MANAGED, "Operating system ('Операционная система'); see CATALOG_CHARACTERISTICS['operating_system']."),
     PropertyBinding(209, "PROP_304", PANDA_MANAGED, "Smart TV support ('Поддержка Smart TV'); see CATALOG_CHARACTERISTICS['smart_tv_support']."),
     PropertyBinding(246, "COLOR_REF2", PANDA_MANAGED, "Product color, directory-referenced ('Цвет'); see CATALOG_CHARACTERISTICS['color']."),
+    # SIMPLE_PRODUCT TV contract-alignment pass (module docstring items
+    # H/I/J, ticket T-F79758 follow-up): verified directly against
+    # production reference element 992 (IBLOCK 14) and the real admin
+    # form configuration (b_user_option id=36, form_element_14) -- not
+    # the (sometimes misleading) global b_iblock_property.NAME table.
+    PropertyBinding(CML2_ARTICLE_PROPERTY_ID, CML2_ARTICLE_PROPERTY_CODE, PANDA_MANAGED, "SIMPLE_PRODUCT article/SKU identity (reference 992: 'TCL 65C8L'); base-product destination, distinct from OFFER_PROPERTIES' ARTICLE(283)."),
+    PropertyBinding(SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_ID, SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_CODE, PANDA_MANAGED, "SIMPLE_PRODUCT gallery media, multi-value FILE property (reference 992: 8 gallery files); base-product destination, distinct from OFFER_PROPERTIES' MORE_PHOTO(280)."),
+    PropertyBinding(235, "PROP_235", PANDA_MANAGED, "TV type/display technology label (reference 992: 'SQD-Mini LED'); see CATALOG_CHARACTERISTICS['type']."),
+    PropertyBinding(163, "PROP_163", PANDA_MANAGED, "Screen diagonal, formatted (reference 992: '65\" (165 см)'); see CATALOG_CHARACTERISTICS['screen_diagonal']."),
+    PropertyBinding(147, "PROP_147", PANDA_MANAGED, "Refresh rate, Hz (reference 992: '144 Гц'); see CATALOG_CHARACTERISTICS['refresh_rate_hz']."),
+    PropertyBinding(144, "PROP_144", PANDA_MANAGED, "HD resolution label (reference 992: '4K UHD'); see CATALOG_CHARACTERISTICS['hd_resolution']."),
+    PropertyBinding(210, "PROP_210", PANDA_MANAGED, "Resolution, pixels (reference 992: '3840x2160'); see CATALOG_CHARACTERISTICS['resolution']."),
+    PropertyBinding(250, "PROP_250", PANDA_MANAGED, "Backlight type (reference 992: 'Mini LED'); see CATALOG_CHARACTERISTICS['backlight_type']."),
+    PropertyBinding(248, "PROP_248", PANDA_MANAGED, "Display/extended screen technology (reference 992: 'QLED'); see CATALOG_CHARACTERISTICS['display_technology']/['extended_screen_technology']."),
+    PropertyBinding(166, "PROP_166", PANDA_MANAGED, "Panel/matrix type (reference 992: 'HVA'); see CATALOG_CHARACTERISTICS['panel_type']/['matrix_type']."),
+    PropertyBinding(260, "PROP_260", PANDA_MANAGED, "Sound features (reference 992: 'B&O, Dolby Atmos, DTS:X'); see CATALOG_CHARACTERISTICS['sound_features']."),
+    PropertyBinding(247, "PROP_247", PANDA_MANAGED, "Sound power (reference 992: '40 Вт'); see CATALOG_CHARACTERISTICS['sound_power']."),
+    PropertyBinding(160, "PROP_160", PANDA_MANAGED, "Speaker count (reference 992: '2'); see CATALOG_CHARACTERISTICS['speaker_count']."),
+    PropertyBinding(187, "PROP_187", PANDA_MANAGED, "HDMI version (reference 992: '2.1'); see CATALOG_CHARACTERISTICS['hdmi_version']."),
+    PropertyBinding(253, "PROP_253", PANDA_MANAGED, "Wireless interfaces (reference 992: 'Bluetooth, Wi-Fi'); see CATALOG_CHARACTERISTICS['wireless_interfaces']."),
+    PropertyBinding(178, "PROP_178", PANDA_MANAGED, "Smart TV platform (reference 992: 'Google TV'); see CATALOG_CHARACTERISTICS['smart_tv_platform']."),
+    PropertyBinding(221, "PROP_221", PANDA_MANAGED, "Digital TV tuner support (reference 992: 'DVB-C,DVB-S,DVB-S2,DVB-T,DVB-T2,analog'); see CATALOG_CHARACTERISTICS['digital_tv_support']."),
+    PropertyBinding(258, "PROP_258", PANDA_MANAGED, "Feature list (reference 992: gaming/hotel/timer/voice/smartphone-related features); see CATALOG_CHARACTERISTICS['features']."),
+    PropertyBinding(184, "PROP_184", PANDA_MANAGED, "VESA mount, mm (reference 992: '300×300 мм'); see CATALOG_CHARACTERISTICS['vesa_mount']."),
+    PropertyBinding(175, "PROP_175", PANDA_MANAGED, "Voice control assistant (reference 992: 'Google Assistant'); see CATALOG_CHARACTERISTICS['voice_control']."),
+    PropertyBinding(186, "PROP_186", PANDA_MANAGED, "Power consumption, W (reference 992: '400 Вт'); see CATALOG_CHARACTERISTICS['power_consumption']."),
+    PropertyBinding(177, "PROP_177", PANDA_MANAGED, "Dimensions with stand, mm (reference 992: '1436 x 860 x 368 мм'); see CATALOG_CHARACTERISTICS['dimensions_with_stand']."),
+    PropertyBinding(203, "PROP_203", PANDA_MANAGED, "Weight with stand, kg (reference 992: '30.4 кг'); see CATALOG_CHARACTERISTICS['weight_with_stand']."),
+    PropertyBinding(189, "PROP_189", PANDA_MANAGED, "Dimensions without stand, mm (reference 992: '1436 x 824 x 50 мм'); see CATALOG_CHARACTERISTICS['dimensions_without_stand']."),
+    PropertyBinding(159, "PROP_159", PANDA_MANAGED, "Weight without stand, kg (reference 992: '28.4 кг'); see CATALOG_CHARACTERISTICS['weight_without_stand']."),
+    PropertyBinding(157, "PROP_157", PANDA_MANAGED, "Country of origin (reference 992: 'Китай'); see CATALOG_CHARACTERISTICS['country_of_origin']."),
+    PropertyBinding(252, "PROP_252", PANDA_MANAGED, "Service life / warranty period (reference 992: '5 лет'); see CATALOG_CHARACTERISTICS['service_life']."),
+    # NOTE: property 154 remains bound to 'screen_diagonal_cm'/PROP_2053
+    # above (Block 5.6 pass); the reference element's real PROPERTY_154
+    # value is a ports/interfaces list, not a screen diagonal -- this
+    # discrepancy is a known, deliberately UNRESOLVED legacy-binding
+    # question (module docstring item J), out of this bounded write-
+    # contract task's scope. 'ports'/'interfaces' and property 183
+    # ('screen_resolution'-shaped, but a different value shape from the
+    # already-verified 156 binding of the same Panda-facing key name) are
+    # both deliberately left unmapped rather than guessed.
 )
 
 # IBLOCK 15 -- offers/SKU properties (spec section 4). property 279
@@ -747,16 +870,62 @@ class CharacteristicBinding:
 
 
 # Only characteristics with an unambiguous, verified semantic match
-# (module docstring item C) -- "display technology", "refresh rate" and
-# "model/year" (all requested examples) have NO matching property on this
-# installation and are deliberately absent; Panda may still carry that
-# source data, it is simply never written to a guessed property.
+# (module docstring item C) -- "model/year" (a requested example) has NO
+# matching property on this installation and is deliberately absent;
+# Panda may still carry that source data, it is simply never written to a
+# guessed property.
 CATALOG_CHARACTERISTICS: tuple[CharacteristicBinding, ...] = (
     CharacteristicBinding("screen_diagonal_cm", 154, "PROP_2053", "Диагональ дисплея, см", unit="cm"),
     CharacteristicBinding("screen_resolution", 156, "PROP_2054", "Разрешение экрана, пикс", unit="px (WxH)"),
     CharacteristicBinding("operating_system", 206, "PROP_301", "Операционная система"),
     CharacteristicBinding("smart_tv_support", 209, "PROP_304", "Поддержка Smart TV"),
     CharacteristicBinding("color", 246, "COLOR_REF2", "Цвет"),
+    # SIMPLE_PRODUCT TV contract-alignment pass (module docstring item J,
+    # ticket T-F79758 follow-up): semantic labels come from the real
+    # production admin form configuration (form_element_14), each
+    # cross-checked against a real, non-empty value on reference element
+    # 992 (never a label-only guess). ``bitrix_name`` here is Panda's own
+    # semantic field name from the ticket's verified TV property map
+    # (the form's exact Russian admin label text was not independently
+    # captured for these -- only the property id + example value were),
+    # kept in that spirit as documentation evidence, same role as the
+    # Russian admin labels above.
+    CharacteristicBinding("type", 235, "PROP_235", "TV type / display technology label (e.g. 'SQD-Mini LED')"),
+    CharacteristicBinding("screen_diagonal", 163, "PROP_163", "Screen diagonal, formatted (e.g. '65\" (165 см)')"),
+    CharacteristicBinding("refresh_rate_hz", 147, "PROP_147", "Refresh rate (e.g. '144 Гц')", unit="Hz"),
+    CharacteristicBinding("hd_resolution", 144, "PROP_144", "HD resolution label (e.g. '4K UHD')"),
+    CharacteristicBinding("resolution", 210, "PROP_210", "Resolution, pixels (e.g. '3840x2160')", unit="px (WxH)"),
+    CharacteristicBinding("backlight_type", 250, "PROP_250", "Backlight type (e.g. 'Mini LED')"),
+    CharacteristicBinding("display_technology", 248, "PROP_248", "Display/extended screen technology (e.g. 'QLED')"),
+    CharacteristicBinding("extended_screen_technology", 248, "PROP_248", "Display/extended screen technology (e.g. 'QLED')"),
+    CharacteristicBinding("panel_type", 166, "PROP_166", "Panel/matrix type (e.g. 'HVA')"),
+    CharacteristicBinding("matrix_type", 166, "PROP_166", "Panel/matrix type (e.g. 'HVA')"),
+    CharacteristicBinding("sound_features", 260, "PROP_260", "Sound features (e.g. 'B&O, Dolby Atmos, DTS:X')"),
+    CharacteristicBinding("sound_power", 247, "PROP_247", "Sound power (e.g. '40 Вт')", unit="W"),
+    CharacteristicBinding("speaker_count", 160, "PROP_160", "Speaker count (e.g. '2')"),
+    CharacteristicBinding("hdmi_version", 187, "PROP_187", "HDMI version (e.g. '2.1')"),
+    CharacteristicBinding("wireless_interfaces", 253, "PROP_253", "Wireless interfaces (e.g. 'Bluetooth, Wi-Fi')"),
+    CharacteristicBinding("smart_tv_platform", 178, "PROP_178", "Smart TV platform (e.g. 'Google TV')"),
+    CharacteristicBinding("digital_tv_support", 221, "PROP_221", "Digital TV tuner support (e.g. 'DVB-C,DVB-S,DVB-S2,DVB-T,DVB-T2,analog')"),
+    CharacteristicBinding("features", 258, "PROP_258", "Feature list (gaming/hotel/timer/voice/smartphone-related)"),
+    CharacteristicBinding("vesa_mount", 184, "PROP_184", "VESA mount (e.g. '300×300 мм')", unit="mm"),
+    CharacteristicBinding("voice_control", 175, "PROP_175", "Voice control assistant (e.g. 'Google Assistant')"),
+    CharacteristicBinding("power_consumption", 186, "PROP_186", "Power consumption (e.g. '400 Вт')", unit="W"),
+    CharacteristicBinding("dimensions_with_stand", 177, "PROP_177", "Dimensions with stand (e.g. '1436 x 860 x 368 мм')", unit="mm"),
+    CharacteristicBinding("weight_with_stand", 203, "PROP_203", "Weight with stand (e.g. '30.4 кг')", unit="kg"),
+    CharacteristicBinding("dimensions_without_stand", 189, "PROP_189", "Dimensions without stand (e.g. '1436 x 824 x 50 мм')", unit="mm"),
+    CharacteristicBinding("weight_without_stand", 159, "PROP_159", "Weight without stand (e.g. '28.4 кг')", unit="kg"),
+    CharacteristicBinding("country_of_origin", 157, "PROP_157", "Country of origin (e.g. 'Китай')"),
+    CharacteristicBinding("service_life", 252, "PROP_252", "Service life / warranty period (e.g. '5 лет')"),
+    # Deliberately NOT added (module docstring item J): 'ports'/
+    # 'interfaces' (property 154 is already bound to a different,
+    # already-shipped semantic key -- 'screen_diagonal_cm' -- and
+    # resolving that conflict is a schema correction outside this bounded
+    # task's scope) and a second 'screen_resolution'-shaped binding on
+    # property 183 (the existing 'screen_resolution' key is already
+    # verified on property 156 with a different value shape -- reusing
+    # the same key for a second property would be exactly the guessed
+    # duplicate-destination ambiguity this module refuses to resolve).
 )
 
 _CHARACTERISTIC_BY_KEY = {c.key: c for c in CATALOG_CHARACTERISTICS}

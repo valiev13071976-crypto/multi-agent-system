@@ -54,6 +54,19 @@ _ARTICLE_PROPERTY = schema.offer_property(code="ARTICLE")
 # Custom Property Values" reference).
 _MORE_PHOTO_PROPERTY = schema.offer_property(code="MORE_PHOTO")
 
+# SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758 follow-up,
+# production reference element 992/IBLOCK 14, real admin form
+# form_element_14 -- see integrations/bitrix/schema.py module docstring
+# items H/I): a non-variant (``has_variant_offer=False``, the default)
+# product genuinely HAS a verified base-product destination for its own
+# article/SKU (CML2_ARTICLE/241) and gallery (MORE_PHOTO/124) -- distinct
+# property ids from the offer-only ARTICLE(283)/MORE_PHOTO(280) above,
+# which remain the correct destination ONLY when ``has_variant_offer=True``
+# actually creates an offer/SKU element. Both models are mutually
+# exclusive per write (never both written for the same product).
+_SIMPLE_ARTICLE_PROPERTY = schema.catalog_property(code=schema.CML2_ARTICLE_PROPERTY_CODE)
+_SIMPLE_MORE_PHOTO_PROPERTY = schema.catalog_property(code=schema.SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_CODE)
+
 # Complete-product-card follow-up pass (module docstring in
 # integrations/bitrix/schema.py, second Block 5.6 follow-up defect
 # closure): section assignment, weight/dimensions, preview/detail content
@@ -380,27 +393,24 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             fields[bitrix_field] = {schema.PICTURE_FILE_DATA_KEY: [str(entry["filename"]), str(entry["base64"])]}
         return fields
 
-    def _gallery_offer_fields(self, product_in: dict) -> dict:
-        """Gallery follow-up defect closure: the OFFER-level (IBLOCK 15)
-        MORE_PHOTO (property 280) multi-value FILE property write --
-        deliberately separate from ``_media_fields`` above, which only
-        ever builds BASE-PRODUCT fields (``previewPicture``/
-        ``detailPicture``). Gallery images belong to the offer/SKU, never
-        the base product, on this installation's verified schema (see
-        ``_MORE_PHOTO_PROPERTY`` above) -- this is called at the OFFER
-        create step in ``_write_product_create_live``, never merged into
-        ``_optional_product_fields``'s base-product ``fields`` dict.
-        Validated fail-closed before any HTTP call, same discipline as
-        ``_media_fields``; a caller that supplied no gallery images gets
-        an empty dict back (never a guessed one)."""
+    @staticmethod
+    def _gallery_file_values(product_in: dict) -> list:
+        """Shared, property-agnostic validation/shaping for gallery images
+        -- fail-closed before any HTTP call, same discipline as
+        ``_media_fields``. Returns the bare list of ``{"value": {...}}``
+        FILE-property entries (Bitrix's documented multi-value FILE
+        property write shape), WITHOUT a destination property key --
+        callers attach it to whichever verified gallery property actually
+        applies (offer MORE_PHOTO/280 vs base-product MORE_PHOTO/124 --
+        see ``_gallery_offer_fields``/``_gallery_simple_fields`` below).
+        A caller that supplied no gallery images gets an empty list back
+        (never a guessed one)."""
         media = product_in.get("media") or {}
         if not isinstance(media, dict):
             raise BitrixValidationError("media_fields_invalid")
         entries = media.get("gallery_pictures") or []
         if not entries:
-            return {}
-        if _MORE_PHOTO_PROPERTY is None:
-            raise IntegrationNotConfiguredError("bitrix_gallery_property_not_verified")
+            return []
         file_values = []
         for entry in entries:
             if not isinstance(entry, dict) or not entry.get("filename") or not entry.get("base64"):
@@ -408,7 +418,40 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             file_values.append(
                 {"value": {schema.PICTURE_FILE_DATA_KEY: [str(entry["filename"]), str(entry["base64"])]}}
             )
-        return {_MORE_PHOTO_PROPERTY.select_key: file_values}
+        return file_values
+
+    def _gallery_offer_fields(self, gallery_file_values: list) -> dict:
+        """Gallery follow-up defect closure: the OFFER-level (IBLOCK 15)
+        MORE_PHOTO (property 280) multi-value FILE property write --
+        deliberately separate from ``_media_fields`` above, which only
+        ever builds BASE-PRODUCT fields (``previewPicture``/
+        ``detailPicture``). Gallery images belong to the offer/SKU here,
+        never the base product, on this installation's verified schema
+        (see ``_MORE_PHOTO_PROPERTY`` above) -- this is called at the
+        OFFER create step in ``_write_product_create_live``, never merged
+        into ``_optional_product_fields``'s base-product ``fields`` dict.
+        Only reached when ``has_variant_offer=True`` -- see
+        ``_gallery_simple_fields`` for the SIMPLE_PRODUCT (base-product)
+        destination used otherwise."""
+        if not gallery_file_values:
+            return {}
+        if _MORE_PHOTO_PROPERTY is None:
+            raise IntegrationNotConfiguredError("bitrix_gallery_property_not_verified")
+        return {_MORE_PHOTO_PROPERTY.select_key: gallery_file_values}
+
+    def _gallery_simple_fields(self, gallery_file_values: list) -> dict:
+        """SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        follow-up, schema.py module docstring item I): the BASE-PRODUCT
+        (IBLOCK 14) MORE_PHOTO (property 124) destination -- verified
+        directly on production reference element 992 (8 populated gallery
+        files). Used ONLY for the default, non-variant product model
+        (``has_variant_offer=False``); merged into the base product's
+        ``catalog.product.add`` fields, never the offer."""
+        if not gallery_file_values:
+            return {}
+        if _SIMPLE_MORE_PHOTO_PROPERTY is None:
+            raise IntegrationNotConfiguredError("bitrix_gallery_property_not_verified")
+        return {_SIMPLE_MORE_PHOTO_PROPERTY.select_key: gallery_file_values}
 
     def _optional_product_fields(self, product_in: dict) -> tuple[dict, list[str]]:
         """Merge every verified-but-optional complete-card field (section,
@@ -451,20 +494,18 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         written here -- ``controlled_bitrix_write`` already never includes
         them in the canonical payload this reads.
 
-        TV product-write-contract defect closure: article/SKU (offer
-        property 283) and gallery (offer property 280 / MORE_PHOTO) are
-        verified ONLY on the offers IBLOCK (15) -- they are only actually
-        written when ``has_variant_offer`` is True, which also gates
-        whether an offer/SKU (IBLOCK 15) is created at all. A plain,
-        non-variant product (the default -- see
+        SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        follow-up, production reference element 992/IBLOCK 14): article/
+        SKU and gallery now have VERIFIED base-product destinations too
+        (CML2_ARTICLE/241, MORE_PHOTO/124) -- written on this same base-
+        product create call whenever ``has_variant_offer`` is False (the
+        default). The pre-existing offer-only destinations (ARTICLE/283,
+        MORE_PHOTO/280, IBLOCK 15) remain unchanged and are used instead
+        -- on a genuine offer/SKU element -- ONLY when a caller explicitly
+        supplies ``has_variant_offer=True`` (see
         ``business_assistant.controlled_bitrix_write.
-        SingleProductWriteRequest.has_variant_offer``) never creates an
-        offer, matching the verified reference Aspro TV card's structure,
-        and correctly leaves article/SKU and gallery unmapped rather than
-        guessed onto an unverified IBLOCK 14 property (see
-        ``business_assistant.controlled_bitrix_write``'s
-        ``_NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT``/
-        ``_NO_GALLERY_DESTINATION_SIMPLE_PRODUCT``).
+        SingleProductWriteRequest.has_variant_offer``). The two
+        destinations are mutually exclusive per write.
 
         Idempotency/duplicate-protection design note: a FRESH
         ``LiveBitrixAdapter`` is constructed on every
@@ -540,11 +581,29 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         # media/characteristics -- every one validated fail-closed here,
         # before any HTTP call, same as purchase_price above.
         optional_fields, characteristics_written = self._optional_product_fields(product_in)
-        # Gallery follow-up defect closure: OFFER-level MORE_PHOTO fields,
-        # validated fail-closed here too (before any HTTP call), but sent
-        # on the offer create below -- never merged into the base
-        # product's ``optional_fields`` above.
-        gallery_offer_fields = self._gallery_offer_fields(product_in)
+        # Gallery: shared, property-agnostic validation (fail closed
+        # before any HTTP call) -- which VERIFIED property it lands on
+        # (base-product MORE_PHOTO/124 for the default SIMPLE_PRODUCT
+        # model, or offer MORE_PHOTO/280 for a genuine
+        # ``has_variant_offer=True``) is decided below.
+        gallery_file_values = self._gallery_file_values(product_in)
+
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up, schema.py module docstring items H/I): for the
+        # default, non-variant product model, article/SKU and gallery now
+        # have verified BASE-PRODUCT destinations (CML2_ARTICLE/241,
+        # MORE_PHOTO/124) -- sent on the SAME ``catalog.product.add`` call
+        # as every other base-product field above, never on a separate
+        # offer/SKU element. Mutually exclusive with the offer-only
+        # ARTICLE(283)/MORE_PHOTO(280) path below, which remains correct
+        # ONLY when the caller genuinely supplied ``has_variant_offer=True``.
+        product_create_fields = dict(optional_fields)
+        if not has_variant_offer:
+            if sku:
+                if _SIMPLE_ARTICLE_PROPERTY is None:
+                    raise IntegrationNotConfiguredError("bitrix_article_property_not_verified")
+                product_create_fields[_SIMPLE_ARTICLE_PROPERTY.select_key] = sku
+            product_create_fields.update(self._gallery_simple_fields(gallery_file_values))
 
         xml_id = self._idempotency_xml_id(idempotency_key)
 
@@ -567,7 +626,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 credential_ref=credential_ref,
                 purchase_price=purchase_price_amount,
                 purchase_price_currency=purchase_price_currency,
-                extra_fields=optional_fields,
+                extra_fields=product_create_fields,
             )
             resolved_active = active
             resolved_name = name
@@ -594,16 +653,22 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             k for k in (schema.PREVIEW_PICTURE_FIELD, schema.DETAIL_PICTURE_FIELD) if k in optional_fields
         ]
 
-        article_written = ""
-        # Set only when the offer create actually ran and gallery fields
-        # were actually supplied on it (an idempotent replay that finds an
-        # existing offer never re-sends fields, exactly like article_written
-        # only being set once the offer step is reached without error).
-        gallery_written = 0
+        # SIMPLE_PRODUCT TV contract-alignment pass: article/gallery are
+        # sent on the SAME base-product create call as brand/section/
+        # physical/etc. above -- so, exactly like ``purchase_price_written``,
+        # they are already "confirmed present" the moment ``product_id`` is
+        # resolved (fresh create OR idempotent replay of an
+        # already-completed create), before any offer/price step below
+        # that can still fail.
+        article_written = sku if (sku and not has_variant_offer) else ""
+        gallery_written = (
+            len(gallery_file_values) if (gallery_file_values and not has_variant_offer) else 0
+        )
         if sku and has_variant_offer:
             try:
                 existing_offer = self._find_offer_by_parent(product_id, credential_ref=credential_ref)
                 if existing_offer is None:
+                    gallery_offer_fields = self._gallery_offer_fields(gallery_file_values)
                     self._live_create_offer(
                         parent_id=product_id,
                         name=resolved_name,

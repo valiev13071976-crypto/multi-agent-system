@@ -140,11 +140,16 @@ class MapCharacteristicsUnitTests(unittest.TestCase):
         self.assertEqual(unmapped, [])
 
     def test_unverified_keys_are_reported_unmapped_never_written(self):
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up): "refresh_rate_hz"/"display_technology" are now
+        # VERIFIED keys (properties 147/248) and can no longer serve as
+        # "unverified" examples here -- "hdr_formats"/"model_year" remain
+        # genuinely unmapped.
         fields, unmapped = schema.map_characteristics_to_properties(
-            {"refresh_rate_hz": "120", "display_technology": "OLED"}
+            {"hdr_formats": "Dolby Vision", "model_year": "2026"}
         )
         self.assertEqual(fields, {})
-        self.assertEqual(sorted(unmapped), ["display_technology", "refresh_rate_hz"])
+        self.assertEqual(sorted(unmapped), ["hdr_formats", "model_year"])
 
     def test_empty_or_none_values_are_skipped_not_reported_unmapped_or_written(self):
         fields, unmapped = schema.map_characteristics_to_properties({"screen_diagonal_cm": "", "color": None})
@@ -281,19 +286,23 @@ class CharacteristicsOrchestrationTests(unittest.TestCase):
         self.assertEqual(product_body["fields"]["property246"], "Черный")
 
     def test_unverified_characteristics_are_reported_not_written_on_live_bridge(self):
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up): "refresh_rate_hz" is now a VERIFIED key (property
+        # 147) and can no longer serve as an "unverified" example here --
+        # "model_year" remains genuinely unmapped.
         transport = _RecordingTransport()
         with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
             bridge, _ = _bridge_and_activation()
             result = execute_single_product_write(
                 bridge,
                 tenant_id=TARGET_TENANT,
-                request=_request(characteristics={"refresh_rate_hz": "120"}),
+                request=_request(characteristics={"model_year": "2026"}),
                 approved=True,
             )
         self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
         self.assertEqual(result["characteristics_written"], [])
         not_written_fields = {item["field"] for item in result["not_written"]}
-        self.assertIn("characteristic:refresh_rate_hz", not_written_fields)
+        self.assertIn("characteristic:model_year", not_written_fields)
         _, product_body = next((m, b) for m, b in transport.calls if m == "catalog.product.add")
         # property100 (BRAND) is expected -- the request always supplies a
         # brand; only the characteristic property fields must be absent.
