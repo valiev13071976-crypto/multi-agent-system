@@ -136,6 +136,61 @@ def _wants_first_row(text: str) -> bool:
     return bool(_FIRST_PRODUCT_SELECT_RE.search(text or ""))
 
 
+# Production defect closure (first-turn "prepare a product for
+# Bitrix/Aspro" request that names no specific item): ``_wants_first_row``
+# above only recognizes a narrow "choose/select/pick/take" verb directly
+# adjacent to "first/one", or an ordinal directly adjacent to one of a
+# few generic nouns (item/product/товар/позиция) -- so a normal, natural
+# first-turn request like "Подготовь один телевизор из этого прайса для
+# Bitrix/Aspro." (uses "подготовь" rather than one of those five verbs, and
+# names a concrete PRODUCT-CATEGORY noun like "телевизор" instead of a
+# generic one) fell through every existing signal and was answered with
+# the generic dimension-only spreadsheet summary instead of ever
+# selecting a product.
+#
+# Generalizes via the SAME two-independent-stem-group convention this
+# module already uses for other semantic-navigation signals
+# (``_wants_different_product``/``_wants_previous_product``) instead of
+# enumerating sentences or product-category nouns: an explicit
+# SINGLE-QUANTITY marker (exactly one item, unspecified which) present
+# ANYWHERE in the message, TOGETHER with an independent "prepare this as
+# a product/card" signal -- the "готов" root shared by every inflection
+# of "подготовь"/"подготовка"/"готовая"/"готовый" ("prepare"/"ready"), or
+# an explicit mention of a product CARD ("карточк-"/"card"). Neither
+# group alone is sufficient, so this can never widen into "route every
+# XLSX turn to product preparation":
+#   - a pure spreadsheet-statistics ask ("Проанализируй этот прайс и
+#     покажи среднюю цену.", "Сколько строк в таблице?", "Покажи
+#     минимальную и максимальную цену.", "Сделай сводку по этому
+#     Excel.") names no single-quantity marker at all;
+#   - a bare "Подготовь товар для Bitrix/Aspro" (no attachment-relative
+#     continuation, no specific item -- the existing, already-tested
+#     turn-1 generic-analysis shape) also names no single-quantity
+#     marker, so it is completely unaffected.
+_SINGLE_QUANTITY_STEMS = (
+    "один",
+    "одна",
+    "одну",
+    "одного",
+    "первый",
+    "первую",
+    "первое",
+    "one",
+    "first",
+    "a single",
+)
+_PRODUCT_READY_OR_CARD_STEMS = ("готов", "карточ", "card")
+
+
+def _wants_single_unspecified_product(text: str) -> bool:
+    blob = (text or "").casefold()
+    if not blob:
+        return False
+    if not any(stem in blob for stem in _SINGLE_QUANTITY_STEMS):
+        return False
+    return any(stem in blob for stem in _PRODUCT_READY_OR_CARD_STEMS)
+
+
 def _find_row_by_identifier(text: str, rows: list[dict], table) -> tuple[dict, str, str] | None:
     blob = (text or "").casefold()
     candidates = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
@@ -1010,7 +1065,7 @@ class DataIntelligenceService:
                     row_hit = _next_distinct_row_hit(
                         rows, table, exclude_source_row=current_source_row
                     )
-            if row_hit is None and _wants_first_row(text):
+            if row_hit is None and (_wants_first_row(text) or _wants_single_unspecified_product(text)):
                 row_hit = _first_row_hit(rows, table)
             if row_hit is None:
                 ordinal_index = _wants_ordinal_row_index(text)
