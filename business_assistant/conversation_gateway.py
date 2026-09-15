@@ -672,6 +672,96 @@ class WorkflowPandaConversationGateway:
             },
         )
 
+    def _persist_managed_agent_product_context(self, request: ConversationRequest, metadata: dict) -> None:
+        """Ownership-model-B defect closure (managed-agent -> governed
+        Bitrix write confirmation, PR #87 follow-up), PART 2: this gateway
+        -- never ``managed_agent_poc``/``panda_bridge`` (which remain state-
+        pure -- see that module's own "palm + fingers" independence
+        docstring, and its ``maybe_respond_via_managed_agent`` return
+        contract, which only RETURNS this data, never persists it) -- is
+        the sole owner of durable ``ActiveTaskStore`` state. Reuses the
+        EXISTING get -> mutate ``task.parameters`` -> ``put`` pattern the
+        legacy FAMILY_EXCEL ``ROW_FOUND``/``CALL_PRODUCT_ENRICHMENT`` paths
+        already use above (``_invoke_tool``/``_invoke_product_enrichment``)
+        under the SAME EXISTING ``bitrix_product_fields``/
+        ``bitrix_enrichment_write_request``/``bitrix_retail_price_preview``
+        keys -- no new state store, no new schema.
+
+        A no-op whenever this turn's managed-agent metadata carries no
+        resolved product (e.g. a pure ``analyze_spreadsheet`` turn, or a
+        failed/NOT_FOUND resolution) -- nothing about the conversation's
+        existing product/write context is touched in that case.
+
+        Called on EVERY successful managed-agent product/write-plan
+        resolution (``select_product`` AND ``explain_bitrix_write_plan``),
+        never only the first product in the conversation -- so a later
+        Product A -> Product B switch through this SAME managed-agent path
+        always overwrites both keys together with Product B's identity
+        atomically, exactly like the legacy ``ROW_FOUND`` handler already
+        does. This is what keeps PR #87's own cross-product SKU guard in
+        ``_invoke_controlled_bitrix_write`` meaningful here too: that guard
+        fails closed the instant ``bitrix_enrichment_write_request``'s own
+        sku ever disagrees with ``bitrix_product_fields['sku']`` -- which
+        can only happen if one of the two were left stale while the other
+        moved on, something this method never allows since it always
+        writes both from the SAME managed-agent turn's resolution."""
+        product_fields = metadata.get("bitrix_product_fields")
+        if not isinstance(product_fields, dict) or not product_fields.get("title") or not product_fields.get("sku"):
+            return
+
+        from business_assistant.action_continuation import (
+            EXCEL_CONTRACT,
+            FAMILY_EXCEL,
+            RISK_READ,
+            STATUS_DRAFT,
+            ActiveTask,
+        )
+
+        tenant_id = str(request.tenant_id or "")
+        owner_id = str(request.user_id or "")
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id:
+            return
+
+        task = self._action_store.get(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
+        if task is None or task.family != FAMILY_EXCEL:
+            # A managed-agent-driven conversation never reaches
+            # resolve_action_turn() at all while eligible (see this
+            # method's caller), so no ActiveTask normally exists here yet.
+            # FAMILY_EXCEL is the EXISTING family
+            # ``resolve_bitrix_write_confirmation`` already requires --
+            # reused verbatim (PART 4's compatibility guard: this exact
+            # existing check is satisfied by reusing the existing family,
+            # never inventing a new one). If some OTHER, unrelated family's
+            # task happens to be active for this conversation, it is
+            # replaced here -- this managed-agent-resolved product context
+            # is the newest, most relevant state for a following write
+            # confirmation.
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                family=FAMILY_EXCEL,
+                tool_id=EXCEL_CONTRACT.tool_id,
+                operation=EXCEL_CONTRACT.operation,
+                goal="",
+                artifact_type="workbook",
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+
+        task.parameters["bitrix_product_fields"] = dict(product_fields)
+        enrichment_write_request = metadata.get("bitrix_enrichment_write_request")
+        if isinstance(enrichment_write_request, dict) and enrichment_write_request:
+            task.parameters["bitrix_enrichment_write_request"] = dict(enrichment_write_request)
+        else:
+            task.parameters.pop("bitrix_enrichment_write_request", None)
+        retail_price_preview = str(metadata.get("bitrix_retail_price_preview") or "")
+        if retail_price_preview:
+            task.parameters["bitrix_retail_price_preview"] = retail_price_preview
+        self._action_store.put(task)
+
     async def _invoke_controlled_bitrix_write(
         self, request: ConversationRequest, action
     ) -> ConversationResult:
@@ -1129,6 +1219,7 @@ class WorkflowPandaConversationGateway:
             EXPLAIN_BITRIX_WRITE_PLAN,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
+            is_explicit_bitrix_write_confirmation,
             resolve_action_turn,
         )
         from business_assistant.follow_up import build_follow_up_prompt, resolve_follow_up
@@ -1188,9 +1279,30 @@ class WorkflowPandaConversationGateway:
         # this turn. Any failure (SDK missing, no key, timeout, ...)
         # degrades to None and falls straight through to resolve_action_turn
         # exactly as if this block did not exist.
+        #
+        # PART 3 of the managed-agent -> governed Bitrix write confirmation
+        # defect closure (PR #87 follow-up): an explicit write confirmation
+        # (the SAME EXISTING canonical ``is_explicit_bitrix_write_confirmation``
+        # classifier the legacy path already uses -- never a second phrase
+        # list, never LLM tool-selection "preference") must NEVER enter the
+        # managed-agent tool selector at all -- the managed agent exposes no
+        # write tool (see its own module docstring), so a real production
+        # confirmation message was previously misrouted into
+        # ``explain_bitrix_write_plan`` (a read-only re-display of the plan)
+        # instead of ever reaching the governed write path below. Gating
+        # here -- purely on THIS turn's raw text, exactly the same signal
+        # ``resolve_action_turn`` itself already keys off of at its own
+        # confirmation check -- lets an explicit confirmation fall straight
+        # through to the EXISTING ``resolve_action_turn()``/
+        # ``resolve_bitrix_write_confirmation()``/``CALL_CONTROLLED_BITRIX_
+        # WRITE`` chain unchanged. Every other managed-agent-eligible turn
+        # (including a genuine "show/review the plan" question, which is
+        # NOT a confirmation -- see ``is_explicit_bitrix_write_confirmation``'s
+        # own docstring) is completely unaffected and keeps going through
+        # the managed agent exactly as before.
         from managed_agent_poc.panda_bridge import managed_agent_enabled
 
-        if managed_agent_enabled():
+        if managed_agent_enabled() and not is_explicit_bitrix_write_confirmation(text):
             from managed_agent_poc.panda_bridge import maybe_respond_via_managed_agent
 
             managed_result = await maybe_respond_via_managed_agent(
@@ -1216,6 +1328,19 @@ class WorkflowPandaConversationGateway:
             if managed_result is not None:
                 self._record_latency(t0, follow_up_ms)
                 meta = dict(managed_result.get("metadata") or {})
+                # PART 2 of the managed-agent -> governed Bitrix write
+                # confirmation defect closure: this gateway -- never
+                # ``managed_agent_poc``/``panda_bridge`` -- is the sole
+                # owner of durable ``ActiveTaskStore`` state (see
+                # ``_persist_managed_agent_product_context``'s own
+                # docstring). Persisting BEFORE this early return is what
+                # lets a LATER explicit confirmation turn (which now skips
+                # the managed agent entirely -- see this method's own PART 3
+                # gate above) resolve the SAME canonical product/write
+                # context through the EXISTING, unmodified
+                # ``resolve_bitrix_write_confirmation``/
+                # ``_invoke_controlled_bitrix_write`` chain.
+                self._persist_managed_agent_product_context(request, meta)
                 meta["follow_up_kind"] = resolution.kind
                 meta["follow_up_target"] = resolution.target
                 return ConversationResult(
