@@ -1176,6 +1176,44 @@ def is_bitrix_write_plan_question(text: str) -> bool:
     return bool(_WRITE_PLAN_RE.search(blob))
 
 
+# Production defect closure (business-process ownership: a retail-price
+# FORMULA instruction, e.g. "установи розничную цену как закупочная + 7%",
+# misread as an immediate write/publish command): ``business_assistant.
+# intent.is_conversational``'s attachment/active-task continuation gates
+# each carry their own small "explicit immediate-write/publish verb"
+# word list ("измени"/"установ"/"опубликуй"/"publish all") so a genuine
+# out-of-finger write command (e.g. "Измени цену и опубликуй все товары
+# ... на сайт") still overrides continuation ownership and keeps routing
+# to the legacy governed business-workflow engine unchanged. That list is
+# a crude proxy: the stem "установ" ALSO matches an ordinary "set/
+# establish this pricing INPUT" instruction for the SAME already-active
+# (or just-starting) Bitrix/Aspro product task, which is never a write
+# command at all -- especially when the SAME message already says so
+# explicitly ("Ничего в Bitrix пока не записывай."). Rather than adding
+# yet another phrase-specific predicate to the growing ``is_explicit_*``
+# family above, expose the ONE existing, canonical Bitrix-target +
+# no-write-negation signal ``is_explicit_bitrix_write_confirmation``/
+# ``is_bitrix_write_plan_question`` already rely on (``_BITRIX_NO_WRITE_RE``
+# + ``_BITRIX_TARGET_MARKER_STEMS``) as a small public override those two
+# gates can reuse directly. Scoped to an explicit Bitrix/Aspro target so a
+# DIFFERENT-domain write command (no "Bitrix"/"Aspro" mention at all, e.g.
+# the marketplace-publish example above) is entirely unaffected.
+def has_explicit_bitrix_no_write_qualifier(text: str) -> bool:
+    """True when the message explicitly targets Bitrix/Aspro AND explicitly
+    says not to write/publish there yet (e.g. "...подготовь для Bitrix/
+    Aspro... Ничего в Bitrix пока не записывай."). Used to override the
+    coarse "explicit write/publish verb" exclusion in ``business_assistant.
+    intent.is_conversational``'s continuation-ownership gates -- never to
+    grant write approval itself (see ``is_explicit_bitrix_write_confirmation``
+    for that, separate, decision)."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+        return False
+    return bool(_BITRIX_NO_WRITE_RE.search(blob))
+
+
 def _extract_confirmed_retail_price(text: str) -> str:
     match = _CONFIRMED_RETAIL_PRICE_RE.search(text or "")
     if not match:

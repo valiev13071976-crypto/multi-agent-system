@@ -175,6 +175,16 @@ def is_conversational(
     if "что ты умеешь" in tl or "what can you do" in tl:
         return True
 
+    # Local import avoids a circular import (action_continuation already
+    # imports requires_business_integration from this module).
+    from business_assistant.action_continuation import (
+        has_explicit_bitrix_no_write_qualifier,
+        is_bitrix_write_plan_question,
+        is_explicit_product_enrichment_request,
+        is_explicit_product_pricing_or_category_refinement_request,
+        is_explicit_single_product_bitrix_prep_request,
+    )
+
     # Production defect closure (XLSX attachment -> failed response): a
     # request that carries a file attachment (spreadsheet/document) must
     # reach the conversational Panda AI core -- the ONLY pipeline that
@@ -189,9 +199,14 @@ def is_conversational(
     # list) got misrouted there and silently never read the file. An
     # explicit immediate-write/publish verb (already gating
     # requires_business_integration below) still overrides this and stays
-    # on the governed business-workflow path unchanged.
-    if has_attachments and not any(
-        w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all")
+    # on the governed business-workflow path unchanged -- UNLESS the SAME
+    # message already explicitly says not to write/publish to Bitrix/Aspro
+    # yet (``has_explicit_bitrix_no_write_qualifier``; production defect
+    # closure below), which can never itself be mistaken for the write verb
+    # it is negating.
+    if has_attachments and (
+        has_explicit_bitrix_no_write_qualifier(raw)
+        or not any(w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all"))
     ):
         return True
 
@@ -206,13 +221,35 @@ def is_conversational(
     # itself decide whether Panda can continue that SAME task -- only the
     # caller-supplied state of the conversation does. Mirrors the
     # attachment-presence check immediately above it exactly (same explicit
-    # immediate-write/publish-verb exception, so this can never itself
-    # imply write approval): the difference is durable conversation state
-    # instead of this turn's own attachment. Generalizes over EVERY future
-    # follow-up phrasing at once instead of requiring a new hand-written
-    # escape hatch per sentence.
-    if has_active_product_task and not any(
-        w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all")
+    # immediate-write/publish-verb exception -- and the SAME no-write-
+    # qualifier override, so this can never itself imply write approval):
+    # the difference is durable conversation state instead of this turn's
+    # own attachment. Generalizes over EVERY future follow-up phrasing at
+    # once instead of requiring a new hand-written escape hatch per
+    # sentence.
+    #
+    # Production defect closure (business-process ownership: retail-price
+    # FORMULA instruction mistaken for an immediate write, e.g. "Установи
+    # розничную цену как закупочная + 7%, подготовь для Bitrix/Aspro,
+    # покажи полный план записи. Ничего в Bitrix пока не записывай."):
+    # the stem "установ" above matches this ordinary pricing-INPUT
+    # instruction for the ALREADY-ACTIVE product/XLSX task just as it
+    # would an actual immediate-write command, misrouting it to the
+    # attachment-blind legacy business-workflow engine -> BA_CAPABILITY_
+    # UNAVAILABLE/dependency_not_ready-degraded "Задача выполнена..."
+    # result. Rather than adding yet another phrase-specific
+    # ``is_explicit_*`` predicate for this ONE new wording, the SAME
+    # no-write-qualifier override above generalizes to it: the message
+    # already explicitly says not to write, so an established operational
+    # task's continuation ownership must not be defeated by an unrelated
+    # local pricing instruction that merely shares a word stem with an
+    # actual write verb. A genuine out-of-finger write command (no
+    # explicit Bitrix/Aspro no-write qualifier -- e.g. "Измени цену и
+    # опубликуй все товары из прайса на сайт") is entirely unaffected and
+    # keeps routing to the legacy business-workflow path unchanged.
+    if has_active_product_task and (
+        has_explicit_bitrix_no_write_qualifier(raw)
+        or not any(w in tl for w in ("измени", "change price", "установ", "опубликуй", "publish all"))
     ):
         return True
 
@@ -230,15 +267,7 @@ def is_conversational(
     # writes to Bitrix by itself -- see is_explicit_product_enrichment_
     # request's own docstring), producing the reported
     # BA_CAPABILITY_UNAVAILABLE/dependency_not_ready-degraded generic
-    # result instead of the enrichment preview. Local import avoids a
-    # circular import (action_continuation already imports
-    # requires_business_integration from this module).
-    from business_assistant.action_continuation import (
-        is_bitrix_write_plan_question,
-        is_explicit_product_enrichment_request,
-        is_explicit_product_pricing_or_category_refinement_request,
-        is_explicit_single_product_bitrix_prep_request,
-    )
+    # result instead of the enrichment preview.
 
     if is_explicit_product_enrichment_request(raw):
         return True
