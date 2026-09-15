@@ -104,5 +104,62 @@ class GenerateContentTests(unittest.TestCase):
         self.assertEqual(draft.image_title, "LG 55MRGB86B6A.ARUG")
 
 
+class UnitDuplicationDefectClosureTests(unittest.TestCase):
+    """Production defect closure (live preview, LG 100MRGB96B6.ARUG --
+    follow-up ticket after PR #85 was deployed): rendered content must
+    never append a unit that the normalized value already states inline.
+    PR #85's own Bitrix mapping is untouched by this module."""
+
+    def test_refresh_rate_with_already_unit_bearing_value_does_not_append_another_hz(self):
+        chars = {
+            "refresh_rate_hz": NormalizedCharacteristic(
+                key="refresh_rate_hz", value="120Гц (VRR 165Гц)", unit="Hz", confidence=CONFIDENCE_VERIFIED
+            )
+        }
+        draft = generate_content(_identity(), chars)
+        self.assertNotIn("120Гц (VRR 165Гц) Гц", draft.detailed_description)
+        self.assertIn("120Гц (VRR 165Гц)", draft.detailed_description)
+        # The meaningful VRR information must be preserved verbatim.
+        self.assertIn("VRR 165Гц", draft.detailed_description)
+
+    def test_refresh_rate_with_bare_number_still_gets_its_unit_appended(self):
+        chars = {
+            "refresh_rate_hz": NormalizedCharacteristic(
+                key="refresh_rate_hz", value="120", unit="Hz", confidence=CONFIDENCE_VERIFIED
+            )
+        }
+        draft = generate_content(_identity(), chars)
+        self.assertIn("120 Гц", draft.detailed_description)
+
+    def test_weight_with_stand_does_not_duplicate_kg_unit(self):
+        chars = {
+            "weight_with_stand_kg": NormalizedCharacteristic(
+                key="weight_with_stand_kg", value="30.4 кг", unit="kg", confidence=CONFIDENCE_VERIFIED
+            )
+        }
+        draft = generate_content(_identity(), chars)
+        self.assertNotIn("кг кг", draft.detailed_description)
+        self.assertIn("30.4 кг", draft.detailed_description)
+
+    def test_screen_diagonal_does_not_duplicate_cm_unit(self):
+        chars = {
+            "screen_diagonal_cm": NormalizedCharacteristic(
+                key="screen_diagonal_cm", value="254 см", unit="cm", confidence=CONFIDENCE_VERIFIED
+            )
+        }
+        draft = generate_content(_identity(), chars)
+        self.assertNotIn("см см", draft.detailed_description)
+        self.assertIn("254 см", draft.detailed_description)
+
+    def test_screen_diagonal_bare_number_still_gets_its_unit_appended(self):
+        chars = {
+            "screen_diagonal_cm": NormalizedCharacteristic(
+                key="screen_diagonal_cm", value="254.0", unit="cm", confidence=CONFIDENCE_VERIFIED
+            )
+        }
+        draft = generate_content(_identity(), chars)
+        self.assertIn("254.0 см", draft.detailed_description)
+
+
 if __name__ == "__main__":
     unittest.main()
