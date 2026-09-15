@@ -705,6 +705,28 @@ _WRITE_STEMS = (
 # ("продолжай", "давай", "ок", "делай дальше" match none of these).
 _BITRIX_APPROVAL_MARKER_STEMS = ("подтвержда", "подтверд", "confirm", "i confirm")
 _BITRIX_TARGET_MARKER_STEMS = ("bitrix", "битрикс", "аспро", "aspro")
+# Write-plan confirmation-semantics defect closure: an owner confirming an
+# ALREADY-SHOWN write plan (``EXPLAIN_BITRIX_WRITE_PLAN``/enrichment preview)
+# routinely refers to "the shown plan" -- e.g. "Да, подтверждаю запись по
+# показанному плану." -- instead of re-naming Bitrix/Aspro a second time in
+# the confirmation message itself. This is an equally unambiguous target
+# signal IN THIS SPECIFIC FLOW (a write PLAN is only ever shown by this
+# same Bitrix-write-confirmation feature -- see ``EXPLAIN_BITRIX_WRITE_
+# PLAN``/``format_write_plan_text``), so it stands alongside the literal
+# Bitrix/Aspro mention rather than replacing it. This does NOT loosen the
+# actual write itself: ``resolve_bitrix_write_confirmation`` still fails
+# closed (asks for a fresh plan) whenever no matching prepared-product
+# task context exists, exactly as before -- this only widens which
+# context-bound confirmations are even recognized as approval.
+_BITRIX_SHOWN_PLAN_TARGET_STEMS = (
+    "показанному плану",
+    "показанной карточ",
+    "по показанному",
+    "shown plan",
+    "shown write plan",
+    "the plan shown",
+    "the shown plan",
+)
 _BITRIX_CREATE_VERB_STEMS = (
     "созда",
     "запиши",
@@ -1048,7 +1070,7 @@ def is_explicit_bitrix_write_confirmation(text: str) -> bool:
         return False
     if not _has_stem(blob, _BITRIX_APPROVAL_MARKER_STEMS):
         return False
-    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS) and not _has_stem(blob, _BITRIX_SHOWN_PLAN_TARGET_STEMS):
         return False
     return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS) or bool(_BITRIX_WRITE_ACTION_RE.search(blob))
 
