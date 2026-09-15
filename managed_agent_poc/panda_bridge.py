@@ -619,7 +619,17 @@ async def _delegate_to_existing_write_plan(
             characteristic_status=serialize_characteristic_status(enrichment),
             enrichment_preview=enrichment_preview_dict(enrichment),
         )
-        return {"text": text, "write_preview": write_preview}
+        # Ownership-model-B defect closure (managed-agent -> governed Bitrix
+        # write confirmation): ``write_request`` was already fully built
+        # above (the SAME ``build_enriched_write_request`` the legacy
+        # CALL_PRODUCT_ENRICHMENT path also uses) but previously never left
+        # this closure -- only ``text``/``write_preview`` did. Returning it
+        # here lets ``maybe_respond_via_managed_agent`` echo it back to the
+        # gateway (see its own ``metadata["bitrix_enrichment_write_request"]``
+        # via the EXISTING ``serialize_write_request``) WITHOUT this module
+        # ever touching ``ActiveTaskStore`` itself -- it only returns data,
+        # never persists it.
+        return {"text": text, "write_preview": write_preview, "write_request": write_request}
 
     try:
         if timeout_s is not None:
@@ -994,6 +1004,40 @@ async def maybe_respond_via_managed_agent(
             write_preview = delegated.get("write_preview") or {}
             if write_preview:
                 metadata["bitrix_write_preview"] = write_preview
+
+            # Ownership-model-B defect closure (managed-agent -> governed
+            # Bitrix write confirmation, PR #87 follow-up): this module
+            # remains state-pure -- it never reads/writes ``ActiveTaskStore``
+            # (see the module docstring's "palm + fingers" independence) --
+            # but the EXISTING canonical product/write-request values ARE
+            # already fully computed by this SAME successful delegation
+            # (``_canonical_fields_and_retail_price``/
+            # ``build_enriched_write_request``, the identical functions the
+            # legacy CALL_PRODUCT_ENRICHMENT/EXPLAIN_BITRIX_WRITE_PLAN path
+            # already uses). Echoing them back through THIS existing plain-
+            # dict return contract -- never a new schema, never duplicated
+            # construction -- is what lets ``WorkflowPandaConversationGateway``
+            # (the sole owner of ``ActiveTaskStore``) persist them itself,
+            # under the SAME ``bitrix_product_fields``/
+            # ``bitrix_enrichment_write_request``/``bitrix_retail_price_
+            # preview`` keys ``ActiveTask.parameters`` already uses for the
+            # legacy FAMILY_EXCEL flow (see ``conversation_gateway.py``'s own
+            # ``_invoke_tool``/``_invoke_product_enrichment``). Populated for
+            # BOTH ``select_product`` and ``explain_bitrix_write_plan``
+            # resolutions (not only the first product in the conversation),
+            # so a LATER product switch through this SAME managed-agent path
+            # always overwrites this metadata with the CURRENT product --
+            # never leaves a stale one for the gateway to persist.
+            product_fields, retail_price = _canonical_fields_and_retail_price(raw_fields)
+            if product_fields.get("title") and product_fields.get("sku"):
+                metadata["bitrix_product_fields"] = product_fields
+            if retail_price:
+                metadata["bitrix_retail_price_preview"] = retail_price
+            write_request_obj = delegated.get("write_request")
+            if write_request_obj is not None:
+                from business_assistant.product_enrichment_bridge import serialize_write_request
+
+                metadata["bitrix_enrichment_write_request"] = serialize_write_request(write_request_obj)
         else:
             _log_event(
                 EVENT_PRODUCT_PREPARATION_DELEGATION_FAILED,
