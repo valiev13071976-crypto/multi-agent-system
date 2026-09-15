@@ -1044,6 +1044,36 @@ class BusinessAssistantApiService:
 
     def _sync_from_execution(self, rec: ApiRequestRecord, ex) -> None:
         mapped = _map_ba_status(ex.status)
+        # Production defect closure (business_workflow_degraded_or_empty_
+        # result false-success): the diagnostic below already identifies
+        # the exact "reported COMPLETED but had BLOCKED steps" shape --
+        # previously it only ever LOGGED that fact, never acted on it, so a
+        # request could still surface ``ST_COMPLETED`` to the caller/chat
+        # (which the frontend renders as a normal successful completion --
+        # see static/shared/presentation.js's ``toUserFacingSummary``/
+        # "Задача выполнена..." fallback, gated on ``summary.status ===
+        # "COMPLETED"`` in static/panda/js/app.js) even when the execution
+        # produced literally zero real findings behind it (``ex.findings``
+        # empty -- ``STATUS_COMPLETED_WITH_WARNINGS``/``STATUS_PARTIALLY_
+        # COMPLETED`` can only ever reach ``ST_COMPLETED`` together with a
+        # BLOCKED step in the first place -- see ``BusinessAssistantService.
+        # _finalize_status``; pure ``STATUS_COMPLETED`` never has one).
+        # Reuses the EXISTING ``ST_BLOCKED`` terminal status/event (no new
+        # status invented) so the SAME frontend branch that already renders
+        # a non-success outcome for BLOCKED requests applies here too. A
+        # genuine ``COMPLETED_WITH_WARNINGS`` result that DID produce real
+        # findings alongside an optional/non-required blocked step keeps its
+        # existing ``ST_COMPLETED`` mapping unchanged -- legitimate warning
+        # semantics are preserved, never globally redefined.
+        blocked_steps = [
+            {"step_id": step_id, "code": step.error_code}
+            for step_id, step in ex.steps.items()
+            if step.status == "BLOCKED" and step.error_code
+        ]
+        summary_empty = not str(ex.summary or "").strip()
+        degraded_or_empty = bool(blocked_steps) or (mapped == ST_COMPLETED and summary_empty)
+        if mapped == ST_COMPLETED and blocked_steps and not ex.findings:
+            mapped = ST_BLOCKED
         rec.status = mapped
         rec.updated_at = _utc_iso()
         rec.finops_cost = str(ex.cost)
@@ -1069,12 +1099,7 @@ class BusinessAssistantApiService:
         # production logs. Emit ONE bounded, safe diagnostic line so a real
         # future occurrence is correlatable by request_id alone (never logs
         # message text, attachment content, or secrets).
-        blocked_steps = [
-            {"step_id": step_id, "code": step.error_code}
-            for step_id, step in ex.steps.items()
-            if step.status == "BLOCKED" and step.error_code
-        ]
-        if blocked_steps or (mapped == ST_COMPLETED and not str(ex.summary or "").strip()):
+        if degraded_or_empty:
             _log_ba_event(
                 "business_workflow_degraded_or_empty_result",
                 request_id=rec.request_id,
@@ -1085,7 +1110,7 @@ class BusinessAssistantApiService:
                 blocked_step_count=len(blocked_steps),
                 blocked_step_codes=sorted({b["code"] for b in blocked_steps}),
                 attachment_count=len(rec.artifact_refs or ()),
-                summary_empty=not str(ex.summary or "").strip(),
+                summary_empty=summary_empty,
             )
         self.store.save_request(rec)
 
