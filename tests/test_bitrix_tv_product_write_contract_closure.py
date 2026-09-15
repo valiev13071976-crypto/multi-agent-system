@@ -102,6 +102,14 @@ VERIFIED_TV_CHARACTERISTIC_KEYS = {
     "operating_system",
     "smart_tv_support",
     "color",
+    # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+    # follow-up, production reference element 992/IBLOCK 14, real admin
+    # form form_element_14): these three requested keys now ALSO have a
+    # verified property destination (147/250/160) -- see
+    # integrations.bitrix.schema.CATALOG_CHARACTERISTICS.
+    "refresh_rate_hz",
+    "backlight_type",
+    "speaker_count",
 }
 
 
@@ -203,14 +211,24 @@ class ElementIdentityFieldMappingTests(unittest.TestCase):
         self.assertEqual(product_body["fields"][brand_property.select_key], TARGET_BRAND)
         self.assertEqual(result["brand"], TARGET_BRAND)
 
-    def test_article_sku_has_no_destination_on_the_simple_product_and_is_reported_unwritten(self):
+    def test_article_sku_writes_to_the_base_product_cml2_article_property(self):
+        """SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        follow-up, production reference element 992/IBLOCK 14): article/
+        SKU now has a verified BASE-PRODUCT destination -- CML2_ARTICLE/
+        property 241 -- and is written there for the default, non-variant
+        model. It must never land on the offer-only ARTICLE/283 property
+        (that remains correct ONLY for a genuine has_variant_offer=True
+        write), and must no longer be reported as unwritten."""
         result, transport = _execute(_tv_request())
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
         article_property = schema.offer_property(code="ARTICLE")
+        simple_article_property = schema.catalog_property(code="CML2_ARTICLE")
+        self.assertEqual(simple_article_property.property_id, 241)
         self.assertNotIn(article_property.select_key, product_body["fields"])
-        unwritten = {item["field"]: item["reason"] for item in result["not_written"]}
-        self.assertIn("sku", unwritten)
-        self.assertIn("only on the OFFERS iblock", unwritten["sku"])
+        self.assertEqual(product_body["fields"][simple_article_property.select_key], TARGET_SKU)
+        unwritten = {item["field"] for item in result["not_written"]}
+        self.assertNotIn("sku", unwritten)
+        self.assertEqual(result["sku"], TARGET_SKU)
 
     def test_ean_has_no_verified_destination_on_this_installation(self):
         result, transport = _execute(_tv_request())
@@ -242,7 +260,7 @@ class TvCharacteristicsMappingTests(unittest.TestCase):
     never be guessed onto one.
     """
 
-    def test_only_the_five_verified_characteristics_reach_real_properties(self):
+    def test_only_the_verified_characteristics_reach_real_properties(self):
         result, transport = _execute(_tv_request())
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
         fields = product_body["fields"]
@@ -266,17 +284,24 @@ class TvCharacteristicsMappingTests(unittest.TestCase):
         }
         self.assertEqual(reported_unmapped, unmapped_keys)
 
-        # The written property set is EXACTLY the five verified bindings
-        # -- no additional propertyN key exists for any unmapped
+        # The written property set is EXACTLY the verified characteristic
+        # bindings -- no additional propertyN key exists for any unmapped
         # characteristic (``reported_unmapped == unmapped_keys`` above
         # already proves each one was correctly refused a destination;
-        # this cross-checks it at the wire-field level too).
+        # this cross-checks it at the wire-field level too). Excludes the
+        # non-characteristic base-product property fields this same call
+        # also carries: BRAND (100), and -- since the SIMPLE_PRODUCT TV
+        # contract-alignment pass -- article/CML2_ARTICLE (241) and
+        # gallery/MORE_PHOTO (124), neither of which is a characteristic.
         verified_property_keys = {
             f"property{schema.characteristic_binding(key).property_id}" for key in VERIFIED_TV_CHARACTERISTIC_KEYS
         }
-        written_property_keys = {k for k in fields if k.startswith("property")} - {
-            schema.catalog_property(code="BRAND").select_key
+        non_characteristic_property_keys = {
+            schema.catalog_property(code="BRAND").select_key,
+            schema.catalog_property(code="CML2_ARTICLE").select_key,
+            schema.catalog_property(code="MORE_PHOTO").select_key,
         }
+        written_property_keys = {k for k in fields if k.startswith("property")} - non_characteristic_property_keys
         self.assertEqual(written_property_keys, verified_property_keys)
 
     def test_characteristics_are_written_regardless_of_product_model(self):
@@ -289,17 +314,67 @@ class TvCharacteristicsMappingTests(unittest.TestCase):
         self.assertEqual(set(variant_result["characteristics_written"]), VERIFIED_TV_CHARACTERISTIC_KEYS)
 
 
+class RepresentativeTvCharacteristicMappingTests(unittest.TestCase):
+    """3b. Representative TV characteristic mapping test (task's own
+    "TESTS" list, item 3): a bounded, representative subset of the
+    VERIFIED TV PROPERTY MAP -- refresh_rate_hz, vesa_mount, hdmi_version,
+    wireless_interfaces, smart_tv_platform, and the four
+    dimension/weight fields -- each cross-checked at the schema-binding
+    level AND on an actual end-to-end write, using the verified
+    production reference element 992's own property ids as evidence
+    (integrations.bitrix.schema.CATALOG_CHARACTERISTICS)."""
+
+    REPRESENTATIVE_MAPPING = {
+        "refresh_rate_hz": 147,
+        "vesa_mount": 184,
+        "hdmi_version": 187,
+        "wireless_interfaces": 253,
+        "smart_tv_platform": 178,
+        "dimensions_with_stand": 177,
+        "weight_with_stand": 203,
+        "dimensions_without_stand": 189,
+        "weight_without_stand": 159,
+    }
+
+    def test_schema_bindings_match_the_verified_production_property_ids(self):
+        for key, expected_property_id in self.REPRESENTATIVE_MAPPING.items():
+            binding = schema.characteristic_binding(key)
+            self.assertIsNotNone(binding, f"{key} should be verified")
+            self.assertEqual(binding.property_id, expected_property_id, key)
+
+    def test_representative_characteristics_reach_the_wire_on_an_actual_write(self):
+        values = {
+            "refresh_rate_hz": "144",
+            "vesa_mount": "300×300 мм",
+            "hdmi_version": "2.1",
+            "wireless_interfaces": "Bluetooth, Wi-Fi",
+            "smart_tv_platform": "Google TV",
+            "dimensions_with_stand": "1436 x 860 x 368 мм",
+            "weight_with_stand": "30.4 кг",
+            "dimensions_without_stand": "1436 x 824 x 50 мм",
+            "weight_without_stand": "28.4 кг",
+        }
+        result, transport = _execute(_tv_request(characteristics=values))
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        fields = product_body["fields"]
+
+        for key, property_id in self.REPRESENTATIVE_MAPPING.items():
+            self.assertEqual(fields[f"property{property_id}"], values[key], key)
+        self.assertEqual(set(result["characteristics_written"]), set(values))
+
+
 class ImageAndGalleryMappingTests(unittest.TestCase):
     """4. Gallery/main-image mapping test.
 
     PREVIEW_PICTURE/DETAIL_PICTURE (announcement image + detail image) are
     native IBLOCK 14 fields and always land on the base product,
-    regardless of product model. Gallery (MORE_PHOTO, property 280) is
-    verified ONLY on the offers IBLOCK (15) -- for the default, non-variant
-    TV model it correctly has NO destination and must be reported
-    unwritten, never invented onto the base product. The already-verified
-    Aspro gallery destination is reused unchanged when a caller genuinely
-    has a variant offer.
+    regardless of product model. SIMPLE_PRODUCT TV contract-alignment
+    pass (ticket T-F79758 follow-up, production reference element 992/
+    IBLOCK 14): gallery (MORE_PHOTO) now ALSO has a verified BASE-PRODUCT
+    destination -- property 124 -- used for the default, non-variant TV
+    model. The pre-existing offers-IBLOCK (15) MORE_PHOTO/280 destination
+    is reused unchanged when a caller genuinely has a variant offer; the
+    two are mutually exclusive per write.
     """
 
     def test_preview_and_detail_images_land_on_the_base_product(self):
@@ -317,19 +392,30 @@ class ImageAndGalleryMappingTests(unittest.TestCase):
         self.assertIn(schema.PREVIEW_PICTURE_FIELD, result["media_written"])
         self.assertIn(schema.DETAIL_PICTURE_FIELD, result["media_written"])
 
-    def test_simple_product_writes_no_gallery_and_reports_it_unmapped(self):
+    def test_simple_product_writes_gallery_to_the_base_product_more_photo_property(self):
+        """SIMPLE_PRODUCT gallery: gallery images -> PROPERTY_124, never
+        suppressed as offer-only, never PROPERTY_280."""
         result, transport = _execute(_tv_request())
-        self.assertEqual(result["gallery_written"], 0)
+        self.assertEqual(result["gallery_written"], len(GALLERY_PICTURES))
         methods_called = [m for m, _ in transport.calls]
         self.assertNotIn("catalog.product.offer.add", methods_called)
 
-        unwritten = {item["field"]: item["reason"] for item in result["not_written"]}
-        self.assertIn("gallery_pictures", unwritten)
-        self.assertIn("only on the OFFERS iblock", unwritten["gallery_pictures"])
+        unwritten = {item["field"] for item in result["not_written"]}
+        self.assertNotIn("gallery_pictures", unwritten)
+
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
-        serialized = json.dumps(product_body)
-        for pic in GALLERY_PICTURES:
-            self.assertNotIn(pic["base64"], serialized)
+        simple_more_photo = schema.catalog_property(code="MORE_PHOTO")
+        offer_more_photo = schema.offer_property(code="MORE_PHOTO")
+        self.assertEqual(simple_more_photo.property_id, 124)
+        self.assertEqual(offer_more_photo.property_id, 280)
+        self.assertNotIn(offer_more_photo.select_key, product_body["fields"])
+        self.assertEqual(
+            product_body["fields"][simple_more_photo.select_key],
+            [
+                {"value": {schema.PICTURE_FILE_DATA_KEY: [pic["filename"], pic["base64"]]}}
+                for pic in GALLERY_PICTURES
+            ],
+        )
 
     def test_explicit_variant_offer_still_writes_gallery_to_the_verified_more_photo_property(self):
         result, transport = _execute(_tv_request(has_variant_offer=True))

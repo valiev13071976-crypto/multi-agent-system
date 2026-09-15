@@ -374,15 +374,23 @@ class OneProductEndToEndGovernedWriteTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(schema.PICTURE_FILE_DATA_KEY, preview_picture)
         self.assertNotIn(MAIN_IMAGE_URL, str(preview_picture))
         self.assertIn(schema.DETAIL_PICTURE_FIELD, product_fields)
-        # TV product-write-contract defect closure: article/SKU (property
-        # 283) and gallery (property 280/MORE_PHOTO) are verified ONLY on
-        # the offers IBLOCK (15), which this SIMPLE-product write never
-        # creates -- no offer call is ever made, and neither field is ever
-        # guessed onto an unverified IBLOCK 14 property.
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up): article/SKU (property 241/CML2_ARTICLE) and gallery
+        # (property 124/MORE_PHOTO) now have verified BASE-PRODUCT
+        # destinations too, so this SIMPLE-product write sends both on
+        # the same base-product create call -- no offer call is ever made
+        # (no offer/SKU element is created merely to hold article or
+        # gallery), and neither field is guessed onto the offer-only
+        # ARTICLE(283)/MORE_PHOTO(280) destinations.
         self.assertEqual(transport.payload_for("catalog.product.offer.add"), {})
+        simple_article = schema.catalog_property(code="CML2_ARTICLE")
+        simple_more_photo = schema.catalog_property(code="MORE_PHOTO")
+        self.assertEqual(product_fields[simple_article.select_key], TARGET_SKU)
+        self.assertEqual(len(product_fields[simple_more_photo.select_key]), 2)
         not_written_fields_early = {item.get("field") for item in result.get("not_written") or []}
-        self.assertIn("sku", not_written_fields_early)
-        self.assertEqual(result.get("gallery_written"), 0)
+        self.assertNotIn("sku", not_written_fields_early)
+        self.assertNotIn("gallery_pictures", not_written_fields_early)
+        self.assertEqual(result.get("gallery_written"), 2)
         # retail price -> its own installation-specific price type
         price_fields = transport.payload_for("catalog.price.add")
         self.assertEqual(price_fields["price"], USER_RETAIL_PRICE_RUB)
