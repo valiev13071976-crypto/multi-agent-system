@@ -264,25 +264,29 @@ def format_write_plan_text(
         lines.append("  - нет подготовленных изображений")
     gallery_pictures = tuple(write_request.gallery_pictures or ())
     if gallery_pictures:
-        # TV product-write-contract defect closure: MORE_PHOTO (gallery,
-        # offer property 280) is verified ONLY on the offers IBLOCK (15),
-        # which this write only ever creates when the request genuinely
-        # has a variant dimension (``has_variant_offer=True``). The
-        # default -- and current -- SIMPLE product model has no offer, so
-        # gallery correctly has no destination and must never be reported
-        # as "will be written" just because images were prepared.
+        # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+        # follow-up): MORE_PHOTO now has a verified destination on the
+        # LIVE bridge regardless of product model -- base-product
+        # property 124 for the default SIMPLE_PRODUCT model, or offer
+        # property 280 when the request genuinely has a variant dimension
+        # (``has_variant_offer=True``). Only a non-LIVE bridge (FIXTURE/
+        # SANDBOX, which does not yet persist gallery at all) still
+        # reports it under ``will_not_write``.
         gallery_not_written = any(
             item.get("field") == "gallery_pictures" for item in write_preview.get("will_not_write") or []
         )
-        if write_request.has_variant_offer and not gallery_not_written:
+        if not gallery_not_written:
+            gallery_destination = (
+                "MORE_PHOTO/офер (property 280)" if write_request.has_variant_offer else "MORE_PHOTO/базовый товар (property 124)"
+            )
             lines.append(
-                f"  - галерея: {len(gallery_pictures)} изображени(й) (загружается в Bitrix через MORE_PHOTO/офер, не ссылка)"
+                f"  - галерея: {len(gallery_pictures)} изображени(й) (загружается в Bitrix через {gallery_destination}, не ссылка)"
             )
         else:
             lines.append(
                 f"  - галерея: {len(gallery_pictures)} изображени(й) подготовлено, но НЕ будет записано "
-                "(MORE_PHOTO/280 проверен только на офере/IBLOCK 15, а этот товар записывается как "
-                "обычный товар без торгового предложения — нет проверенного назначения на IBLOCK 14)"
+                "(проверенное назначение MORE_PHOTO есть, но текущий адаптер записи (fixture/sandbox) "
+                "пока не сохраняет галерею — запись выполняется только LIVE-адаптером)"
             )
     else:
         gallery_count = int((preview.get("media") or {}).get("gallery_image_count") or 0)

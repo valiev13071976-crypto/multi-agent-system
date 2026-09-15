@@ -69,11 +69,19 @@ caller leaves it at its default, so every current single-product write
 becomes a plain IBLOCK 14 product, matching the verified reference. See
 ``integrations.bitrix.live_adapter.LiveBitrixAdapter._write_product_create_live``
 for the write-side gate and ``docs/bitrix-aspro-premier-integration.md``
-for the full evidence and unmapped-field consequences (ARTICLE/283 and
-MORE_PHOTO/280 are verified ONLY on the offers IBLOCK on this
-installation, so a simple product currently has no verified destination
-for article/SKU or gallery -- reported as unmapped, never guessed onto an
-IBLOCK 14 property).
+for the full evidence.
+
+SIMPLE_PRODUCT TV contract-alignment pass (Cursor Support ticket T-F79758
+follow-up; production reference element 992, IBLOCK 14, verified directly
+against the real admin form ``form_element_14``): article/SKU and gallery
+now ALSO have verified BASE-PRODUCT (IBLOCK 14) destinations --
+CML2_ARTICLE/property 241 and MORE_PHOTO/property 124
+(``integrations.bitrix.schema``'s ``CML2_ARTICLE_PROPERTY_ID``/
+``SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_ID``) -- distinct from the offer-only
+ARTICLE/283 and MORE_PHOTO/280 above, which remain the correct destination
+ONLY when a caller genuinely supplies ``has_variant_offer=True``. Both
+models are now fully mapped on the LIVE bridge; nothing here is guessed
+onto an unverified property for either.
 
 Product enrichment pipeline follow-up (``product_enrichment`` package):
 ``SingleProductWriteRequest`` also carries ``preview_picture``/
@@ -154,26 +162,14 @@ _NO_EAN_DESTINATION = (
     "no_verified_bitrix_property_for_ean_on_this_installation "
     "(neither IBLOCK 14 nor 15's known real properties include one)"
 )
-# TV product-write-contract defect closure: ARTICLE (283) and MORE_PHOTO
-# (280) are verified ONLY on the OFFERS iblock (15) on this installation
-# (integrations.bitrix.schema.OFFER_PROPERTIES) -- there is still no
-# verified IBLOCK 14 (base product) destination for either. Now that a
-# non-variant write defaults to the SIMPLE product model (no offer ever
-# created -- see PRODUCT_MODEL_SIMPLE above), these two fields correctly
-# fall to sourced-but-unwritten rather than ever being guessed onto an
-# unverified IBLOCK 14 property. A further LIVE READ-ONLY discovery pass
-# would be required to confirm a genuine base-product destination for
-# either; until then this is reported honestly as unmapped.
-_NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT = (
-    "no_verified_bitrix_property_for_article/sku_on_a_simple_iblock_14_"
-    "product (ARTICLE/property283 is verified only on the OFFERS iblock "
-    "(15), which this write is not creating -- has_variant_offer=False)"
-)
-_NO_GALLERY_DESTINATION_SIMPLE_PRODUCT = (
-    "no_verified_bitrix_property_for_gallery_on_a_simple_iblock_14_product "
-    "(MORE_PHOTO/property280 is verified only on the OFFERS iblock (15), "
-    "which this write is not creating -- has_variant_offer=False)"
-)
+# SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758 follow-up):
+# article/SKU and gallery now have verified BASE-PRODUCT (IBLOCK 14)
+# destinations too -- CML2_ARTICLE/241, MORE_PHOTO/124 -- so on the LIVE
+# bridge both are always mapped regardless of product model (SIMPLE_PRODUCT
+# uses 241/124 on the base product; SKU_WITH_OFFER continues using the
+# pre-existing offer-only ARTICLE/283, MORE_PHOTO/280). Only the FIXTURE/
+# SANDBOX adapter's gallery support remains outstanding -- see
+# ``_GALLERY_ENV_UNSUPPORTED`` below.
 # Purchase price DOES have a verified native Bitrix destination
 # (purchasingPrice/purchasingCurrency -- see integrations.bitrix.schema's
 # module docstring and LiveBitrixAdapter._write_product_create_live), but
@@ -204,16 +200,19 @@ _CATEGORY_ENV_UNSUPPORTED = (
     "read,_which_only_the_LIVE_bridge_performs_(fixture/sandbox_only;_live_"
     "resolves_and_writes_it)"
 )
-# Gallery images DO have a verified native Bitrix destination now (offer
-# property 280 / MORE_PHOTO, IBLOCK 15 -- see integrations.bitrix.schema's
-# OFFER_PROPERTIES and LiveBitrixAdapter._gallery_offer_fields), but only
-# the LIVE adapter implements writing it so far -- the FIXTURE
-# adapter/store this reason is used for does not yet persist it, mirroring
-# _PURCHASE_PRICE_ENV_UNSUPPORTED above.
+# Gallery images DO have a verified native Bitrix destination now -- base
+# product MORE_PHOTO/124 (SIMPLE_PRODUCT, the default) or offer
+# MORE_PHOTO/280 (SKU_WITH_OFFER, ``has_variant_offer=True``); see
+# integrations.bitrix.schema's CATALOG_PRODUCT_PROPERTIES/OFFER_PROPERTIES
+# and LiveBitrixAdapter._gallery_simple_fields/_gallery_offer_fields --
+# but only the LIVE adapter implements writing either so far -- the
+# FIXTURE adapter/store this reason is used for does not yet persist it,
+# mirroring _PURCHASE_PRICE_ENV_UNSUPPORTED above.
 _GALLERY_ENV_UNSUPPORTED = (
     "gallery_has_a_verified_native_bitrix_destination_"
-    "(offer_property_280/MORE_PHOTO)_but_this_environment's_adapter_does_"
-    "not_yet_persist_it_(fixture/sandbox_only;_live_writes_it)"
+    "(base_product_property_124_or_offer_property_280/MORE_PHOTO)_but_"
+    "this_environment's_adapter_does_not_yet_persist_it_"
+    "(fixture/sandbox_only;_live_writes_it)"
 )
 # Characteristics with no verified Bitrix property destination on this
 # installation (integrations.bitrix.schema.CATALOG_CHARACTERISTICS) --
@@ -852,19 +851,20 @@ def prepare_single_product_write(
     product_model_reason = (
         _PRODUCT_MODEL_REASON_SKU_OFFER if request.has_variant_offer else _PRODUCT_MODEL_REASON_SIMPLE
     )
-    # Article/SKU has a verified destination on the FIXTURE store's own
-    # (offer-free) product object regardless of this flag (unaffected by
-    # this defect closure); on the LIVE bridge it is verified ONLY on the
-    # offers IBLOCK (15) -- see _NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT --
-    # so it only has a real destination there when an offer is actually
-    # being created.
-    article_has_destination = bridge.environment != ENV_LIVE or request.has_variant_offer
-    # Gallery (MORE_PHOTO/280) is verified ONLY on the offers IBLOCK too --
-    # same LIVE-only, offer-only gate as article/SKU above (module
-    # docstring item F2 in integrations.bitrix.schema).
-    gallery_has_destination = (
-        bridge.environment == ENV_LIVE and request.has_variant_offer and bool(media_fields.get("gallery_pictures"))
-    )
+    # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
+    # follow-up): article/SKU now has a verified Bitrix destination on
+    # every environment and every product model -- the FIXTURE store's
+    # own (offer-free) product object (unaffected by this change), the
+    # LIVE bridge's base-product CML2_ARTICLE/241 (SIMPLE_PRODUCT, the
+    # default), or the LIVE bridge's offer ARTICLE/283 (SKU_WITH_OFFER,
+    # ``has_variant_offer=True``).
+    article_has_destination = True
+    # Gallery (MORE_PHOTO) is likewise verified on the LIVE bridge
+    # regardless of product model now -- base-product property 124
+    # (SIMPLE_PRODUCT) or offer property 280 (SKU_WITH_OFFER). Only the
+    # FIXTURE/SANDBOX adapter still does not persist it (see
+    # _GALLERY_ENV_UNSUPPORTED below).
+    gallery_has_destination = bridge.environment == ENV_LIVE and bool(media_fields.get("gallery_pictures"))
 
     category_display = request.subcategory or request.category_source
     not_written = [
@@ -877,18 +877,7 @@ def prepare_single_product_write(
         {"field": "category", "value": category_display, "reason": _CATEGORY_ENV_UNSUPPORTED}
         if category_display and not category_has_destination
         else None,
-        {"field": "sku", "value": request.sku, "reason": _NO_ARTICLE_DESTINATION_SIMPLE_PRODUCT}
-        if request.sku and not article_has_destination
-        else None,
-        {
-            "field": "gallery_pictures",
-            "value": f"{len(request.gallery_pictures or ())} image(s)",
-            "reason": (
-                _NO_GALLERY_DESTINATION_SIMPLE_PRODUCT
-                if (bridge.environment == ENV_LIVE and not request.has_variant_offer)
-                else _GALLERY_ENV_UNSUPPORTED
-            ),
-        }
+        {"field": "gallery_pictures", "value": f"{len(request.gallery_pictures or ())} image(s)", "reason": _GALLERY_ENV_UNSUPPORTED}
         if request.gallery_pictures and not gallery_has_destination
         else None,
     ]
@@ -900,7 +889,15 @@ def prepare_single_product_write(
 
     will_write = ["name", "retail_selling_price"]
     if article_has_destination:
-        will_write.insert(1, "article/sku")
+        if bridge.environment == ENV_LIVE:
+            article_destination_note = (
+                "offer property 283 / ARTICLE, verified -- has_variant_offer=True"
+                if request.has_variant_offer
+                else "base-product property 241 / CML2_ARTICLE, verified -- SIMPLE_PRODUCT"
+            )
+            will_write.insert(1, f"article/sku ({article_destination_note})")
+        else:
+            will_write.insert(1, "article/sku")
     if request.brand:
         will_write.append("brand (property 100 / BRAND, verified PANDA_MANAGED)")
     if purchase_price_has_destination:
@@ -922,8 +919,13 @@ def prepare_single_product_write(
         )
     gallery_pictures = media_fields.get("gallery_pictures") or []
     if gallery_has_destination:
+        gallery_destination_note = (
+            "offer property 280 / MORE_PHOTO, verified -- has_variant_offer=True"
+            if request.has_variant_offer
+            else "base-product property 124 / MORE_PHOTO, verified -- SIMPLE_PRODUCT"
+        )
         will_write.append(
-            f"gallery ({len(gallery_pictures)} image(s), offer property 280 / MORE_PHOTO, verified -- LIVE only, requires has_variant_offer=True, uploaded bytes -- never a hotlink)"
+            f"gallery ({len(gallery_pictures)} image(s), {gallery_destination_note}, LIVE only, uploaded bytes -- never a hotlink)"
         )
     written_characteristics = [k for k in request.characteristics if k not in unmapped_characteristics]
     if written_characteristics and characteristics_have_destination:
