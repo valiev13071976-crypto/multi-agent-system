@@ -719,6 +719,14 @@ class WorkflowPandaConversationGateway:
 
         args = dict(action.arguments or {})
         retail_price = str(args.get("retail_price") or "")
+        product_fields = dict(args.get("product_fields") or {})
+        # Existing canonical product identity for THIS confirmation turn --
+        # ``resolve_bitrix_write_confirmation`` already resolves ``fields``
+        # from the active task's OWN ``bitrix_product_fields`` (never from
+        # the confirmation text) and refuses to reach here at all unless
+        # ``sku`` is present, so this is always the strongest verified
+        # identity available at this boundary.
+        canonical_sku = str(product_fields.get("sku") or "").strip()
         # Product enrichment pipeline follow-up: if this SAME task already
         # went through "Подготовь полную карточку..." (CALL_PRODUCT_ENRICHMENT,
         # see ``_invoke_product_enrichment``), reuse that enriched write
@@ -730,6 +738,43 @@ class WorkflowPandaConversationGateway:
         # enrichment preview).
         enriched = dict(getattr(task, "parameters", {}).get("bitrix_enrichment_write_request") or {})
         if enriched:
+            enriched_sku = str(enriched.get("sku") or "").strip()
+            # Cross-product write-plan safety (production defect closure):
+            # a normal product switch already clears ``bitrix_enrichment_
+            # write_request`` the moment a NEW row is selected (see the
+            # ``ROW_FOUND`` handling in ``_invoke_tool`` above), so in the
+            # ordinary flow ``enriched_sku`` and ``canonical_sku`` always
+            # agree. If they ever disagree here regardless -- e.g. the
+            # active task's product context was replaced/invalidated by
+            # some OTHER path without that same cleanup running first --
+            # the enriched write request no longer describes the SAME
+            # product/write-plan actually bound to this task. Never guess
+            # which one the user meant to confirm: fail closed exactly like
+            # ``_bitrix_missing_context_decision`` (the existing safe
+            # interaction path) and require a fresh plan/confirmation,
+            # self-healing the stale enrichment state so the very next
+            # "show the plan"/confirmation naturally falls back to the
+            # task's own canonical ``bitrix_product_fields``.
+            if canonical_sku and enriched_sku and enriched_sku != canonical_sku:
+                if task is not None:
+                    task.parameters.pop("bitrix_enrichment_write_request", None)
+                    task.parameters.pop("bitrix_enrichment_characteristic_status", None)
+                    task.parameters.pop("bitrix_enrichment_preview", None)
+                    self._action_store.put(task)
+                return ConversationResult(
+                    text=(
+                        "Подготовленный товар изменился с момента показанного плана — "
+                        "это подтверждение относится к устаревшим/несовпадающим данным. "
+                        "Покажите план записи ещё раз для текущего товара и подтвердите заново."
+                    ),
+                    task_id=getattr(task, "task_id", None),
+                    metadata={
+                        "action_decision": CALL_CONTROLLED_BITRIX_WRITE,
+                        "write_confirmation_event": "WRITE_CONFIRMATION_REJECTED_INSUFFICIENT_CONTEXT",
+                        "artifacts": [],
+                    },
+                )
+
             import dataclasses
 
             from business_assistant.product_enrichment_bridge import deserialize_write_request
@@ -739,7 +784,7 @@ class WorkflowPandaConversationGateway:
                 write_request = dataclasses.replace(write_request, retail_price=retail_price)
         else:
             write_request = build_write_request_from_fields(
-                dict(args.get("product_fields") or {}),
+                product_fields,
                 tenant_id=str(request.tenant_id or ""),
                 retail_price=retail_price,
             )
@@ -761,6 +806,7 @@ class WorkflowPandaConversationGateway:
                 "action_decision": CALL_CONTROLLED_BITRIX_WRITE,
                 "artifacts": [],
                 "bitrix_write_result": result,
+                "write_confirmation_event": "WRITE_CONFIRMATION_ROUTED_TO_GOVERNED_WRITE",
             },
         )
 
