@@ -263,5 +263,77 @@ class HdmiCountAliasRegressionTests(unittest.TestCase):
         self.assertIsNone(match_canonical_key("meta"))
 
 
+class TvCharacteristicNormalizationQualityDefectClosureTests(unittest.TestCase):
+    """Production defect closure (live preview, LG 100MRGB96B6.ARUG --
+    follow-up ticket after PR #85 was deployed): ``color`` must reject
+    marketing/display-technology text, and ``hdmi_count``/``usb_count``
+    must reject non-numeric text, rather than surviving normalization as
+    garbage values. PR #85's own Bitrix mapping (article/gallery/
+    refresh_rate_hz/vesa_mount property IDs) is untouched by this
+    module -- see ``tests/test_bitrix_tv_product_write_contract_closure.py``
+    for that regression coverage."""
+
+    def test_color_rejects_the_exact_marketing_phrase_seen_in_production(self):
+        value, unit = normalize_characteristic_value(
+            "color", "Основные цвета RGB Ультра (Тройная 100% сертификация цвета)"
+        )
+        self.assertEqual(value, "")
+        self.assertEqual(unit, "")
+
+    def test_color_rejects_other_marketing_style_text_with_digits_or_percent_or_parens(self):
+        for marketing_text in (
+            "Технология Quantum Dot (Ultra 100%)",
+            "Расширенная цветовая гамма 95% DCI-P3",
+            "Тройная сертификация (2026)",
+        ):
+            with self.subTest(marketing_text=marketing_text):
+                value, _unit = normalize_characteristic_value("color", marketing_text)
+                self.assertEqual(value, "")
+
+    def test_valid_physical_color_survives_normalization(self):
+        for physical_color in ("черный", "белый", "серебристый", "Space Gray", "темно-серый металлик"):
+            with self.subTest(physical_color=physical_color):
+                value, _unit = normalize_characteristic_value("color", physical_color)
+                self.assertEqual(value, physical_color)
+
+    def test_hdmi_count_rejects_nonnumeric_production_value(self):
+        value, unit = normalize_characteristic_value("hdmi_count", "вход")
+        self.assertEqual(value, "")
+        self.assertEqual(unit, "")
+
+    def test_hdmi_count_rejects_other_nonnumeric_text(self):
+        for garbage in ("HDMI", "есть", "да", "нет"):
+            with self.subTest(garbage=garbage):
+                value, _unit = normalize_characteristic_value("hdmi_count", garbage)
+                self.assertEqual(value, "")
+
+    def test_usb_count_rejects_nonnumeric_production_value(self):
+        value, unit = normalize_characteristic_value("usb_count", "камеры")
+        self.assertEqual(value, "")
+        self.assertEqual(unit, "")
+
+    def test_valid_numeric_port_counts_survive_normalization(self):
+        self.assertEqual(normalize_characteristic_value("hdmi_count", "4")[0], "4")
+        self.assertEqual(normalize_characteristic_value("hdmi_count", "3 x HDMI 2.1")[0], "3")
+        self.assertEqual(normalize_characteristic_value("usb_count", "2")[0], "2")
+        self.assertEqual(normalize_characteristic_value("usb_count", "2 (USB-A + USB-C)")[0], "2")
+
+    def test_implausibly_large_count_is_rejected_not_guessed(self):
+        # A mis-extracted 4-digit model-year-like number must never be
+        # accepted as a port count.
+        value, _unit = normalize_characteristic_value("hdmi_count", "2026")
+        self.assertEqual(value, "")
+
+    def test_valid_characteristics_unrelated_to_the_defects_remain_intact(self):
+        # Production preview also had refresh_rate_hz/screen_diagonal_cm/
+        # vesa_mount values that must NOT be affected by this closure.
+        self.assertEqual(
+            normalize_characteristic_value("refresh_rate_hz", "120Гц (VRR 165Гц)"),
+            ("120Гц (VRR 165Гц)", "Hz"),
+        )
+        self.assertEqual(normalize_characteristic_value("screen_diagonal_cm", "254.0"), ("254.0", "cm"))
+        self.assertEqual(normalize_characteristic_value("vesa_mount", "600 x 400"), ("600 x 400", "mm"))
+
+
 if __name__ == "__main__":
     unittest.main()

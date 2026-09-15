@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from typing import Mapping
 
+from product_enrichment.characteristics import format_value_with_unit
 from product_enrichment.models import (
     ContentDraft,
     NormalizedCharacteristic,
@@ -20,20 +21,25 @@ from product_enrichment.models import (
 )
 
 # canonical_key -> Russian phrase template. ``{value}`` is substituted with
-# the characteristic's own normalized value (+ unit where present) --
-# never a free-form LLM-authored number.
+# the characteristic's own normalized value, unit-aware-formatted via
+# ``format_value_with_unit`` (TV characteristic normalization quality
+# defect closure, production preview follow-up to PR #85: a value that
+# ALREADY states its declared unit inline -- e.g.
+# ``refresh_rate_hz = "120Гц (VRR 165Гц)"`` -- must never get that unit
+# appended a second time, producing "...120Гц (VRR 165Гц) Гц") -- never a
+# free-form LLM-authored number.
 _PHRASE_TEMPLATES: Mapping[str, str] = {
-    "screen_diagonal_cm": "диагональ экрана {value} см",
+    "screen_diagonal_cm": "диагональ экрана {value}",
     "screen_resolution": "разрешение экрана {value}",
     "panel_technology": "матрица {value}",
     "backlight_technology": "подсветка {value}",
-    "refresh_rate_hz": "частота обновления {value} Гц",
+    "refresh_rate_hz": "частота обновления {value}",
     "hdr_formats": "поддержка HDR: {value}",
     "smart_tv_support": "Smart TV: {value}",
     "operating_system": "операционная система {value}",
     "color": "цвет {value}",
-    "weight_with_stand_kg": "вес с подставкой {value} кг",
-    "weight_without_stand_kg": "вес без подставки {value} кг",
+    "weight_with_stand_kg": "вес с подставкой {value}",
+    "weight_without_stand_kg": "вес без подставки {value}",
 }
 
 _USABLE_CONFIDENCE = {"verified", "probable"}
@@ -47,7 +53,8 @@ def _phrase_for(characteristic: NormalizedCharacteristic) -> str | None:
     template = _PHRASE_TEMPLATES.get(characteristic.key)
     if template is None or not characteristic.value:
         return None
-    return template.format(value=characteristic.value)
+    value = format_value_with_unit(characteristic.key, characteristic.value)
+    return template.format(value=value)
 
 
 def generate_content(identity: ResolvedIdentity, characteristics: Mapping[str, NormalizedCharacteristic]) -> ContentDraft:

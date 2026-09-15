@@ -81,11 +81,119 @@ _UNIT_SYNONYMS: Mapping[str, tuple[str, ...]] = {
     "cm": ("см", "cm"),
     "mm": ("мм", "mm"),
 }
+# Cyrillic display suffix for each internal unit code -- used ONLY by
+# ``format_value_with_unit`` below (content rendering); the internal code
+# itself (e.g. "Hz") is never shown to a user.
+_UNIT_DISPLAY_SUFFIX: Mapping[str, str] = {
+    "Hz": "Гц",
+    "W": "Вт",
+    "kg": "кг",
+    "cm": "см",
+    "mm": "мм",
+}
+
+
+def format_value_with_unit(key: str, value: str) -> str:
+    """Appends ``key``'s declared unit display suffix to ``value`` for
+    preview/detail content rendering (TV characteristic normalization
+    quality defect closure, production preview follow-up to PR #85) --
+    UNLESS ``value`` already states that unit inline (its own synonym
+    tokens, e.g. "Гц"/"Hz" for the ``Hz`` unit), which a normalized value
+    legitimately can (e.g. ``refresh_rate_hz = "120Гц (VRR 165Гц)"``
+    already carries its own unit). Never produces a duplicated unit
+    suffix such as "120 Гц Гц", "30 кг кг" or "254 см см"."""
+    text = str(value or "")
+    unit = CANONICAL_CHARACTERISTIC_ALIASES.get(key, ("", ()))[0]
+    suffix = _UNIT_DISPLAY_SUFFIX.get(unit, "")
+    if not suffix:
+        return text
+    already_present_tokens = {suffix.casefold(), unit.casefold(), *_UNIT_SYNONYMS.get(unit, ())}
+    lowered = text.casefold()
+    if any(token and token in lowered for token in already_present_tokens):
+        return text
+    return f"{text} {suffix}"
+
+
 _NUMBER_WITH_UNIT_RE = re.compile(r"^(\d+(?:[.,]\d+)?)\s*([^\d\s]{1,3})?\.?$", re.UNICODE)
 
 _INCH_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:\"|inch|inches|дюйм)", re.I)
 _CM_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*(?:cm|см)", re.I)
 _NUMBER_RE = re.compile(r"\d+(?:[.,]\d+)?")
+
+# TV characteristic normalization quality defect closure (production
+# preview, LG 100MRGB96B6.ARUG -- ticket follow-up to PR #85): a "count"
+# semantic type (currently ``hdmi_count``/``usb_count`` -- generalized by
+# key SUFFIX so any future ``*_count`` canonical key gets the same
+# guarantee for free) must resolve to an actual small integer count, never
+# survive as unrelated extracted text ("вход"/"камеры"/"есть"/"да") that
+# happened to sit next to a recognized "HDMI"/"USB" label on a real page.
+# A bare digit run anywhere in the text is accepted (covers "4", "3 x
+# HDMI 2.1", "2 (USB-A + USB-C)"); anything with no digit at all, or an
+# implausibly large "count" (a mis-extracted model number/year), is
+# rejected -- never guessed.
+_COUNT_KEY_SUFFIX = "_count"
+_COUNT_NUMBER_RE = re.compile(r"\d+")
+_MAX_PLAUSIBLE_PORT_COUNT = 32
+
+
+def _extract_port_count(text: str) -> str:
+    match = _COUNT_NUMBER_RE.search(text)
+    if not match:
+        return ""
+    digits = match.group(0)
+    # A run longer than two digits is never a plausible port count (it is
+    # far more likely a mis-extracted model number/year) -- reject rather
+    # than truncate it into a fabricated small count.
+    if len(digits) > 2:
+        return ""
+    count = int(digits)
+    if count < 1 or count > _MAX_PLAUSIBLE_PORT_COUNT:
+        return ""
+    return str(count)
+
+
+# Physical product colour acceptance (same defect closure): real catalog
+# pages sometimes mislabel a display-technology/marketing sentence (e.g.
+# "Основные цвета RGB Ультра (Тройная 100% сертификация цвета)") as the
+# value for a "Цвет"/"Color" spec row. A genuine physical colour is a
+# short phrase built from a small, closed vocabulary of colour words
+# (optionally with a finish qualifier like "металлик"/"matte") -- never a
+# multi-clause marketing sentence with digits, percentages or parenthetical
+# qualifiers. This is a generic vocabulary check (not product-specific):
+# any value outside this shape is rejected rather than guessed.
+_KNOWN_COLOR_WORDS = frozenset(
+    {
+        # Russian base hues + common finishes
+        "черный", "чёрный", "белый", "серый", "серебристый", "серебряный",
+        "золотой", "золотистый", "синий", "голубой", "красный", "бордовый",
+        "зеленый", "зелёный", "желтый", "жёлтый", "розовый", "фиолетовый",
+        "сиреневый", "оранжевый", "коричневый", "бежевый", "бронзовый",
+        "графитовый", "титановый", "медный", "стальной", "антрацит",
+        "хром", "хромированный", "перламутровый", "металлик", "матовый",
+        "глянцевый", "космический",
+        # English base hues + common finishes
+        "black", "white", "grey", "gray", "silver", "gold", "golden",
+        "blue", "navy", "red", "maroon", "green", "yellow", "pink",
+        "purple", "violet", "orange", "brown", "beige", "bronze",
+        "graphite", "titanium", "copper", "steel", "charcoal", "chrome",
+        "pearl", "space", "matte", "glossy", "metallic",
+    }
+)
+_COLOR_REJECT_CHARS_RE = re.compile(r"[\d%()]")
+_COLOR_WORD_SPLIT_RE = re.compile(r"[^\w]+", re.UNICODE)
+_MAX_COLOR_VALUE_CHARS = 40
+_MAX_COLOR_WORDS = 4
+
+
+def _is_plausible_physical_color(text: str) -> bool:
+    if not text or len(text) > _MAX_COLOR_VALUE_CHARS:
+        return False
+    if _COLOR_REJECT_CHARS_RE.search(text):
+        return False
+    words = [w for w in _COLOR_WORD_SPLIT_RE.split(text.casefold()) if w]
+    if not words or len(words) > _MAX_COLOR_WORDS:
+        return False
+    return any(word in _KNOWN_COLOR_WORDS for word in words)
 
 # ``scrape.fetch``'s ``body_text`` (``tools.platform.web_fetch_adapter.
 # WebFetchAdapter``) is raw, undecoded page HTML -- it never extracts
@@ -197,6 +305,10 @@ def normalize_characteristic_value(key: str, raw_value: str) -> tuple[str, str]:
             # table's declared unit (cm) -- never re-interpreted as inches.
             return number_match.group(0).replace(",", "."), "cm"
         return text, unit
+    if key == "color":
+        return (text, unit) if _is_plausible_physical_color(text) else ("", unit)
+    if key.endswith(_COUNT_KEY_SUFFIX):
+        return _extract_port_count(text), unit
     synonyms = _UNIT_SYNONYMS.get(unit)
     if synonyms:
         match = _NUMBER_WITH_UNIT_RE.match(text)
