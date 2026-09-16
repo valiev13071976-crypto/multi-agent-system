@@ -54,6 +54,22 @@ class DataIntelToolAdapter:
         tenant = self._tenant(request)
         try:
             if op == "ingest":
+                # Business-task-ownership/workset-continuation defect closure
+                # (PR #90 correction): an ``attachment_refs`` reference (the
+                # SAME small ``{"kind": "spreadsheet", "artifact_id": ...}``
+                # shape ``_spreadsheet_refs``/``_ingest_attachment`` already
+                # resolve for ``assist``/``compare_workbooks`` above) is tried
+                # FIRST, before ``content_b64`` -- an artifact_id is a few
+                # bytes regardless of file size, so a caller with an
+                # ALREADY-REGISTERED (e.g. freshly generated) artifact never
+                # has to inline the whole file as a JSON string argument
+                # (bounded by ``tools.models.MAX_TOOL_ARGUMENT_STRING_LEN`` --
+                # 4096 chars, far smaller than any real spreadsheet's
+                # base64). ``content_b64`` remains fully supported, unchanged,
+                # for genuinely small payloads/existing callers.
+                sheets = self._spreadsheet_refs(args)
+                if sheets:
+                    return self._ingest_attachment(sheets[0], tenant=tenant)
                 raw = args.get("content_b64")
                 if not raw:
                     raise ToolArgumentInvalidError()
