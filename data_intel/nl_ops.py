@@ -111,10 +111,40 @@ class UnsupportedOperationError(DataIntelError):
         self.message_safe = message_safe
 
 
+# CANONICAL TABLE EXECUTION -- minimal STRUCTURED IR extension (compound
+# scoped operations): a rule's ``scope`` says WHICH rows it applies to,
+# independent of HOW it interprets the request. ``SCOPE_ALL`` (the default,
+# used by every existing ``compile_request`` call site below -- fully
+# backward compatible) means "every row currently in the table", exactly
+# today's behavior. ``SCOPE_ROW_RANGE`` is an explicit, generic 0-based
+# [start, end) row-index window -- "first 3"/"top 5"/"rows 10-20" all
+# reduce to the SAME two integers, never a phrase-specific stem.
+# ``SCOPE_REMAINDER`` means "every row not already covered by an earlier
+# rule in THIS SAME plan" -- resolved by the executor (``data_intel.
+# transform.execute_plan``), never guessed by whichever compiler produced
+# the plan. This lets one ``OperationPlan`` express "scope A -> transform
+# A, remainder -> transform B" (see ``data_intel.nl_plan_llm`` for the
+# ONE-shot model-call compiler that actually produces multi-rule plans;
+# ``compile_request`` itself never emits more than one rule and always
+# uses ``SCOPE_ALL``).
+SCOPE_ALL = "all"
+SCOPE_ROW_RANGE = "row_range"
+SCOPE_REMAINDER = "remainder"
+_SCOPE_KINDS = (SCOPE_ALL, SCOPE_ROW_RANGE, SCOPE_REMAINDER)
+
+
+@dataclass(frozen=True)
+class OperationScope:
+    kind: str = SCOPE_ALL
+    start: int | None = None
+    end: int | None = None
+
+
 @dataclass(frozen=True)
 class PlannedOperation:
     op: str
     params: Mapping[str, Any] = field(default_factory=dict)
+    scope: OperationScope = field(default_factory=OperationScope)
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "params", dict(self.params or {}))

@@ -256,69 +256,39 @@ def extract_assistant_text(result: dict[str, Any]) -> str:
     return select_canonical_final_answer(result if isinstance(result, dict) else {})
 
 
-def _reverse_percent_display_value(value: Any, percent: Any) -> str:
-    """Purely a DISPLAY reconstruction of a ``percent_round`` operation's
-    "before" value, by inverting the SAME formula ``data_intel.transform.
-    _apply_percent_round`` already used to produce ``value`` (the "after"
-    value) -- never a new/second business rule, and never what is actually
-    persisted/executed (that stays exactly ``data_intel``'s own output).
-    Returns ``""`` on any non-numeric/degenerate input rather than
-    guessing."""
-    from decimal import Decimal, InvalidOperation
-
-    try:
-        after = Decimal(str(value))
-        pct = Decimal(str(percent))
-        denominator = Decimal("1") + pct / Decimal("100")
-        if denominator == 0:
-            return ""
-        return str(after / denominator)
-    except (InvalidOperation, ZeroDivisionError, TypeError, ValueError):
-        return ""
-
-
 def _table_operation_preview(data: dict[str, Any]) -> dict[str, Any]:
     """Concrete before/after preview for a canonical-table-execution
-    result: for each affected row, exposes the identifying columns
-    (whatever this workbook's own schema carries), the affected column,
-    the applied operation/parameter, and its source/resulting value.
+    result: for each affected row, exposes the affected column, the
+    applied operation/parameters/scope, and its source/resulting value.
 
-    Built ENTIRELY from fields the EXISTING ``data.excel_assistant``/
-    ``assist`` tool's ``status == "OK"`` response already returns --
-    ``operations_applied``/``preview_rows`` (see ``data_intel.service.
-    DataIntelligenceService.execute_nl_request``) -- never a second
-    dataset read/tool call. Only ``percent_round`` (the operation the
-    reported production defect is about) reconstructs a "source value"
-    today; any other applied operation still surfaces its resulting rows/
-    parameters, just without a synthesized "before" value."""
-    operations = list(data.get("operations_applied") or [])
-    preview_rows = [r for r in (data.get("preview_rows") or []) if isinstance(r, dict)]
-    percent_op = next(
-        (op for op in operations if isinstance(op, dict) and op.get("op") == "percent_round"),
-        None,
-    )
+    Built ENTIRELY from ``row_changes`` -- the EXECUTOR's OWN record
+    (``data_intel.transform.TransformResult.row_changes``, produced while
+    ``execute_plan`` actually mutates each row, never reconstructed
+    afterwards by inverting a specific operation's formula) of exactly
+    which row a given rule's ``scope`` touched. This is what makes a
+    COMPOUND request (scope A -> operation A, remainder -> operation B)
+    preview correctly: each row's own "before"/"after" came from
+    whichever rule actually touched it, not a single global percent."""
     changed_rows: list[dict[str, Any]] = []
-    if percent_op is not None:
-        params = dict(percent_op.get("params") or {})
-        column = str(params.get("column") or "")
-        percent = params.get("percent")
-        if column and percent is not None:
-            for row in preview_rows:
-                if column not in row:
-                    continue
-                after_value = row.get(column)
-                changed_rows.append(
-                    {
-                        "row": dict(row),
-                        "column": column,
-                        "operation": "percent_round",
-                        "percent": str(percent),
-                        "source_value": _reverse_percent_display_value(after_value, percent),
-                        "resulting_value": str(after_value) if after_value is not None else "",
-                    }
-                )
+    for change in list(data.get("row_changes") or []):
+        if not isinstance(change, dict):
+            continue
+        params = dict(change.get("params") or {})
+        before_value = change.get("before")
+        after_value = change.get("after")
+        changed_rows.append(
+            {
+                "row": dict(change.get("row_after") or {}),
+                "column": change.get("column"),
+                "operation": change.get("operation"),
+                "percent": params.get("percent"),
+                "scope": dict(change.get("scope") or {}),
+                "source_value": "" if before_value is None else str(before_value),
+                "resulting_value": "" if after_value is None else str(after_value),
+            }
+        )
     return {
-        "operations_applied": operations,
+        "operations_applied": list(data.get("operations_applied") or []),
         "row_count_before": data.get("row_count_before"),
         "row_count_after": data.get("row_count_after"),
         "changed_rows": changed_rows,
@@ -1002,10 +972,11 @@ class WorkflowPandaConversationGateway:
     async def _maybe_execute_canonical_table_operation(
         self, request: ConversationRequest, text: str
     ) -> ConversationResult | None:
-        """CANONICAL TABLE EXECUTION (NL -> structured operation -> existing
-        deterministic executor): the semantic boundary the managed-agent
-        integration boundary above cannot cross on its own -- its 3
-        read-only tools (``analyze_spreadsheet``/``select_product``/
+        """CANONICAL TABLE EXECUTION -- ONE model semantic call -> validated
+        structured plan -> existing deterministic executor (PR #92
+        correction): the semantic boundary the managed-agent integration
+        boundary above cannot cross on its own -- its 3 read-only tools
+        (``analyze_spreadsheet``/``select_product``/
         ``explain_bitrix_write_plan``, see ``runtime_subprocess.py``) have
         no bulk/structural table-transform capability at all, so a real
         production "increase the retail price for ALL products" turn fell
@@ -1015,77 +986,45 @@ class WorkflowPandaConversationGateway:
 
         Gives that EXISTING executor the FIRST and ONLY interpretation of
         this turn's text, over THIS conversation's canonical Workset (PR
-        #91) current dataset -- exactly the SAME ``data.excel_assistant``/
-        ``assist`` tool call (``data_intel.nl_ops.compile_request`` ->
-        ``data_intel.transform.execute_plan``, both already reached this
-        way by the legacy FAMILY_EXCEL path/``_invoke_tool`` below) that a
-        managed-agent-disabled conversation already uses successfully.
+        #91) current dataset -- the SAME ``data.excel_assistant``/
+        ``assist`` tool call the legacy FAMILY_EXCEL path/``_invoke_tool``
+        below already uses, but with ``use_model_plan=True`` so the
+        adapter routes to ``DataIntelligenceService.
+        execute_structured_plan_via_model`` (ONE call to the EXISTING
+        one-shot model seam ``agents.openai_agent.OpenAIAgent.run``,
+        deterministically validated into an ``OperationPlan`` -- see
+        ``data_intel.nl_plan_llm``) instead of ``compile_request``'s
+        bounded RU/EN regex/stem grammar. ``compile_request`` itself is
+        never consulted here, and ``text`` is never interpreted a second
+        time after the model call returns.
 
-        Returns a concrete ``ConversationResult`` ONLY when the compiler
-        ACTUALLY compiled and executed a genuine table-wide operation this
-        turn -- the tool's own ``status == "OK"`` (``compile_request``
-        produced a validated ``OperationPlan`` and ``execute_plan`` applied
-        it; see ``data_intel.service.execute_nl_request``). Returns
-        ``None`` for EVERY other outcome (no canonical Workset/dataset yet
-        for this conversation, ``ROW_FOUND`` single-row lookup,
-        ``ANALYZED`` whole-table summary, ``AMBIGUOUS``, or any tool/
-        compile failure) so the caller falls straight through to the
-        existing managed-agent/legacy routing completely unchanged --
-        single-product selection (better served by the managed agent's own
-        product-enrichment delegation) and plain analysis are NEVER
-        intercepted here. ``execute_nl_request`` never persists anything
-        for those other statuses (no ``store.save_dataset`` call outside
-        the ``status == "OK"`` branch), so a discarded probe here has zero
-        side effects on the shared ``data_intel`` store or on
-        ``ActiveTaskStore`` -- nothing needs to be undone when this method
-        returns ``None``.
+        Returns a concrete ``ConversationResult`` ONLY when the model
+        itself judged this text a genuine table-wide (or table-subset)
+        operation AND its output passed strict deterministic validation
+        AND ``execute_plan`` applied it -- the tool's own
+        ``status == "OK"``. Returns ``None`` for EVERY other outcome (no
+        canonical Workset/dataset yet for this conversation,
+        ``status == "NOT_APPLICABLE"`` -- the model's own judgment that
+        this is a single-product selection/plain analysis/write-plan
+        question/anything else that is not a table-wide operation -- or
+        any tool/model/validation failure) so the caller falls straight
+        through to the existing managed-agent/legacy routing completely
+        unchanged. Nothing is persisted for a ``NOT_APPLICABLE`` outcome
+        (no ``store.save_dataset`` call outside the ``status == "OK"``
+        branch), so a discarded probe here has zero side effects on the
+        shared ``data_intel`` store or on ``ActiveTaskStore``.
 
-        Adds no agent, router, dataset store, executor, or NL vocabulary
-        of its own: once past the precedence guard below, ``compile_
-        request``'s existing, bounded RU/EN grammar (percent adjustment,
-        price/column filters, dedupe, column add/remove/rename, ...) is
-        the ONLY thing that decides whether this text is a canonical
-        table operation -- this method contributes no phrase/stem list of
-        its own, and changing the request's wording or numeric values
-        requires zero change here.
-
-        PRECEDENCE GUARD (regression closure): ``compile_request``'s own
-        ``_KEEP_ONLY_RE``/price-filter grammar is intentionally loose --
-        e.g. a long free-text product-enrichment instruction that happens
-        to contain "...укажи ТОЛЬКО те поля, для которых..." spuriously
-        compiles into a validated (and, once run, ``status == "OK")``
-        ``filter_contains`` plan, even though the user never asked for a
-        table-wide operation at all. ``resolve_action_turn`` (the EXISTING
-        legacy-path router this method must not compete with, see its own
-        module) already resolves EXACTLY this ambiguity via a fixed
-        precedence chain: an explicit product-enrichment / Bitrix-write-
-        plan-question / pricing-or-category-refinement / write-confirmation
-        request is dispatched to ITS OWN dedicated resolver and never
-        reaches its generic FAMILY_EXCEL/``data.excel_assistant`` dispatch
-        at all. Reusing those SAME four pure, already-existing, text-only
-        predicates here (in the SAME precedence order) as an up-front skip
-        gate is not a new phrase/stem list -- it is the identical
-        arbitration ``resolve_action_turn`` already performs, applied
-        before this method's own probe so a compiled-but-spurious plan can
-        never preempt the managed agent's product-enrichment/write-plan
-        delegation for one of these turns. None of the four predicates take
-        ``store``/``active`` or mutate any state -- calling them here has
-        zero side effects, unlike calling ``resolve_action_turn`` itself
-        would."""
-        from business_assistant.action_continuation import (
-            is_bitrix_write_plan_question,
-            is_explicit_bitrix_write_confirmation,
-            is_explicit_product_enrichment_request,
-            is_explicit_product_pricing_or_category_refinement_request,
-        )
-
-        if (
-            is_explicit_bitrix_write_confirmation(text)
-            or is_explicit_product_enrichment_request(text)
-            or is_bitrix_write_plan_question(text)
-            or is_explicit_product_pricing_or_category_refinement_request(text)
-        ):
-            return None
+        Adds no new agent, router, dataset store, or executor: it is the
+        SAME tool_id/operation, the SAME ``DataIntelligenceService``, and
+        the SAME ``data_intel.transform.execute_plan``. It also adds no
+        phrase/stem list of its own -- arbitration between "table
+        operation" and "not a table operation" (formerly four separate
+        pure predicates checked here as a precedence guard against
+        ``compile_request``'s own overly loose grammar) is now the
+        model's OWN single judgment call, deterministically validated
+        afterwards; changing the request's wording or numeric values, or
+        adding a second scoped rule to the SAME request (e.g. "the first 3
+        rows +7%, everyone else +15%"), requires zero code change here."""
 
         if self._tool_gateway is None:
             return None
@@ -1113,18 +1052,11 @@ class WorkflowPandaConversationGateway:
         if workset is None or not workset.current_dataset_id:
             return None
 
-        args: dict = {"text": text, "dataset_id": workset.current_dataset_id}
-        if workset.scope == workset_lib.SCOPE_SINGLE:
-            # Mirrors ``resolve_action_turn``'s own PR #91 stale-single-
-            # product-override gate exactly: only ever forwarded when the
-            # Workset's OWN scope is still SINGLE -- and even then, only
-            # ever consulted by ``execute_nl_request`` inside its
-            # ``UnsupportedOperationError`` row-lookup fallback (never for
-            # a plan that ``compile_request`` itself compiled), so it can
-            # never narrow/override a genuine table-wide plan below.
-            row_selection = dict(task.parameters.get("bitrix_row_selection") or {})
-            if row_selection:
-                args["current_selection"] = row_selection
+        args: dict = {
+            "text": text,
+            "dataset_id": workset.current_dataset_id,
+            "use_model_plan": True,
+        }
 
         tool_request = ToolRequest(
             request_id=str(uuid.uuid4()),

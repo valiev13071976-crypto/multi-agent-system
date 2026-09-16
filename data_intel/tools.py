@@ -172,6 +172,16 @@ class DataIntelToolAdapter:
                     "content_b64": base64.b64encode(content).decode("ascii") if content else "",
                 }
             if op == "assist":
+                # CANONICAL TABLE EXECUTION: ``use_model_plan`` is a plain
+                # boolean flag (JSON-serializable, no behavior change to the
+                # ``arguments`` schema otherwise) set only by
+                # ``business_assistant.conversation_gateway._maybe_execute_
+                # canonical_table_operation`` -- every other/legacy caller of
+                # this SAME "assist" operation is completely unaffected and
+                # keeps going through ``_assist``/``compile_request`` exactly
+                # as before.
+                if args.get("use_model_plan"):
+                    return await self._assist_structured(args, request, tenant)
                 return self._assist(args, request, tenant)
             if op == "compare_workbooks":
                 return self._compare_workbooks(args, request, tenant)
@@ -220,6 +230,39 @@ class DataIntelToolAdapter:
             result["workbook"] = reg
         if ingest_tables is not None:
             result["ingest_tables"] = ingest_tables
+        return result
+
+    async def _assist_structured(self, args: dict, request, tenant: str) -> dict:
+        """CANONICAL TABLE EXECUTION: the SAME entry point as ``_assist``
+        (same tool_id/operation, same ``dataset_id``/``text`` arguments),
+        but the request is interpreted by ONE model call
+        (``data_intel.nl_plan_llm.compile_request_via_model``) into a
+        validated structured plan instead of ``compile_request``'s bounded
+        regex/stem grammar -- see ``DataIntelligenceService.
+        execute_structured_plan_via_model``. No attachment ingest here:
+        by the time a canonical-table-execution turn reaches this branch
+        the Workset already owns an attached dataset (PR #91); a fresh
+        upload always goes through the existing ``_assist`` path first."""
+
+        text = str(args.get("text") or "")
+        dataset_id = str(args.get("dataset_id") or "")
+        if not dataset_id:
+            raise ToolArgumentInvalidError()
+
+        result = await self._svc.execute_structured_plan_via_model(
+            dataset_id,
+            text,
+            tenant_id=tenant,
+        )
+        if result.get("status") == "OK" and result.get("wants_workbook"):
+            reg = self._svc.register_generated_workbook(
+                result["dataset_id"],
+                tenant_id=tenant,
+                owner_id=str(getattr(request, "user_id", "") or ""),
+                conversation_id=str(args.get("conversation_id") or ""),
+                request_id=str(getattr(request, "request_id", "") or ""),
+            )
+            result["workbook"] = reg
         return result
 
     def _compare_workbooks(self, args: dict, request, tenant: str) -> dict:

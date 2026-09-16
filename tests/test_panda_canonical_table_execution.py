@@ -1,8 +1,8 @@
-"""PANDA — CANONICAL TABLE EXECUTION (NL -> structured operation -> existing
-deterministic executor).
+"""PANDA -- CANONICAL TABLE EXECUTION (NL -> ONE model semantic call ->
+validated structured operation -> existing deterministic executor).
 
 PRODUCTION DEFECT (after PR #91 fixed canonical Workset ownership): a
-real ``PANDA_MANAGED_AGENT_ENABLED=true`` production request --
+real PANDA_MANAGED_AGENT_ENABLED=true production request --
 
     "Увеличь розничную цену ... для всех товаров и покажи результат.
     Ничего в Bitrix не записывай."
@@ -13,72 +13,68 @@ computed aggregate stats, but answered conversationally ("Я не могу ту�
 the EXISTING deterministic Data Intelligence executor.
 
 ROOT CAUSE: the managed-agent integration boundary
-(``managed_agent_poc.runtime_subprocess``) exposes exactly 3 READ-ONLY
-tools -- ``analyze_spreadsheet`` / ``select_product`` /
-``explain_bitrix_write_plan`` -- none of which can perform a bulk/
-structural table transform. ``WorkflowPandaConversationGateway.respond()``
-handed every eligible turn to that boundary FIRST; when its own tools
-could not satisfy a table-wide numeric request, the model's own free-text
-answer was returned as-is, and the turn never reached the EXISTING,
-already-proven ``data_intel.nl_ops.compile_request`` ->
-``data_intel.transform.execute_plan`` chain (reached today only through
-the ``data.excel_assistant``/``assist`` tool call) that a managed-agent-
-DISABLED conversation already uses successfully (see
-``tests/test_panda_canonical_workset_single_data_ownership.py``'s own
-``WorksetAcceptanceIntegrationTests``).
+(managed_agent_poc.runtime_subprocess) exposes exactly 3 READ-ONLY tools
+-- analyze_spreadsheet / select_product / explain_bitrix_write_plan --
+none of which can perform a bulk/structural table transform.
 
-FIX: ``WorkflowPandaConversationGateway._maybe_execute_canonical_table_
-operation`` (see ``business_assistant/conversation_gateway.py``) is tried
+PR #92 (first fix): reused data_intel.nl_ops.compile_request (a bounded
+deterministic RU/EN regex/stem compiler) as the semantic boundary. That
+fix worked for a single, simple percent adjustment, but compile_request
+cannot represent a COMPOUND request (scope A -> transform A, remainder ->
+transform B, e.g. "первым трём +7%, остальным +15%") -- see
+CompoundScopedOperationContractGapAuditTests below -- and its loose
+_KEEP_ONLY_RE/price-filter grammar produced false positives on unrelated
+free text, requiring four extra precedence-guard predicates that were
+themselves more of the same regex-arbitration architecture.
+
+PR #92 CORRECTION (this revision): compile_request is no longer the
+semantic boundary for canonical table execution at all. Instead, ONE
+existing model-call seam already available in this repo --
+agents.openai_agent.OpenAIAgent.run (a single one-shot HTTP call, already
+configured via the SAME OPENAI_API_KEY/OPENAI_MODEL env vars
+managed_agent_poc requires) -- interprets the user's text EXACTLY ONCE
+per turn (see data_intel.nl_plan_llm.compile_request_via_model) into
+STRICT JSON, which is then deterministically parsed and validated into an
+OperationPlan (with a minimal, generic scope extension -- all/row_range/
+remainder -- so ONE plan can now express a compound, multi-scope
+request). That plan is executed by the SAME existing deterministic
+executor, data_intel.transform.execute_plan. compile_request itself is
+untouched and keeps serving its own pre-existing callers
+(DataIntelligenceService.execute_nl_request) for backward compatibility
+-- it is not invoked anywhere in this new path, so its own grammar/false-
+positive surface can no longer hijack a turn here; the four precedence-
+guard predicates PR #92's first revision added are gone.
+
+FIX: WorkflowPandaConversationGateway._maybe_execute_canonical_table_
+operation (see business_assistant/conversation_gateway.py) is tried
 BEFORE the managed-agent boundary for every eligible turn. It gives the
-EXISTING ``data.excel_assistant`` tool call the text FIRST; a result is
-used (and the managed-agent boundary is skipped entirely for this turn)
-ONLY when that tool's own ``status == "OK"`` -- i.e. ``compile_request``
-ACTUALLY compiled and ``execute_plan`` ACTUALLY executed a genuine
-table-wide operation. Every other outcome (no canonical dataset yet,
-single-row lookup, plain analysis, ambiguous) returns ``None`` with zero
-side effects, so the managed agent keeps handling every other
-conversational/product turn exactly as before -- it never "competes"
-with a genuine table operation, and it is never touched at all for one.
+SAME data.excel_assistant/assist tool call the text FIRST, with a
+use_model_plan=True flag so DataIntelToolAdapter routes to
+DataIntelligenceService.execute_structured_plan_via_model instead of
+execute_nl_request. A result is used (and the managed-agent boundary is
+skipped entirely for this turn) ONLY when that tool's own
+status == "OK" -- i.e. the model judged this a genuine table operation
+AND its output passed strict validation AND execute_plan ACTUALLY
+executed it. Every other outcome (no canonical dataset yet,
+NOT_APPLICABLE, or any tool/model/validation failure) returns None with
+zero side effects, so the managed agent keeps handling every other
+conversational/product turn exactly as before.
 
-No new agent/router/dataset store/executor/NL vocabulary is introduced:
-this reuses the SAME NL->IR compiler, the SAME deterministic executor,
-and the SAME canonical Workset (PR #91) every other FAMILY_EXCEL turn
-already uses.
-
-REGRESSION CLOSURE (found by this same task's own broader regression
-run): the FIRST version of the fix gated purely on the tool's own
-``status == "OK"``, which is not sufficient on its own -- ``compile_
-request``'s intentionally loose ``_KEEP_ONLY_RE`` grammar spuriously
-matched a "...покажи ... и отдельно укажи ТОЛЬКО те поля, для
-которых..." clause inside a real, long, explicit product-enrichment
-request as a ``filter_contains`` op, which (once executed) also reports
-``status == "OK"`` -- destructively filtering the dataset down to 0 rows
-and hijacking a turn that should have gone to the managed agent's
-product-enrichment delegation. The fix adds a precedence guard that
-reuses ``resolve_action_turn``'s OWN four pure, pre-existing, text-only
-classifiers (``is_explicit_bitrix_write_confirmation``, ``is_explicit_
-product_enrichment_request``, ``is_bitrix_write_plan_question``,
-``is_explicit_product_pricing_or_category_refinement_request``) as an
-up-front skip gate, in the SAME precedence order ``resolve_action_turn``
-itself already applies -- not a new phrase/stem list. See
-``test_production_enrichment_text_with_coincidental_keep_only_wording_
-still_uses_managed_agent`` below for the regression test, and the full
-managed-agent regression suites (``test_panda_managed_agent_enrichment_
-delegation.py``, ``test_panda_managed_agent_governed_write_confirmation_
-defect_closure.py``) for the broader confirmation that no other turn
-shape is affected.
+No new agent/router/dataset store/executor is introduced: this reuses the
+SAME one-shot model seam, the SAME (minimally extended) structured
+contract, the SAME deterministic executor, and the SAME canonical
+Workset (PR #91) every other FAMILY_EXCEL turn already uses.
 """
 
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from unittest import mock
 
 from business_assistant import workset as workset_lib
-from business_assistant.action_continuation import EXCEL_CONTRACT
-from business_assistant.conversation_gateway import ConversationRequest
 from managed_agent_poc.adapter import ManagedAgentPOC
 from managed_agent_poc.panda_bridge import ENABLED_ENV_VAR
 from tests.test_panda_canonical_workset_single_data_ownership import (
@@ -99,8 +95,11 @@ from tests.test_panda_managed_agent_enrichment_delegation import (
     _raw_tool_fields,
 )
 from tests.test_panda_product_enrichment_conversational import _panda, _register_upload
+from business_assistant.conversation_gateway import ConversationRequest
 
 CONVERSATION_ID = "conv-table-exec"
+
+RETAIL_COLUMN = "розница"
 
 
 def _analyze_plan_entry() -> dict:
@@ -115,7 +114,7 @@ def _analyze_plan_entry() -> dict:
     }
 
 
-def _select_product_plan_entry(*, identifier: str, name: str, purchase_price: str, retail_price: str) -> dict:
+def _select_product_plan_entry(*, identifier, name, purchase_price, retail_price) -> dict:
     return {
         "current_identifier": identifier,
         "tool_calls": [
@@ -133,17 +132,13 @@ def _select_product_plan_entry(*, identifier: str, name: str, purchase_price: st
                 },
             }
         ],
-        "final_output": f"Выбран товар {name}.",
+        "final_output": "Выбран товар " + name + ".",
     }
 
 
-def _tracking_fake_run_turn(plan: list[dict]):
-    """Wraps ``_make_fake_run_turn`` (the existing, proven test double for
-    ``ManagedAgentPOC.run_turn``) so the test can assert exactly how many
-    times -- and with what text -- the managed-agent boundary was
-    actually entered."""
+def _tracking_fake_run_turn(plan):
     fake = _make_fake_run_turn(plan)
-    calls: list[dict] = []
+    calls = []
 
     def wrapper(self, **kwargs):
         calls.append(kwargs)
@@ -152,14 +147,20 @@ def _tracking_fake_run_turn(plan: list[dict]):
     return wrapper, calls
 
 
+def _mock_model_json(payload):
+    from agents.provider_result import ProviderResult
+
+    async def _fake_run(self, prompt):
+        return ProviderResult(text=json.dumps(payload), provider_id="openai", model_id="test-model")
+
+    env_patch = mock.patch.dict(
+        os.environ, {"OPENAI_API_KEY": "test-key", "OPENAI_MODEL": "test-model"}
+    )
+    model_patch = mock.patch("agents.openai_agent.OpenAIAgent.run", new=_fake_run)
+    return env_patch, model_patch
+
+
 class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
-    """MANDATORY ACCEPTANCE: one uploaded multi-row spreadsheet; turn 1
-    analyzes it; turn 2 selects/inspects one product; turn 3 (NO
-    reattachment) requests a table-wide numeric transformation in natural
-    language -- with the managed-agent boundary ENABLED end to end
-    through the real ``WorkflowPandaConversationGateway.respond()`` entry
-    point, exactly the production configuration the reported defect came
-    from."""
 
     async def asyncSetUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -191,12 +192,12 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _workset(self):
-        task = self.panda._action_store.get(  # noqa: SLF001
+        task = self.panda._action_store.get(
             tenant_id=TENANT, owner_id=OWNER, conversation_id=CONVERSATION_ID
         )
         return workset_lib.get_workset(task)
 
-    async def _run_three_turn_journey(self, *, turn3_text: str, request_prefix: str):
+    async def _run_three_turn_journey(self, *, turn3_text, request_prefix, model_payload):
         plan = [
             _analyze_plan_entry(),
             _select_product_plan_entry(
@@ -204,6 +205,7 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
             ),
         ]
         fake_run_turn, run_turn_calls = _tracking_fake_run_turn(plan)
+        env_patch, model_patch = _mock_model_json(model_payload)
 
         with mock.patch.object(ManagedAgentPOC, "run_turn", new=fake_run_turn):
             r1 = await self.panda.respond(
@@ -211,7 +213,7 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                     text="Проанализируй этот прайс.",
                     tenant_id=TENANT,
                     user_id=OWNER,
-                    request_id=f"{request_prefix}-1",
+                    request_id=request_prefix + "-1",
                     conversation_id=CONVERSATION_ID,
                     attachment_refs=(self.artifact_id,),
                 )
@@ -221,67 +223,63 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                     text="Возьми первый товар из этого прайса.",
                     tenant_id=TENANT,
                     user_id=OWNER,
-                    request_id=f"{request_prefix}-2",
+                    request_id=request_prefix + "-2",
                     conversation_id=CONVERSATION_ID,
                 )
             )
-            # Sanity: turns 1/2 above DID go through the managed-agent
-            # boundary (this reproduces the real production shape) --
-            # narrowing scope to SINGLE product A, exactly the state a
-            # later bulk request must not stay pinned to.
             self.assertEqual(len(run_turn_calls), 2)
             w_single = self._workset()
             self.assertEqual(w_single.scope, workset_lib.SCOPE_SINGLE)
             self.assertEqual(w_single.selected_identifiers, (SKU_A,))
 
-            # Turn 3: NO reattachment, table-wide numeric transformation.
-            r3 = await self.panda.respond(
-                ConversationRequest(
-                    text=turn3_text,
-                    tenant_id=TENANT,
-                    user_id=OWNER,
-                    request_id=f"{request_prefix}-3",
-                    conversation_id=CONVERSATION_ID,
+            with env_patch, model_patch:
+                r3 = await self.panda.respond(
+                    ConversationRequest(
+                        text=turn3_text,
+                        tenant_id=TENANT,
+                        user_id=OWNER,
+                        request_id=request_prefix + "-3",
+                        conversation_id=CONVERSATION_ID,
+                    )
                 )
-            )
-            # THE CORE ASSERTION: the managed-agent boundary was NEVER
-            # entered for the table-wide turn -- it must not "compete"
-            # with the canonical table execution path (task directive).
             self.assertEqual(len(run_turn_calls), 2)
 
         return r1, r2, r3
 
     async def test_mandatory_acceptance_table_wide_increase_after_single_product_selection(self):
-        source_id = None
-
+        model_payload = {
+            "applicable": True,
+            "wants_workbook": False,
+            "operations": [
+                {
+                    "scope": {"kind": "all"},
+                    "column": RETAIL_COLUMN,
+                    "operation": "percent_round",
+                    "value": "10",
+                }
+            ],
+        }
         r1, r2, r3 = await self._run_three_turn_journey(
-            turn3_text="Увеличь розничную цену на 10% для всех товаров и покажи результат. "
-            "Ничего в Bitrix не записывай.",
+            turn3_text=(
+                "Увеличь розничную цену на 10% для всех товаров и покажи результат. "
+                "Ничего в Bitrix не записывай."
+            ),
             request_prefix="rep",
+            model_payload=model_payload,
         )
 
-        # No "attach the file"/"cannot mass recalculate" conversational
-        # refusal of any kind.
         self.assertNotIn("Приложите файл", r3.text)
         self.assertNotIn("не могу", r3.text.casefold())
 
         w_final = self._workset()
         self.assertIsNotNone(w_final)
-        # Same canonical Workset throughout -- established on turn 1 and
-        # never replaced.
-        w_after_attach = w_final  # placeholder resolved below
         self.assertTrue(w_final.source_dataset_id)
         source_id = w_final.source_dataset_id
 
-        # A genuine table-wide transform was executed: scope resets to
-        # FULL_DATASET (never stays pinned to product A), row count is
-        # unchanged (a pure percent bump touches every row), and a NEW
-        # derived dataset was produced (deterministic version chain).
         self.assertEqual(w_final.scope, workset_lib.SCOPE_FULL_DATASET)
         self.assertEqual(w_final.selected_identifiers, ())
         self.assertNotEqual(w_final.current_dataset_id, source_id)
 
-        # Concrete, real result -- not a vague placeholder/refusal.
         self.assertIn("Строк было: 4, стало: 4", r3.text)
         preview = r3.metadata.get("table_operation_preview") or {}
         self.assertEqual(preview.get("row_count_before"), 4)
@@ -294,31 +292,34 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(first["source_value"])
         self.assertTrue(first["resulting_value"])
         self.assertNotEqual(first["source_value"], first["resulting_value"])
-        # Identifier survives in the row projection (SKU column present).
         self.assertTrue(any(str(v) == SKU_A for v in first["row"].values()))
 
         self.assertTrue(r3.metadata.get("canonical_table_execution"))
         self.assertEqual(r3.metadata.get("action_decision"), "CALL_TOOL")
 
-        # Zero Bitrix mutation -- no bridge was even wired for this test.
-        self.assertIsNone(self.panda._bitrix_bridge)  # noqa: SLF001
-        # No MaxTurnsExceeded / managed-agent error surfaced anywhere.
+        self.assertIsNone(self.panda._bitrix_bridge)
         self.assertNotIn("MaxTurnsExceeded", r3.text)
 
-        # Original dataset itself is untouched/still fully readable.
         store = _first_dataset_store(self.panda)
         original_rows = store.get_rows(source_id, tenant_id=TENANT)
         self.assertEqual(len(original_rows), 4)
 
     async def test_second_semantically_different_wording_and_value_same_mechanism(self):
-        """A second, semantically DIFFERENT wording with a DIFFERENT
-        numeric value and the opposite sign (a decrease, via ``снизь``
-        rather than an explicit ``+``) -- proves this is the general
-        ``compile_request`` grammar, not one memorized phrase; changing
-        wording/numbers requires zero code change."""
+        model_payload = {
+            "applicable": True,
+            "operations": [
+                {
+                    "scope": {"kind": "all"},
+                    "column": RETAIL_COLUMN,
+                    "operation": "percent_round",
+                    "value": "-8",
+                }
+            ],
+        }
         r1, r2, r3 = await self._run_three_turn_journey(
             turn3_text="Снизь розничную цену на 8% по всем позициям, покажи, что получилось.",
             request_prefix="rep2",
+            model_payload=model_payload,
         )
 
         self.assertNotIn("Приложите файл", r3.text)
@@ -332,14 +333,121 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         first = changed_rows[0]
         self.assertEqual(first["percent"], "-8")
         self.assertTrue(any(str(v) == SKU_A for v in first["row"].values()))
-        self.assertIsNone(self.panda._bitrix_bridge)  # noqa: SLF001
+        self.assertIsNone(self.panda._bitrix_bridge)
+
+    async def test_compound_two_scope_operation_single_model_call(self):
+        model_payload = {
+            "applicable": True,
+            "operations": [
+                {
+                    "scope": {"kind": "row_range", "start": 0, "end": 3},
+                    "column": RETAIL_COLUMN,
+                    "operation": "percent_round",
+                    "value": "7",
+                },
+                {
+                    "scope": {"kind": "remainder"},
+                    "column": RETAIL_COLUMN,
+                    "operation": "percent_round",
+                    "value": "15",
+                },
+            ],
+        }
+        r1, r2, r3 = await self._run_three_turn_journey(
+            turn3_text=(
+                "Первым трём товарам увеличь розничную цену на 7%, "
+                "остальным увеличь розничную цену на 15%, покажи результат."
+            ),
+            request_prefix="compound",
+            model_payload=model_payload,
+        )
+
+        w_final = self._workset()
+        self.assertEqual(w_final.scope, workset_lib.SCOPE_FULL_DATASET)
+
+        preview = r3.metadata.get("table_operation_preview") or {}
+        changed_rows = preview.get("changed_rows") or []
+        self.assertEqual(len(changed_rows), 4)
+        by_row_index = {i: row for i, row in enumerate(changed_rows)}
+        for i in range(3):
+            self.assertEqual(by_row_index[i]["percent"], "7")
+            self.assertEqual(by_row_index[i]["scope"]["kind"], "row_range")
+        self.assertEqual(by_row_index[3]["percent"], "15")
+        self.assertEqual(by_row_index[3]["scope"]["kind"], "remainder")
+        for row in changed_rows:
+            self.assertNotEqual(row["source_value"], row["resulting_value"])
+
+        self.assertTrue(r3.metadata.get("canonical_table_execution"))
+        self.assertIsNone(self.panda._bitrix_bridge)
+        self.assertNotIn("MaxTurnsExceeded", r3.text)
+
+    async def test_compound_differently_worded_with_different_values_zero_code_change(self):
+        model_payload = {
+            "applicable": True,
+            "operations": [
+                {
+                    "scope": {"kind": "row_range", "start": 0, "end": 2},
+                    "column": RETAIL_COLUMN,
+                    "operation": "percent_round",
+                    "value": "20",
+                },
+                {
+                    "scope": {"kind": "remainder"},
+                    "column": RETAIL_COLUMN,
+                    "operation": "percent_round",
+                    "value": "-5",
+                },
+            ],
+        }
+        r1, r2, r3 = await self._run_three_turn_journey(
+            turn3_text=(
+                "Первым двум позициям поднимите цену на 20%, "
+                "а на оставшиеся сделайте скидку 5%, покажи что вышло."
+            ),
+            request_prefix="compound2",
+            model_payload=model_payload,
+        )
+
+        preview = r3.metadata.get("table_operation_preview") or {}
+        changed_rows = preview.get("changed_rows") or []
+        self.assertEqual(len(changed_rows), 4)
+        self.assertEqual(changed_rows[0]["percent"], "20")
+        self.assertEqual(changed_rows[1]["percent"], "20")
+        self.assertEqual(changed_rows[2]["percent"], "-5")
+        self.assertEqual(changed_rows[3]["percent"], "-5")
+        self.assertIsNone(self.panda._bitrix_bridge)
+
+    async def test_model_marks_non_table_request_not_applicable_falls_back_to_managed_agent(self):
+        plan = [_analyze_plan_entry(), _analyze_plan_entry()]
+        fake_run_turn, run_turn_calls = _tracking_fake_run_turn(plan)
+        env_patch, model_patch = _mock_model_json({"applicable": False, "operations": []})
+
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=fake_run_turn):
+            await self.panda.respond(
+                ConversationRequest(
+                    text="Проанализируй этот прайс.",
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="na-1",
+                    conversation_id=CONVERSATION_ID,
+                    attachment_refs=(self.artifact_id,),
+                )
+            )
+            self.assertEqual(len(run_turn_calls), 1)
+            with env_patch, model_patch:
+                result = await self.panda.respond(
+                    ConversationRequest(
+                        text="А что там по остальным столбцам?",
+                        tenant_id=TENANT,
+                        user_id=OWNER,
+                        request_id="na-2",
+                        conversation_id=CONVERSATION_ID,
+                    )
+                )
+            self.assertEqual(len(run_turn_calls), 2)
+            self.assertIsNone(result.metadata.get("canonical_table_execution"))
 
     async def test_single_product_and_plain_analysis_turns_still_use_managed_agent_unaffected(self):
-        """Regression: turns that are NOT a genuine table-wide operation
-        (a bare "analyze" turn, and a single-product selection) are
-        completely unaffected -- they still go through the managed-agent
-        boundary exactly as before this fix. Only a turn ``compile_
-        request`` itself can compile is ever intercepted."""
         plan = [
             _analyze_plan_entry(),
             _select_product_plan_entry(
@@ -371,18 +479,6 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(run_turn_calls), 2)
 
     async def test_production_enrichment_text_with_coincidental_keep_only_wording_still_uses_managed_agent(self):
-        """Regression closure: ``compile_request``'s own loose ``_KEEP_ONLY_RE``
-        grammar spuriously matches "...укажи ТОЛЬКО те поля, для которых..."
-        inside the real production full-card-preparation request as a
-        ``filter_contains`` op that, once executed, DOES report
-        ``status == "OK"`` -- even though the user never asked for a
-        table-wide operation. This turn is an explicit product-enrichment
-        request (``is_explicit_product_enrichment_request``, the SAME
-        pure, pre-existing classifier ``resolve_action_turn`` itself
-        checks with top precedence), so it must be skipped by the
-        canonical-table-execution probe and reach the managed agent
-        exactly as before this fix -- never silently turned into a
-        4-row-losing table filter."""
         plan = [
             {
                 "current_identifier": SKU_A,
@@ -399,7 +495,7 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                         },
                     }
                 ],
-                "final_output": f"Товар {NAME_A} подготовлен.",
+                "final_output": "Товар " + NAME_A + " подготовлен.",
             }
         ]
         fake_run_turn, run_turn_calls = _tracking_fake_run_turn(plan)
@@ -417,8 +513,6 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(run_turn_calls), 1)
         self.assertEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
         self.assertIsNone(result.metadata.get("canonical_table_execution"))
-        # The dataset must NOT have been destructively filtered down to 0
-        # rows by the spurious "keep only" match.
         store = _first_dataset_store(self.panda)
         w = self._workset()
         rows = store.get_rows(w.current_dataset_id, tenant_id=TENANT)
@@ -426,14 +520,6 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CompoundScopedOperationContractGapAuditTests(unittest.TestCase):
-    """COMPOUND CAPABILITY AUDIT (task directive): proves -- rather than
-    silently assumes -- that the EXISTING structured contract
-    (``data_intel.nl_ops.OperationPlan``/``PlannedOperation``, compiled by
-    ``compile_request``) cannot express "scope A -> transformation A,
-    remainder/scope B -> transformation B" in a single request. This is
-    reported/documented as a gap; it is NOT fixed here -- doing so with
-    phrase-specific regex for "первые"/"остальные"/hardcoded percentages
-    is explicitly forbidden by this task."""
 
     def test_compile_request_only_ever_compiles_one_percent_rule_per_request(self):
         from data_intel.nl_ops import OP_PERCENT_ROUND, compile_request
@@ -451,17 +537,59 @@ class CompoundScopedOperationContractGapAuditTests(unittest.TestCase):
             table,
         )
         percent_ops = [op for op in plan.operations if op.op == OP_PERCENT_ROUND]
-        # THE GAP: exactly ONE percent rule is ever compiled --
-        # ``nl_ops._PERCENT_RE.search`` only ever matches the FIRST
-        # percentage in the text, and no ``PlannedOperation`` shape
-        # carries an ordinal/remainder row-scope split at all. The
-        # "first three rows / everyone else" partition described in the
-        # text is entirely lost; applying this plan would (incorrectly,
-        # for the compound request) apply ONE percentage to the WHOLE
-        # table rather than two different percentages to two disjoint
-        # row scopes.
         self.assertEqual(len(percent_ops), 1)
         self.assertEqual(percent_ops[0].params["percent"], "7")
+
+    def test_operation_plan_now_expresses_compound_scoped_rules_and_execute_plan_applies_them(self):
+        from data_intel.nl_ops import (
+            OP_PERCENT_ROUND,
+            OperationPlan,
+            OperationScope,
+            PlannedOperation,
+            SCOPE_REMAINDER,
+            SCOPE_ROW_RANGE,
+        )
+        from data_intel.transform import execute_plan
+        from data_intel.service import DataIntelligenceService
+        from data_intel.store import InMemoryDatasetStore
+
+        svc = DataIntelligenceService(InMemoryDatasetStore())
+        ingested = svc.ingest(_xlsx_bytes(), filename=FILENAME, tenant_id=TENANT)
+        desc = svc.store.get_dataset(ingested["dataset_id"], tenant_id=TENANT)
+        table = desc.tables[0]
+        rows = svc.store.get_rows(ingested["dataset_id"], tenant_id=TENANT)
+        self.assertEqual(len(rows), 4)
+
+        plan = OperationPlan(
+            operations=(
+                PlannedOperation(
+                    OP_PERCENT_ROUND,
+                    {"column": "розница", "percent": "7", "round_mode": None, "round_to": None},
+                    scope=OperationScope(kind=SCOPE_ROW_RANGE, start=0, end=3),
+                ),
+                PlannedOperation(
+                    OP_PERCENT_ROUND,
+                    {"column": "розница", "percent": "15", "round_mode": None, "round_to": None},
+                    scope=OperationScope(kind=SCOPE_REMAINDER),
+                ),
+            ),
+        )
+        result = execute_plan(rows, table.columns, plan)
+        self.assertEqual(result.row_count_before, 4)
+        self.assertEqual(result.row_count_after, 4)
+        self.assertEqual(len(result.row_changes), 4)
+        for change in result.row_changes[:3]:
+            self.assertEqual(change["params"]["percent"], "7")
+            self.assertEqual(change["scope"]["kind"], SCOPE_ROW_RANGE)
+        self.assertEqual(result.row_changes[3]["params"]["percent"], "15")
+        self.assertEqual(result.row_changes[3]["scope"]["kind"], SCOPE_REMAINDER)
+
+        from decimal import Decimal
+
+        self.assertEqual(
+            Decimal(result.rows[0]["розница"]),
+            (Decimal(RETAIL_A) * Decimal("1.07")).quantize(Decimal("0.01")),
+        )
 
 
 if __name__ == "__main__":

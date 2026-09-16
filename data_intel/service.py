@@ -1086,6 +1086,100 @@ class DataIntelligenceService:
         }
         return out
 
+    async def execute_structured_plan_via_model(
+        self,
+        dataset_id: str,
+        text: str,
+        *,
+        tenant_id: str,
+        model_call=None,
+    ) -> dict:
+        """CANONICAL TABLE EXECUTION -- ONE-shot model-call semantic
+        boundary (replaces ``compile_request`` as the PRIMARY interpreter
+        for this path; see ``data_intel.nl_plan_llm``): ``text`` is
+        interpreted by the model EXACTLY ONCE, producing a validated
+        ``OperationPlan`` (optionally with per-rule scope for compound
+        requests, e.g. "first 3 rows +7%, the rest +15%"), which is then
+        executed by the SAME existing deterministic engine
+        (``data_intel.transform.execute_plan``) every other table
+        operation already uses. ``text`` is never sent through
+        ``compile_request`` or any other language classifier after this.
+
+        Never raises for "not a table operation"/invalid-model-output --
+        returns ``status == "NOT_APPLICABLE"`` instead (mirrors
+        ``execute_nl_request``'s own non-"OK" statuses), so the caller can
+        defer to its existing fallback routing rather than guessing.
+        """
+
+        desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
+        if desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        if not desc.tables:
+            raise DataIntelError(DATASET_PARSE_FAILED)
+        table = desc.tables[0]
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id, table_id=table.table_id)
+        assert_sync_data_allowed(row_count=len(rows), operations=("nl_plan_via_model",))
+
+        from data_intel.nl_plan_llm import ModelPlanNotApplicable, compile_request_via_model
+
+        try:
+            plan = await compile_request_via_model(text, table, len(rows), model_call=model_call)
+        except ModelPlanNotApplicable as exc:
+            return {"status": "NOT_APPLICABLE", "dataset_id": dataset_id, "message_safe": str(exc)}
+
+        result = execute_plan(rows, table.columns, plan)
+        new_dataset_id = new_id("ds-")
+        new_table = replace(table, columns=result.columns, row_count=len(result.rows))
+        new_desc = DatasetDescriptor(
+            dataset_id=new_dataset_id,
+            tenant_id=tenant_id,
+            source_document_id=desc.source_document_id,
+            format=desc.format,
+            sheets=desc.sheets,
+            tables=(new_table,),
+            row_count=len(result.rows),
+            column_count=len(new_table.columns),
+            checksum=desc.checksum,
+            provenance={
+                **{k: v for k, v in dict(desc.provenance).items()},
+                "derived_from": dataset_id,
+                "nl_request_operations": [a["op"] for a in result.applied],
+                "nl_request_via_model": True,
+            },
+        )
+        self.store.save_dataset(new_desc, {table.table_id: result.rows})
+        tx = DataTransformation(
+            operation="nl_request_via_model",
+            input_refs=(dataset_id,),
+            output_ref=new_dataset_id,
+            parameters={"operations": result.applied},
+            provenance={"text_len": len(text or "")},
+        )
+        self.store.save_transformation(tenant_id, tx)
+        self._emit(
+            "data.nl_operation_applied",
+            dataset_id=new_dataset_id,
+            source_dataset_id=dataset_id,
+            operations=len(result.applied),
+            rows_before=result.row_count_before,
+            rows_after=result.row_count_after,
+            tenant=tenant_id,
+        )
+
+        return {
+            "status": "OK",
+            "dataset_id": new_dataset_id,
+            "previous_dataset_id": dataset_id,
+            "row_count_before": result.row_count_before,
+            "row_count_after": result.row_count_after,
+            "operations_applied": result.applied,
+            "row_changes": result.row_changes,
+            "duplicate_groups_count": len(result.duplicate_groups),
+            "summary_text": self._build_summary_text(result, new_table),
+            "preview_rows": self._bounded_preview(result.rows, new_table.columns),
+            "wants_workbook": plan.wants_workbook,
+        }
+
     def register_generated_workbook(
         self,
         dataset_id: str,
