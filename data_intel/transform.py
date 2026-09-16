@@ -14,7 +14,12 @@ from dataclasses import dataclass, field
 from decimal import ROUND_CEILING, ROUND_FLOOR, ROUND_HALF_UP, Decimal, InvalidOperation
 
 from data_intel.cleaning import clean_text, normalize_decimal_string
-from data_intel.contracts import ColumnDescriptor
+from data_intel.contracts import (
+    ROLE_PURCHASE_PRICE,
+    ROLE_SELLING_PRICE,
+    ROLE_UNKNOWN,
+    ColumnDescriptor,
+)
 from data_intel.duplicates import find_duplicates
 from data_intel.nl_ops import (
     OP_ADD_COLUMN_PERCENT,
@@ -232,11 +237,31 @@ def _update_columns(columns: tuple[ColumnDescriptor, ...], plan: OperationPlan) 
                     renamed.append(c)
             cols = renamed
         elif op.op == OP_ADD_COLUMN_PERCENT:
+            # Retail-vs-purchase price separation (production defect
+            # closure): a derived column explicitly declared as the RETAIL/
+            # SELLING price (``price_role`` -- set deterministically by
+            # ``data_intel.nl_plan_llm`` from the model's own semantic
+            # judgment, never guessed here) is tagged with
+            # ``ROLE_SELLING_PRICE`` so every downstream consumer that
+            # already distinguishes purchase vs. retail by role (``data_
+            # intel.service._row_lookup_result``'s card/preview, Bitrix
+            # readiness) picks it up as the retail price -- never as an
+            # unrelated/unknown column, and never confused with the
+            # untouched source purchase-price column. Symmetric for an
+            # explicit "purchase" role. Absent/unrecognized ``price_role``
+            # keeps the prior, unchanged behavior (``ROLE_UNKNOWN``).
+            result_role = ROLE_UNKNOWN
+            price_role = op.params.get("price_role")
+            if price_role == "retail":
+                result_role = ROLE_SELLING_PRICE
+            elif price_role == "purchase":
+                result_role = ROLE_PURCHASE_PRICE
             cols.append(
                 ColumnDescriptor(
                     source_name=op.params["new_column"],
                     normalized_name=str(op.params["new_column"]).strip().lower(),
                     inferred_type="decimal",
+                    semantic_role=result_role,
                 )
             )
     return tuple(cols)
