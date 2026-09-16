@@ -44,6 +44,29 @@ No new agent/router/dataset store/executor/NL vocabulary is introduced:
 this reuses the SAME NL->IR compiler, the SAME deterministic executor,
 and the SAME canonical Workset (PR #91) every other FAMILY_EXCEL turn
 already uses.
+
+REGRESSION CLOSURE (found by this same task's own broader regression
+run): the FIRST version of the fix gated purely on the tool's own
+``status == "OK"``, which is not sufficient on its own -- ``compile_
+request``'s intentionally loose ``_KEEP_ONLY_RE`` grammar spuriously
+matched a "...покажи ... и отдельно укажи ТОЛЬКО те поля, для
+которых..." clause inside a real, long, explicit product-enrichment
+request as a ``filter_contains`` op, which (once executed) also reports
+``status == "OK"`` -- destructively filtering the dataset down to 0 rows
+and hijacking a turn that should have gone to the managed agent's
+product-enrichment delegation. The fix adds a precedence guard that
+reuses ``resolve_action_turn``'s OWN four pure, pre-existing, text-only
+classifiers (``is_explicit_bitrix_write_confirmation``, ``is_explicit_
+product_enrichment_request``, ``is_bitrix_write_plan_question``,
+``is_explicit_product_pricing_or_category_refinement_request``) as an
+up-front skip gate, in the SAME precedence order ``resolve_action_turn``
+itself already applies -- not a new phrase/stem list. See
+``test_production_enrichment_text_with_coincidental_keep_only_wording_
+still_uses_managed_agent`` below for the regression test, and the full
+managed-agent regression suites (``test_panda_managed_agent_enrichment_
+delegation.py``, ``test_panda_managed_agent_governed_write_confirmation_
+defect_closure.py``) for the broader confirmation that no other turn
+shape is affected.
 """
 
 from __future__ import annotations
@@ -70,7 +93,11 @@ from tests.test_panda_canonical_workset_single_data_ownership import (
     _first_dataset_store,
     _xlsx_bytes,
 )
-from tests.test_panda_managed_agent_enrichment_delegation import _make_fake_run_turn
+from tests.test_panda_managed_agent_enrichment_delegation import (
+    PRODUCTION_TEXT,
+    _make_fake_run_turn,
+    _raw_tool_fields,
+)
 from tests.test_panda_product_enrichment_conversational import _panda, _register_upload
 
 CONVERSATION_ID = "conv-table-exec"
@@ -342,6 +369,60 @@ class CanonicalTableExecutionAcceptanceTests(unittest.IsolatedAsyncioTestCase):
                 )
             )
             self.assertEqual(len(run_turn_calls), 2)
+
+    async def test_production_enrichment_text_with_coincidental_keep_only_wording_still_uses_managed_agent(self):
+        """Regression closure: ``compile_request``'s own loose ``_KEEP_ONLY_RE``
+        grammar spuriously matches "...укажи ТОЛЬКО те поля, для которых..."
+        inside the real production full-card-preparation request as a
+        ``filter_contains`` op that, once executed, DOES report
+        ``status == "OK"`` -- even though the user never asked for a
+        table-wide operation. This turn is an explicit product-enrichment
+        request (``is_explicit_product_enrichment_request``, the SAME
+        pure, pre-existing classifier ``resolve_action_turn`` itself
+        checks with top precedence), so it must be skipped by the
+        canonical-table-execution probe and reach the managed agent
+        exactly as before this fix -- never silently turned into a
+        4-row-losing table filter."""
+        plan = [
+            {
+                "current_identifier": SKU_A,
+                "tool_calls": [
+                    {
+                        "tool": "select_product",
+                        "output": {
+                            "status": "SELECTED",
+                            "matched_by": "next_unspecified",
+                            **_raw_tool_fields(
+                                name=NAME_A, sku=SKU_A, ean="8806096796849",
+                                purchase_price=PURCHASE_A, retail_price=RETAIL_A,
+                            ),
+                        },
+                    }
+                ],
+                "final_output": f"Товар {NAME_A} подготовлен.",
+            }
+        ]
+        fake_run_turn, run_turn_calls = _tracking_fake_run_turn(plan)
+        with mock.patch.object(ManagedAgentPOC, "run_turn", new=fake_run_turn):
+            result = await self.panda.respond(
+                ConversationRequest(
+                    text=PRODUCTION_TEXT,
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="prod-enrich-1",
+                    conversation_id=CONVERSATION_ID,
+                    attachment_refs=(self.artifact_id,),
+                )
+            )
+        self.assertEqual(len(run_turn_calls), 1)
+        self.assertEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
+        self.assertIsNone(result.metadata.get("canonical_table_execution"))
+        # The dataset must NOT have been destructively filtered down to 0
+        # rows by the spurious "keep only" match.
+        store = _first_dataset_store(self.panda)
+        w = self._workset()
+        rows = store.get_rows(w.current_dataset_id, tenant_id=TENANT)
+        self.assertEqual(len(rows), 4)
 
 
 class CompoundScopedOperationContractGapAuditTests(unittest.TestCase):

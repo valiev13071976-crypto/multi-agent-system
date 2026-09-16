@@ -1041,12 +1041,52 @@ class WorkflowPandaConversationGateway:
         returns ``None``.
 
         Adds no agent, router, dataset store, executor, or NL vocabulary
-        of its own: ``compile_request``'s existing, bounded RU/EN grammar
-        (percent adjustment, price/column filters, dedupe, column add/
-        remove/rename, ...) is the ONLY thing that decides whether this
-        text is a canonical table operation -- this method contributes no
-        phrase/stem list, and changing the request's wording or numeric
-        values requires zero change here."""
+        of its own: once past the precedence guard below, ``compile_
+        request``'s existing, bounded RU/EN grammar (percent adjustment,
+        price/column filters, dedupe, column add/remove/rename, ...) is
+        the ONLY thing that decides whether this text is a canonical
+        table operation -- this method contributes no phrase/stem list of
+        its own, and changing the request's wording or numeric values
+        requires zero change here.
+
+        PRECEDENCE GUARD (regression closure): ``compile_request``'s own
+        ``_KEEP_ONLY_RE``/price-filter grammar is intentionally loose --
+        e.g. a long free-text product-enrichment instruction that happens
+        to contain "...укажи ТОЛЬКО те поля, для которых..." spuriously
+        compiles into a validated (and, once run, ``status == "OK")``
+        ``filter_contains`` plan, even though the user never asked for a
+        table-wide operation at all. ``resolve_action_turn`` (the EXISTING
+        legacy-path router this method must not compete with, see its own
+        module) already resolves EXACTLY this ambiguity via a fixed
+        precedence chain: an explicit product-enrichment / Bitrix-write-
+        plan-question / pricing-or-category-refinement / write-confirmation
+        request is dispatched to ITS OWN dedicated resolver and never
+        reaches its generic FAMILY_EXCEL/``data.excel_assistant`` dispatch
+        at all. Reusing those SAME four pure, already-existing, text-only
+        predicates here (in the SAME precedence order) as an up-front skip
+        gate is not a new phrase/stem list -- it is the identical
+        arbitration ``resolve_action_turn`` already performs, applied
+        before this method's own probe so a compiled-but-spurious plan can
+        never preempt the managed agent's product-enrichment/write-plan
+        delegation for one of these turns. None of the four predicates take
+        ``store``/``active`` or mutate any state -- calling them here has
+        zero side effects, unlike calling ``resolve_action_turn`` itself
+        would."""
+        from business_assistant.action_continuation import (
+            is_bitrix_write_plan_question,
+            is_explicit_bitrix_write_confirmation,
+            is_explicit_product_enrichment_request,
+            is_explicit_product_pricing_or_category_refinement_request,
+        )
+
+        if (
+            is_explicit_bitrix_write_confirmation(text)
+            or is_explicit_product_enrichment_request(text)
+            or is_bitrix_write_plan_question(text)
+            or is_explicit_product_pricing_or_category_refinement_request(text)
+        ):
+            return None
+
         if self._tool_gateway is None:
             return None
         tenant_id = str(request.tenant_id or "")
