@@ -141,6 +141,16 @@ REASON_MODEL_MARKED_NOT_APPLICABLE = "model_marked_not_applicable"
 # misinterpret two-value tag).
 KIND_TABLE_OPERATION = "table_operation"
 KIND_NOT_APPLICABLE = "not_applicable"
+KIND_PRODUCT_SELECTION = "product_selection"
+
+
+class ModelProductSelection(Exception):
+    """Validated semantic request to select/inspect one canonical row."""
+
+    def __init__(self, selector_kind: str, value: Any):
+        self.selector_kind = selector_kind
+        self.value = value
+        super().__init__(f"{selector_kind}:{value}")
 
 _ALLOWED_OPS = (
     OP_PERCENT_ROUND,
@@ -164,7 +174,8 @@ _COLUMN_ID_REQUIRED_OPS = (
     OP_REMOVE_COLUMN,
     OP_RENAME_COLUMN,
 )
-_SCOPE_KINDS = (SCOPE_ALL, SCOPE_ROW_RANGE, SCOPE_REMAINDER)
+SCOPE_SELECTED = "selected"
+_SCOPE_KINDS = (SCOPE_ALL, SCOPE_ROW_RANGE, SCOPE_REMAINDER, SCOPE_SELECTED)
 
 
 class ModelPlanError(Exception):
@@ -245,7 +256,9 @@ def _column_ids(table: TableDescriptor) -> dict[str, str]:
     return {f"c{i}": c.source_name for i, c in enumerate(table.columns)}
 
 
-def _build_prompt(text: str, table: TableDescriptor, row_count: int) -> str:
+def _build_prompt(
+    text: str, table: TableDescriptor, row_count: int, *, selected_row_index: int | None = None
+) -> str:
     column_ids = _column_ids(table)
     column_lines = "\n".join(f'  {cid} = "{name}"' for cid, name in column_ids.items())
     return (
@@ -253,14 +266,16 @@ def _build_prompt(text: str, table: TableDescriptor, row_count: int) -> str:
         "Respond with ONLY a single JSON object -- no prose, no markdown code fences, "
         "no explanation before or after it.\n\n"
         f"Table columns (id = exact name):\n{column_lines}\n"
-        f"Current row count: {row_count}\n\n"
+        f"Current row count: {row_count}\n"
+        f"Conversation selection: {'row ' + str(selected_row_index) if selected_row_index is not None else 'none'}\n\n"
         "Output JSON schema:\n"
         "{\n"
-        '  "kind": "table_operation" | "not_applicable",\n'
+        '  "kind": "table_operation" | "product_selection" | "not_applicable",\n'
+        '  "selector": {"kind": "ordinal" | "identifier" | "current", "value": <zero-based integer for ordinal, exact identifier text for identifier>},\n'
         '  "wants_workbook": <bool, only for "table_operation">,\n'
         '  "operations": [\n'
         "    {\n"
-        '      "scope": {"kind": "all" | "row_range" | "remainder", "start": <int, only for row_range>, "end": <int, only for row_range>},\n'
+        '      "scope": {"kind": "all" | "selected" | "row_range" | "remainder", "start": <int, only for row_range>, "end": <int, only for row_range>},\n'
         '      "column_id": <one of the column ids above, e.g. "c0" -- NEVER the actual column name>,\n'
         '      "operation": "percent_round" | "add_column_percent" | "filter_contains" | "filter_compare" | "sort" | "limit" | "remove_column" | "rename_column" | "dedup",\n'
         '      "value": <string or number, meaning depends on "operation" -- e.g. the signed percent for percent_round/add_column_percent, the comparison operator threshold for filter_compare, the substring for filter_contains, the row count for limit>,\n'
@@ -274,19 +289,20 @@ def _build_prompt(text: str, table: TableDescriptor, row_count: int) -> str:
         "as given, never the column's actual name (some column names contain punctuation/commas and are easy "
         "to reproduce incorrectly; the id avoids that entirely). Only \"new_column\" for add_column_percent/"
         "rename_column is a real, brand-new NAME you invent (it does not exist yet, so it has no id).\n\n"
+        'Set "kind" to "product_selection" when the user asks to select, navigate to, inspect, or show the card '
+        'of one row. Resolve any natural-language ordinal in any language to a zero-based integer; copy an '
+        'explicit SKU/EAN/article as an identifier; use current only for the already selected item. '
         'Set "kind" to "not_applicable" ONLY when the user is NOT asking to transform/filter/sort/deduplicate '
-        'this table at all -- for example: analyzing/summarizing the table, selecting or inspecting one '
-        "specific product/row, preparing a product card, or asking what would be written to an external "
+        'or select/inspect a row -- for example: analyzing/summarizing the table, preparing a product card '
+        "without enough selection context, or asking what would be written to an external "
         'system with no accompanying local table change. Set "kind" to "table_operation" for a genuine '
         "table-wide (or table-subset) mutation/filter/sort/dedup request.\n"
-        'IMPORTANT: also set "kind" to "not_applicable" when the request refers to a single, already-'
-        'selected/discussed item by reference rather than by an explicit table-wide criterion -- e.g. '
-        '"this product\'s price", "set its price to X", "for this item" -- with NO explicit multi-row '
-        "criterion (an ordinal range like \"the first N rows\", a percentage split across the whole table, "
-        "a filter/sort/dedup condition, or \"all rows\"/\"every product\"). You are given the table's shape "
-        "only, never which single row (if any) the conversation currently has in focus, so you cannot safely "
-        "resolve \"this product\"/\"it\" to one specific row -- guessing that it means every row would be "
-        "wrong. That case is handled elsewhere; correctly say not_applicable instead of guessing.\n"
+        'When a current selection is supplied and the request changes that item by conversational reference '
+        '(for example "it", "this product", or an omitted subject), use scope "selected". Never turn that '
+        'into scope "all". If the user explicitly requests multiple rows/the whole table, use row_range, '
+        'remainder, or all instead: a selection is a default conversational focus, not a restriction. If no '
+        'selection is supplied, scope "selected" is invalid. These rules are semantic and apply in every '
+        'language. A simultaneous request to show the card does not make the local table change inapplicable.\n'
         "IMPORTANT: a request to modify/filter/sort rows in THIS table is a table_operation even when the "
         "SAME request also explicitly says not to write/publish/export the result anywhere else (e.g. "
         '"...do not write this to Bitrix/CRM/any external system") -- that is a separate, local-only-scope '
@@ -331,7 +347,9 @@ def _validate_decimal(value: Any) -> Decimal:
         _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_NUMERIC_VALUE, repr(value))
 
 
-def _validate_scope(raw_scope: Any, *, row_count: int) -> OperationScope:
+def _validate_scope(
+    raw_scope: Any, *, row_count: int, selected_row_index: int | None = None
+) -> OperationScope:
     if raw_scope is None:
         return OperationScope(kind=SCOPE_ALL)
     if not isinstance(raw_scope, dict):
@@ -341,6 +359,10 @@ def _validate_scope(raw_scope: Any, *, row_count: int) -> OperationScope:
         _fail(STATUS_VALIDATION_ERROR, REASON_UNKNOWN_SCOPE_KIND, kind)
     if kind in (SCOPE_ALL, SCOPE_REMAINDER):
         return OperationScope(kind=kind)
+    if kind == SCOPE_SELECTED:
+        if selected_row_index is None or not 0 <= selected_row_index < row_count:
+            _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_ROW_RANGE, "selected")
+        return OperationScope(kind=SCOPE_ROW_RANGE, start=selected_row_index, end=selected_row_index + 1)
     try:
         start = int(raw_scope.get("start"))
         end = int(raw_scope.get("end"))
@@ -366,13 +388,21 @@ def _resolve_column_id(raw_op: dict, *, column_by_id: dict[str, str]) -> str:
     return resolved
 
 
-def _validate_operation(raw_op: Any, *, column_by_id: dict[str, str], row_count: int) -> PlannedOperation:
+def _validate_operation(
+    raw_op: Any,
+    *,
+    column_by_id: dict[str, str],
+    row_count: int,
+    selected_row_index: int | None = None,
+) -> PlannedOperation:
     if not isinstance(raw_op, dict):
         _fail(STATUS_PARSE_ERROR, REASON_MALFORMED_OPERATION)
     op_name = str(raw_op.get("operation") or "")
     if op_name not in _ALLOWED_OPS:
         _fail(STATUS_VALIDATION_ERROR, REASON_DISALLOWED_OPERATION, op_name)
-    scope = _validate_scope(raw_op.get("scope"), row_count=row_count)
+    scope = _validate_scope(
+        raw_op.get("scope"), row_count=row_count, selected_row_index=selected_row_index
+    )
 
     column = None
     if op_name in _COLUMN_ID_REQUIRED_OPS:
@@ -427,6 +457,7 @@ async def compile_request_via_model(
     row_count: int,
     *,
     model_call: ModelCall | None = None,
+    selected_row_index: int | None = None,
 ) -> OperationPlan:
     """Make ONE model call to interpret ``text`` against ``table``'s own
     schema (exposed as stable column ids, never raw names -- see
@@ -442,7 +473,7 @@ async def compile_request_via_model(
     module docstring / PR #93)."""
 
     column_by_id = _column_ids(table)
-    prompt = _build_prompt(text, table, row_count)
+    prompt = _build_prompt(text, table, row_count, selected_row_index=selected_row_index)
 
     if model_call is None:
         try:
@@ -481,6 +512,30 @@ async def compile_request_via_model(
         _fail(STATUS_PARSE_ERROR, REASON_NOT_JSON)
 
     kind = payload.get("kind")
+    if kind == KIND_PRODUCT_SELECTION:
+        selector = payload.get("selector")
+        if not isinstance(selector, dict):
+            _fail(STATUS_PARSE_ERROR, REASON_INVALID_KIND, "missing selector")
+        selector_kind = str(selector.get("kind") or "")
+        value = selector.get("value")
+        if selector_kind == "ordinal":
+            try:
+                value = int(value)
+            except (TypeError, ValueError):
+                _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_ROW_RANGE, repr(value))
+            if value < 0 or value >= row_count:
+                _fail(STATUS_VALIDATION_ERROR, REASON_ROW_RANGE_OUT_OF_BOUNDS, str(value))
+        elif selector_kind == "identifier":
+            value = str(value or "").strip()
+            if not value:
+                _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_KIND, "empty identifier")
+        elif selector_kind == "current":
+            if selected_row_index is None:
+                _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_ROW_RANGE, "no current selection")
+            value = selected_row_index
+        else:
+            _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_KIND, selector_kind)
+        raise ModelProductSelection(selector_kind, value)
     if kind == KIND_NOT_APPLICABLE:
         _fail(STATUS_NOT_APPLICABLE, REASON_MODEL_MARKED_NOT_APPLICABLE)
     if kind != KIND_TABLE_OPERATION:
@@ -491,7 +546,13 @@ async def compile_request_via_model(
         _fail(STATUS_PARSE_ERROR, REASON_NO_OPERATIONS)
 
     operations = tuple(
-        _validate_operation(raw_op, column_by_id=column_by_id, row_count=row_count) for raw_op in raw_ops
+        _validate_operation(
+            raw_op,
+            column_by_id=column_by_id,
+            row_count=row_count,
+            selected_row_index=selected_row_index,
+        )
+        for raw_op in raw_ops
     )
 
     plan = OperationPlan(

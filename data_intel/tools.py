@@ -253,6 +253,7 @@ class DataIntelToolAdapter:
             dataset_id,
             text,
             tenant_id=tenant,
+            selected_identifiers=tuple(str(x) for x in (args.get("selected_identifiers") or ())),
         )
         if result.get("status") == "OK" and result.get("wants_workbook"):
             reg = self._svc.register_generated_workbook(

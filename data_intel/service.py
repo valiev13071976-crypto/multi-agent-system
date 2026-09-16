@@ -1093,6 +1093,7 @@ class DataIntelligenceService:
         *,
         tenant_id: str,
         model_call=None,
+        selected_identifiers: tuple[str, ...] = (),
     ) -> dict:
         """CANONICAL TABLE EXECUTION -- ONE-shot model-call semantic
         boundary (replaces ``compile_request`` as the PRIMARY interpreter
@@ -1127,10 +1128,60 @@ class DataIntelligenceService:
         rows = self.store.get_rows(dataset_id, tenant_id=tenant_id, table_id=table.table_id)
         assert_sync_data_allowed(row_count=len(rows), operations=("nl_plan_via_model",))
 
-        from data_intel.nl_plan_llm import ModelPlanError, compile_request_via_model
+        from data_intel.nl_plan_llm import (
+            ModelPlanError,
+            ModelProductSelection,
+            compile_request_via_model,
+        )
+
+        selected_row_index = None
+        selected_identifier = str(selected_identifiers[0]).strip() if len(selected_identifiers) == 1 else ""
+        if selected_identifier:
+            needle = selected_identifier.casefold()
+            hits = [
+                index
+                for index, row in enumerate(rows)
+                if any(str(value).strip().casefold() == needle for value in row.values())
+            ]
+            if len(hits) == 1:
+                selected_row_index = hits[0]
 
         try:
-            plan = await compile_request_via_model(text, table, len(rows), model_call=model_call)
+            plan = await compile_request_via_model(
+                text,
+                table,
+                len(rows),
+                model_call=model_call,
+                selected_row_index=selected_row_index,
+            )
+        except ModelProductSelection as selection:
+            row_index = None
+            matched_value = ""
+            if selection.selector_kind in ("ordinal", "current"):
+                row_index = int(selection.value)
+                matched_value = str(row_index + 1)
+            else:
+                needle = str(selection.value).strip().casefold()
+                hits = [
+                    index
+                    for index, row in enumerate(rows)
+                    if any(str(value).strip().casefold() == needle for value in row.values())
+                ]
+                if len(hits) == 1:
+                    row_index = hits[0]
+                    matched_value = str(selection.value)
+            if row_index is None or not 0 <= row_index < len(rows):
+                return {
+                    "status": "AMBIGUOUS",
+                    "dataset_id": dataset_id,
+                    "message_safe": "Не удалось однозначно выбрать товар.",
+                }
+            return self._row_lookup_result(
+                dataset_id,
+                (rows[row_index], selection.selector_kind, matched_value),
+                "",
+                table,
+            )
         except ModelPlanError as exc:
             return {
                 "status": exc.status,
@@ -1178,7 +1229,7 @@ class DataIntelligenceService:
             tenant=tenant_id,
         )
 
-        return {
+        out = {
             "status": "OK",
             "dataset_id": new_dataset_id,
             "previous_dataset_id": dataset_id,
@@ -1191,6 +1242,24 @@ class DataIntelligenceService:
             "preview_rows": self._bounded_preview(result.rows, new_table.columns),
             "wants_workbook": plan.wants_workbook,
         }
+        if selected_row_index is not None:
+            selected_was_targeted = any(
+                op.scope.kind == "row_range"
+                and op.scope.start == selected_row_index
+                and op.scope.end == selected_row_index + 1
+                for op in plan.operations
+            )
+            if selected_was_targeted and selected_row_index < len(result.rows):
+                selected = self._row_lookup_result(
+                    new_dataset_id,
+                    (result.rows[selected_row_index], "selection", selected_identifier),
+                    "",
+                    new_table,
+                )
+                out["selected_product"] = selected
+                out["result_scope"] = "SINGLE"
+                out["selected_identifiers"] = [selected_identifier]
+        return out
 
     def register_generated_workbook(
         self,

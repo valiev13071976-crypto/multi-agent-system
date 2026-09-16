@@ -123,6 +123,14 @@
             wrap.appendChild(downloadBtn);
           }
           el.appendChild(wrap);
+        } else if (/^\[[^\]]+]\((\/api\/v1\/business-assistant\/artifacts\/[^)]+|https:\/\/[^)]+)\)$/.test(trimmed)) {
+          const match = trimmed.match(/^\[([^\]]+)]\(([^)]+)\)$/);
+          const a = document.createElement("a");
+          a.href = match[2];
+          a.textContent = match[1];
+          a.rel = "noopener noreferrer";
+          a.target = "_blank";
+          el.appendChild(a);
         } else if (/^https?:\/\//i.test(trimmed)) {
           const a = document.createElement("a");
           a.href = trimmed;

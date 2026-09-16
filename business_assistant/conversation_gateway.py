@@ -1051,6 +1051,7 @@ class WorkflowPandaConversationGateway:
         from business_assistant.action_continuation import (
             EXCEL_CONTRACT,
             FAMILY_EXCEL,
+            artifacts_from_tool_data,
             format_tool_user_text,
             mark_executed,
         )
@@ -1070,6 +1071,9 @@ class WorkflowPandaConversationGateway:
             "text": text,
             "dataset_id": workset.current_dataset_id,
             "use_model_plan": True,
+            "conversation_id": conversation_id,
+            "workset_scope": workset.scope,
+            "selected_identifiers": list(workset.selected_identifiers),
         }
 
         tool_request = ToolRequest(
@@ -1093,20 +1097,75 @@ class WorkflowPandaConversationGateway:
         data = dict(getattr(result, "data", None) or {})
         status = str(data.get("status") or "")
 
+        if status == "ROW_FOUND":
+            next_workset = workset_lib.apply_tool_result(workset, data)
+            workset_lib.apply_to_task(task, next_workset)
+            fields = data.get("product_fields")
+            if isinstance(fields, dict):
+                task.parameters["bitrix_product_fields"] = dict(fields)
+            # Selection is one atomic identity transition: no enrichment or
+            # pending-write payload belonging to the previous SKU survives.
+            task.parameters.pop("bitrix_enrichment_write_request", None)
+            task.parameters.pop("product_enrichment_result", None)
+            task.parameters["bitrix_retail_price_preview"] = str(
+                data.get("retail_price_preview") or ""
+            )
+            self._action_store.put(task)
+            mark_executed(self._action_store, task, failed=False)
+            return ConversationResult(
+                text=format_tool_user_text(
+                    family=FAMILY_EXCEL, data=data, success=True, artifacts=[]
+                ),
+                task_id=task.task_id,
+                metadata={
+                    "action_decision": "SELECT_CANONICAL_PRODUCT",
+                    "artifacts": [],
+                    "canonical_product_selection": True,
+                },
+            )
+
         if status == "OK":
             new_dataset_id = str(data.get("dataset_id") or "")
             if new_dataset_id:
-                workset_lib.apply_to_task(task, workset_lib.apply_tool_result(workset, data))
+                if data.get("result_scope") == workset_lib.SCOPE_SINGLE:
+                    selected = tuple(str(x) for x in (data.get("selected_identifiers") or ()))
+                    next_workset = workset_lib.advance_dataset_version(
+                        workset,
+                        dataset_id=new_dataset_id,
+                        scope=workset_lib.SCOPE_SINGLE,
+                        identifiers=selected,
+                    )
+                    product = data.get("selected_product")
+                    if isinstance(product, dict):
+                        fields = product.get("product_fields")
+                        if isinstance(fields, dict):
+                            task.parameters["bitrix_product_fields"] = dict(fields)
+                        task.parameters.pop("bitrix_enrichment_write_request", None)
+                        task.parameters["bitrix_retail_price_preview"] = str(
+                            product.get("retail_price_preview") or ""
+                        )
+                else:
+                    next_workset = workset_lib.apply_tool_result(workset, data)
+                workset_lib.apply_to_task(task, next_workset)
                 self._action_store.put(task)
-            mark_executed(self._action_store, task, failed=False)
+            artifacts = artifacts_from_tool_data(data, tool_id=EXCEL_CONTRACT.tool_id)
+            mark_executed(
+                self._action_store,
+                task,
+                artifact_ids=tuple(str(a.get("ref") or "") for a in artifacts if a.get("ref")),
+                failed=False,
+            )
 
-            reply = format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[])
+            reply = format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=artifacts)
+            selected = data.get("selected_product")
+            if isinstance(selected, dict) and selected.get("summary_text"):
+                reply = f"{reply}\n\n{selected['summary_text']}"
             return ConversationResult(
                 text=reply,
                 task_id=task.task_id,
                 metadata={
                     "action_decision": "CALL_TOOL",
-                    "artifacts": [],
+                    "artifacts": artifacts,
                     "follow_up_kind": None,
                     "canonical_table_execution": True,
                     "table_operation_preview": _table_operation_preview(data),
