@@ -1105,10 +1105,17 @@ class DataIntelligenceService:
         operation already uses. ``text`` is never sent through
         ``compile_request`` or any other language classifier after this.
 
-        Never raises for "not a table operation"/invalid-model-output --
-        returns ``status == "NOT_APPLICABLE"`` instead (mirrors
-        ``execute_nl_request``'s own non-"OK" statuses), so the caller can
-        defer to its existing fallback routing rather than guessing.
+        Never raises for a failed/non-applicable attempt -- returns the
+        model-plan compiler's own typed ``status`` instead (``NOT_
+        APPLICABLE`` / ``MODEL_ERROR`` / ``PARSE_ERROR`` /
+        ``VALIDATION_ERROR``, see ``data_intel.nl_plan_llm.ModelPlanError``)
+        plus a ``reason_code``, so the caller can -- and, per
+        ``business_assistant.conversation_gateway``'s PR #93 defect
+        closure, MUST -- distinguish a genuine, validly-parsed ``NOT_
+        APPLICABLE`` judgment (safe to defer to other routing) from every
+        other, TECHNICAL failure of this boundary itself (which must fail
+        closed instead of being silently reinterpreted as an unrelated
+        workflow).
         """
 
         desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
@@ -1120,12 +1127,17 @@ class DataIntelligenceService:
         rows = self.store.get_rows(dataset_id, tenant_id=tenant_id, table_id=table.table_id)
         assert_sync_data_allowed(row_count=len(rows), operations=("nl_plan_via_model",))
 
-        from data_intel.nl_plan_llm import ModelPlanNotApplicable, compile_request_via_model
+        from data_intel.nl_plan_llm import ModelPlanError, compile_request_via_model
 
         try:
             plan = await compile_request_via_model(text, table, len(rows), model_call=model_call)
-        except ModelPlanNotApplicable as exc:
-            return {"status": "NOT_APPLICABLE", "dataset_id": dataset_id, "message_safe": str(exc)}
+        except ModelPlanError as exc:
+            return {
+                "status": exc.status,
+                "dataset_id": dataset_id,
+                "reason_code": exc.reason_code,
+                "message_safe": str(exc),
+            }
 
         result = execute_plan(rows, table.columns, plan)
         new_dataset_id = new_id("ds-")
