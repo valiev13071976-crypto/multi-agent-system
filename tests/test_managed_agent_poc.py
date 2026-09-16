@@ -203,15 +203,12 @@ class ToolSchemaDerivationTests(unittest.TestCase):
             sys.modules.pop(name, None)
         sys.path[:] = cls._sys_path_before
 
-    def test_exactly_four_tools(self):
-        self.assertEqual(len(self.mod._TOOLS), 4)
+    def test_exactly_three_tools(self):
+        self.assertEqual(len(self.mod._TOOLS), 3)
 
     def test_tool_names(self):
         names = {t.name for t in self.mod._TOOLS}
-        self.assertEqual(
-            names,
-            {"analyze_spreadsheet", "select_product", "explain_bitrix_write_plan", "apply_scoped_price_rules"},
-        )
+        self.assertEqual(names, {"analyze_spreadsheet", "select_product", "explain_bitrix_write_plan"})
 
     def test_descriptions_are_derived_from_docstrings_not_hardcoded(self):
         by_name = {t.name: t for t in self.mod._TOOLS}
@@ -328,102 +325,6 @@ class ManagedAgentOrchestrationTests(_EnabledFlagMixin, unittest.TestCase):
         self.assertEqual(turn2.tool_calls[0]["output"]["sku"], SKU_B, "must select a DIFFERENT product than turn 1")
         self.assertEqual(turn2.current_identifier, SKU_B)
         self.assertEqual(turn2.shown_identifiers, [SKU_A, SKU_B])
-
-    def test_scoped_price_rules_tool_applies_compound_percentages(self):
-        """Business-task-ownership/workset-continuation defect closure (PR
-        #90 correction): a COMPOUND request -- two DIFFERENT percent
-        changes for two DIFFERENT, non-overlapping row scopes in ONE call
-        -- runs through the REAL isolated subprocess (real ingestion,
-        real ``DataIntelligenceService.execute_scoped_price_rules``, real
-        ``data_intel.nl_ops.validate_scoped_price_rules``/``data_intel.
-        transform.execute_scoped_percent_rules``), with only the model's
-        OWN tool-selection/argument-filling decision scripted -- exactly
-        the same rigor ``test_case1_product_intent_selects_one_product_
-        no_write`` above already applies to ``select_product``."""
-        result = self.poc.run_turn(
-            text="Первым двум позициям +10% к розничной цене, остальным -5%.",
-            tenant_id="tenant-a",
-            conversation_id="conv-scoped",
-            artifact_bytes_path=self.xlsx_path,
-            artifact_filename=FILENAME,
-            test_scripted_plan=[
-                {
-                    "call_tool": "apply_scoped_price_rules",
-                    "arguments": {
-                        "rules": [
-                            {
-                                "scope": {
-                                    "kind": "row_position_range",
-                                    "start_position": 1,
-                                    "end_position": 2,
-                                },
-                                "price_field": "retail_price",
-                                "percent": 10,
-                            },
-                            {
-                                "scope": {"kind": "remainder"},
-                                "price_field": "retail_price",
-                                "percent": -5,
-                            },
-                        ]
-                    },
-                },
-                {"final_output": "Applied the compound scoped price rules."},
-            ],
-        )
-        self.assertEqual(result.status, "COMPLETED", result.error)
-        self.assertEqual(result.tool_calls[0]["tool"], "apply_scoped_price_rules")
-        output = result.tool_calls[0]["output"]
-        self.assertEqual(output["status"], "OK")
-        self.assertEqual(output["rows_changed"], 3)
-        self.assertNotIn("content_b64", output, "raw workbook bytes must never reach the model's tool output")
-        by_sku = {row["identifier"]: row for row in output["preview_rows"]}
-        self.assertEqual(by_sku[SKU_A]["after"], "142989.00")
-        self.assertEqual(by_sku[SKU_B]["after"], "153989.00")
-        self.assertEqual(by_sku[SKU_C]["after"], "142490.50")
-        # Changing the numeric values above (10/-5, or the row range) would
-        # require ZERO changes to any production code -- only the scripted
-        # tool ARGUMENTS in this test (and, in production, the model's own
-        # interpretation of different free-text numbers) change.
-        self.assertEqual(result.dataset_id, output["dataset_id"], "the tool must advance this conversation's dataset_id")
-
-        # The bridging workbook (base64 bytes for the SAME derived dataset)
-        # must be available to ``main()``'s response -- but NEVER inside
-        # the tool's own model-visible JSON output above.
-        self.assertIsInstance(result.scoped_rules_workbook, dict)
-        self.assertTrue(result.scoped_rules_workbook.get("content_b64"))
-        self.assertTrue(result.scoped_rules_workbook.get("filename"))
-
-    def test_scoped_price_rules_tool_rejects_invalid_rules(self):
-        """An unresolvable/invalid rule set (here: an unknown scope kind)
-        must be reported as a typed, non-crashing rejection -- never a
-        subprocess error, never a silent guess."""
-        result = self.poc.run_turn(
-            text="Сделай что-то странное с ценами.",
-            tenant_id="tenant-a",
-            conversation_id="conv-scoped-invalid",
-            artifact_bytes_path=self.xlsx_path,
-            artifact_filename=FILENAME,
-            test_scripted_plan=[
-                {
-                    "call_tool": "apply_scoped_price_rules",
-                    "arguments": {
-                        "rules": [
-                            {
-                                "scope": {"kind": "text_contains", "text_field": "brand", "contains": ""},
-                                "price_field": "retail_price",
-                                "percent": 5,
-                            },
-                        ]
-                    },
-                },
-                {"final_output": "Could not apply the requested change."},
-            ],
-        )
-        self.assertEqual(result.status, "COMPLETED", result.error)
-        output = result.tool_calls[0]["output"]
-        self.assertEqual(output["status"], "UNSUPPORTED")
-        self.assertIsNone(result.scoped_rules_workbook)
 
     def test_explain_write_plan_tool_never_writes(self):
         turn1 = self.poc.run_turn(

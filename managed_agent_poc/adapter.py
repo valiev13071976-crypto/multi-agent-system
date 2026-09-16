@@ -59,12 +59,6 @@ class ManagedAgentTurnResult:
     error: str = ""
     model: str = ""
     usage: dict | None = None
-    # Business-task-ownership/workset-continuation defect closure (PR #90
-    # correction): set only after a successful ``apply_scoped_price_
-    # rules`` tool call this turn -- see ``runtime_subprocess.
-    # ConversationState.scoped_rules_workbook`` for why this never passes
-    # through the model's own context/tool-output.
-    scoped_rules_workbook: dict | None = None
 
 
 class ManagedAgentPOC:
@@ -168,5 +162,4 @@ class ManagedAgentPOC:
             error=str(payload.get("error") or ""),
             model=str(payload.get("model") or ""),
             usage=payload.get("usage"),
-            scoped_rules_workbook=payload.get("scoped_rules_workbook"),
         )
