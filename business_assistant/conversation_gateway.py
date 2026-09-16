@@ -256,6 +256,45 @@ def extract_assistant_text(result: dict[str, Any]) -> str:
     return select_canonical_final_answer(result if isinstance(result, dict) else {})
 
 
+def _table_operation_preview(data: dict[str, Any]) -> dict[str, Any]:
+    """Concrete before/after preview for a canonical-table-execution
+    result: for each affected row, exposes the affected column, the
+    applied operation/parameters/scope, and its source/resulting value.
+
+    Built ENTIRELY from ``row_changes`` -- the EXECUTOR's OWN record
+    (``data_intel.transform.TransformResult.row_changes``, produced while
+    ``execute_plan`` actually mutates each row, never reconstructed
+    afterwards by inverting a specific operation's formula) of exactly
+    which row a given rule's ``scope`` touched. This is what makes a
+    COMPOUND request (scope A -> operation A, remainder -> operation B)
+    preview correctly: each row's own "before"/"after" came from
+    whichever rule actually touched it, not a single global percent."""
+    changed_rows: list[dict[str, Any]] = []
+    for change in list(data.get("row_changes") or []):
+        if not isinstance(change, dict):
+            continue
+        params = dict(change.get("params") or {})
+        before_value = change.get("before")
+        after_value = change.get("after")
+        changed_rows.append(
+            {
+                "row": dict(change.get("row_after") or {}),
+                "column": change.get("column"),
+                "operation": change.get("operation"),
+                "percent": params.get("percent"),
+                "scope": dict(change.get("scope") or {}),
+                "source_value": "" if before_value is None else str(before_value),
+                "resulting_value": "" if after_value is None else str(after_value),
+            }
+        )
+    return {
+        "operations_applied": list(data.get("operations_applied") or []),
+        "row_count_before": data.get("row_count_before"),
+        "row_count_after": data.get("row_count_after"),
+        "changed_rows": changed_rows,
+    }
+
+
 class WorkflowPandaConversationGateway:
     """Routes conversational turns through WorkflowEngine + Router (mode/role=auto)."""
 
@@ -930,6 +969,136 @@ class WorkflowPandaConversationGateway:
         self._action_store.put(task)
         return True
 
+    async def _maybe_execute_canonical_table_operation(
+        self, request: ConversationRequest, text: str
+    ) -> ConversationResult | None:
+        """CANONICAL TABLE EXECUTION -- ONE model semantic call -> validated
+        structured plan -> existing deterministic executor (PR #92
+        correction): the semantic boundary the managed-agent integration
+        boundary above cannot cross on its own -- its 3 read-only tools
+        (``analyze_spreadsheet``/``select_product``/
+        ``explain_bitrix_write_plan``, see ``runtime_subprocess.py``) have
+        no bulk/structural table-transform capability at all, so a real
+        production "increase the retail price for ALL products" turn fell
+        through to a free-text "I can't recalculate this in bulk" answer
+        from the model instead of ever reaching the EXISTING deterministic
+        Data Intelligence executor.
+
+        Gives that EXISTING executor the FIRST and ONLY interpretation of
+        this turn's text, over THIS conversation's canonical Workset (PR
+        #91) current dataset -- the SAME ``data.excel_assistant``/
+        ``assist`` tool call the legacy FAMILY_EXCEL path/``_invoke_tool``
+        below already uses, but with ``use_model_plan=True`` so the
+        adapter routes to ``DataIntelligenceService.
+        execute_structured_plan_via_model`` (ONE call to the EXISTING
+        one-shot model seam ``agents.openai_agent.OpenAIAgent.run``,
+        deterministically validated into an ``OperationPlan`` -- see
+        ``data_intel.nl_plan_llm``) instead of ``compile_request``'s
+        bounded RU/EN regex/stem grammar. ``compile_request`` itself is
+        never consulted here, and ``text`` is never interpreted a second
+        time after the model call returns.
+
+        Returns a concrete ``ConversationResult`` ONLY when the model
+        itself judged this text a genuine table-wide (or table-subset)
+        operation AND its output passed strict deterministic validation
+        AND ``execute_plan`` applied it -- the tool's own
+        ``status == "OK"``. Returns ``None`` for EVERY other outcome (no
+        canonical Workset/dataset yet for this conversation,
+        ``status == "NOT_APPLICABLE"`` -- the model's own judgment that
+        this is a single-product selection/plain analysis/write-plan
+        question/anything else that is not a table-wide operation -- or
+        any tool/model/validation failure) so the caller falls straight
+        through to the existing managed-agent/legacy routing completely
+        unchanged. Nothing is persisted for a ``NOT_APPLICABLE`` outcome
+        (no ``store.save_dataset`` call outside the ``status == "OK"``
+        branch), so a discarded probe here has zero side effects on the
+        shared ``data_intel`` store or on ``ActiveTaskStore``.
+
+        Adds no new agent, router, dataset store, or executor: it is the
+        SAME tool_id/operation, the SAME ``DataIntelligenceService``, and
+        the SAME ``data_intel.transform.execute_plan``. It also adds no
+        phrase/stem list of its own -- arbitration between "table
+        operation" and "not a table operation" (formerly four separate
+        pure predicates checked here as a precedence guard against
+        ``compile_request``'s own overly loose grammar) is now the
+        model's OWN single judgment call, deterministically validated
+        afterwards; changing the request's wording or numeric values, or
+        adding a second scoped rule to the SAME request (e.g. "the first 3
+        rows +7%, everyone else +15%"), requires zero code change here."""
+
+        if self._tool_gateway is None:
+            return None
+        tenant_id = str(request.tenant_id or "")
+        owner_id = str(request.user_id or "")
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id:
+            return None
+
+        from business_assistant.action_continuation import (
+            EXCEL_CONTRACT,
+            FAMILY_EXCEL,
+            format_tool_user_text,
+            mark_executed,
+        )
+        from business_assistant import workset as workset_lib
+        from tools.models import ToolRequest
+
+        task = self._action_store.get(
+            tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id
+        )
+        if task is None or task.family != FAMILY_EXCEL:
+            return None
+        workset = workset_lib.get_workset(task)
+        if workset is None or not workset.current_dataset_id:
+            return None
+
+        args: dict = {
+            "text": text,
+            "dataset_id": workset.current_dataset_id,
+            "use_model_plan": True,
+        }
+
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id="",
+            task_id=task.task_id,
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation=EXCEL_CONTRACT.operation,
+            arguments=args,
+            requested_capabilities=tuple(EXCEL_CONTRACT.required_capabilities),
+            tenant_id=tenant_id,
+            user_id=owner_id,
+            actor_id=f"{tenant_id}:{owner_id}",
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:
+            return None
+        if not getattr(result, "success", False):
+            return None
+        data = dict(getattr(result, "data", None) or {})
+        if str(data.get("status") or "") != "OK":
+            return None
+
+        new_dataset_id = str(data.get("dataset_id") or "")
+        if new_dataset_id:
+            workset_lib.apply_to_task(task, workset_lib.apply_tool_result(workset, data))
+            self._action_store.put(task)
+        mark_executed(self._action_store, task, failed=False)
+
+        reply = format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[])
+        return ConversationResult(
+            text=reply,
+            task_id=task.task_id,
+            metadata={
+                "action_decision": "CALL_TOOL",
+                "artifacts": [],
+                "follow_up_kind": None,
+                "canonical_table_execution": True,
+                "table_operation_preview": _table_operation_preview(data),
+            },
+        )
+
     async def _invoke_controlled_bitrix_write(
         self, request: ConversationRequest, action
     ) -> ConversationResult:
@@ -1509,6 +1678,39 @@ class WorkflowPandaConversationGateway:
                 )
                 if not canonical_established:
                     skip_managed_agent_this_turn = True
+
+            canonical_table_result = None
+            if not skip_managed_agent_this_turn:
+                # CANONICAL TABLE EXECUTION (NL -> structured operation ->
+                # existing deterministic executor): tried BEFORE the
+                # managed-agent boundary below, over THIS conversation's
+                # canonical Workset (established/refreshed above) -- the
+                # managed agent's own 3 read-only tools have no bulk/
+                # structural table-transform capability at all (see
+                # ``runtime_subprocess.py``'s own module docstring), so it
+                # must never "compete" with a genuine table-wide operation
+                # this EXISTING executor can already satisfy deterministically.
+                # Returns a result ONLY when the EXISTING NL->IR compiler
+                # (``data_intel.nl_ops.compile_request``, reached through
+                # the SAME ``data.excel_assistant`` tool call every other
+                # FAMILY_EXCEL turn already uses) actually compiled and
+                # executed a genuine transform this turn -- every other
+                # outcome (no dataset yet, single-row lookup, plain
+                # analysis, ambiguous) returns ``None`` here with zero side
+                # effects, so the managed agent still handles every other
+                # conversational/product turn exactly as before.
+                canonical_table_result = await self._maybe_execute_canonical_table_operation(request, text)
+
+            if canonical_table_result is not None:
+                self._record_latency(t0, follow_up_ms)
+                meta = dict(canonical_table_result.metadata or {})
+                meta["follow_up_kind"] = resolution.kind
+                meta["follow_up_target"] = resolution.target
+                return ConversationResult(
+                    text=canonical_table_result.text,
+                    task_id=canonical_table_result.task_id or task_id,
+                    metadata=meta,
+                )
 
             managed_result = None
             if not skip_managed_agent_this_turn:

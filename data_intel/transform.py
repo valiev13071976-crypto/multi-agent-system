@@ -27,7 +27,42 @@ from data_intel.nl_ops import (
     OP_RENAME_COLUMN,
     OP_SORT,
     OperationPlan,
+    OperationScope,
+    SCOPE_REMAINDER,
+    SCOPE_ROW_RANGE,
 )
+
+# CANONICAL TABLE EXECUTION (compound scoped operations): only these two
+# row-VALUE-mutating operations have per-row scope semantics -- every
+# other operation (filter/sort/limit/dedup/rename/remove-column) is
+# already inherently table-wide/structural and keeps its existing,
+# unscoped behavior regardless of whatever ``scope`` a ``PlannedOperation``
+# happens to carry (compile_request never sets one, and the model-call
+# compiler never attaches one to these either -- see
+# ``data_intel.nl_plan_llm``).
+_SCOPED_ROW_OPS = (OP_PERCENT_ROUND, OP_ADD_COLUMN_PERCENT)
+
+
+def _resolve_scope_indices(scope: OperationScope, *, total: int, covered: set[int]) -> set[int]:
+    """Resolve ``scope`` against the CURRENT row count (i.e. after any
+    earlier filter/sort/dedup in the SAME plan already ran) into the
+    concrete 0-based row indices a scoped operation applies to this call.
+    ``covered`` is the running union of indices already touched by an
+    earlier SCOPED rule in this SAME ``execute_plan`` invocation -- the
+    ONLY state ``SCOPE_REMAINDER`` needs, resolved here deterministically,
+    never guessed by whichever compiler produced the plan."""
+    kind = getattr(scope, "kind", None)
+    if kind == SCOPE_ROW_RANGE:
+        start = max(0, int(scope.start or 0))
+        end = min(total, int(scope.end) if scope.end is not None else total)
+        return set(range(start, max(start, end)))
+    if kind == SCOPE_REMAINDER:
+        return set(range(total)) - covered
+    return set(range(total))
+
+
+def _scope_dict(scope: OperationScope) -> dict:
+    return {"kind": scope.kind, "start": scope.start, "end": scope.end}
 
 
 @dataclass
@@ -38,6 +73,13 @@ class TransformResult:
     row_count_after: int
     applied: list[dict] = field(default_factory=list)
     duplicate_groups: list[dict] = field(default_factory=list)
+    # CANONICAL TABLE EXECUTION (compound scoped operations): the executor's
+    # OWN record of exactly which row/column each rule's ``scope`` actually
+    # touched, captured at mutation time -- never reconstructed afterwards
+    # by inverting a specific operation's formula. Empty for every plan
+    # with no scoped row-mutating operation (unaffected, zero behavior
+    # change for every existing caller of ``execute_plan``).
+    row_changes: list[dict] = field(default_factory=list)
 
 
 def _dec(value: object) -> Decimal | None:
@@ -112,38 +154,40 @@ def _round_value(value: Decimal, *, round_mode: str | None, round_to: object) ->
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _apply_percent_round(rows: list[dict], params: dict) -> list[dict]:
+def _apply_percent_round(rows: list[dict], params: dict, indices: set[int] | None = None) -> list[dict]:
     column = params["column"]
     pct = Decimal(str(params["percent"]))
     round_mode = params.get("round_mode")
     round_to = params.get("round_to")
     out: list[dict] = []
-    for r in rows:
+    for i, r in enumerate(rows):
         row = dict(r)
-        v = _dec(row.get(column))
-        if v is not None:
-            new_v = v * (Decimal("1") + pct / Decimal("100"))
-            new_v = _round_value(new_v, round_mode=round_mode, round_to=round_to)
-            row[column] = format(new_v, "f")
+        if indices is None or i in indices:
+            v = _dec(row.get(column))
+            if v is not None:
+                new_v = v * (Decimal("1") + pct / Decimal("100"))
+                new_v = _round_value(new_v, round_mode=round_mode, round_to=round_to)
+                row[column] = format(new_v, "f")
         out.append(row)
     return out
 
 
-def _apply_add_column_percent(rows: list[dict], params: dict) -> list[dict]:
+def _apply_add_column_percent(rows: list[dict], params: dict, indices: set[int] | None = None) -> list[dict]:
     source = params["source_column"]
     new_col = params["new_column"]
     pct = Decimal(str(params["percent"]))
     out: list[dict] = []
-    for r in rows:
+    for i, r in enumerate(rows):
         row = dict(r)
-        v = _dec(row.get(source))
-        if v is not None:
-            new_v = (v * (Decimal("1") + pct / Decimal("100"))).quantize(
-                Decimal("0.01"), rounding=ROUND_HALF_UP
-            )
-            row[new_col] = format(new_v, "f")
-        else:
-            row[new_col] = None
+        if indices is None or i in indices:
+            v = _dec(row.get(source))
+            if v is not None:
+                new_v = (v * (Decimal("1") + pct / Decimal("100"))).quantize(
+                    Decimal("0.01"), rounding=ROUND_HALF_UP
+                )
+                row[new_col] = format(new_v, "f")
+            else:
+                row[new_col] = None
         out.append(row)
     return out
 
@@ -224,6 +268,13 @@ def execute_plan(
     before = len(current)
     applied: list[dict] = []
     duplicate_groups: list[dict] = []
+    row_changes: list[dict] = []
+    # CANONICAL TABLE EXECUTION (compound scoped operations): the running
+    # union of row indices already touched by an earlier SCOPED rule in
+    # THIS plan -- the only state ``SCOPE_REMAINDER`` needs (see
+    # ``_resolve_scope_indices``). Reset per ``execute_plan`` call, never
+    # persisted -- a later, unrelated plan starts with an empty set.
+    covered_indices: set[int] = set()
 
     for op in plan.operations:
         if op.op == OP_DEDUP:
@@ -235,12 +286,37 @@ def execute_plan(
                     idxs = list(g.get("indices") or [])
                     drop_indices.update(idxs[1:])
                 current = [r for i, r in enumerate(current) if i not in drop_indices]
+        elif op.op in _SCOPED_ROW_OPS:
+            indices = _resolve_scope_indices(op.scope, total=len(current), covered=covered_indices)
+            handler = _DISPATCH[op.op]
+            before_rows = {i: dict(current[i]) for i in indices if i < len(current)}
+            current = handler(current, op.params, indices)
+            column = op.params.get("column") or op.params.get("source_column")
+            result_column = op.params.get("new_column") or column
+            for i in sorted(before_rows):
+                if i >= len(current):
+                    continue
+                before_value = before_rows[i].get(column) if column else None
+                after_value = current[i].get(result_column) if result_column else None
+                row_changes.append(
+                    {
+                        "row_index": i,
+                        "column": result_column,
+                        "operation": op.op,
+                        "params": dict(op.params),
+                        "scope": _scope_dict(op.scope),
+                        "before": before_value,
+                        "after": after_value,
+                        "row_after": dict(current[i]),
+                    }
+                )
+            covered_indices |= indices
         else:
             handler = _DISPATCH.get(op.op)
             if handler is None:
                 continue
             current = handler(current, op.params)
-        applied.append({"op": op.op, "params": dict(op.params)})
+        applied.append({"op": op.op, "params": dict(op.params), "scope": _scope_dict(op.scope)})
 
     new_columns = _update_columns(columns, plan)
     return TransformResult(
@@ -250,4 +326,5 @@ def execute_plan(
         row_count_after=len(current),
         applied=applied,
         duplicate_groups=duplicate_groups,
+        row_changes=row_changes,
     )
