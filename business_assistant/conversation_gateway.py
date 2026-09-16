@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import re
 import time
 import uuid
@@ -885,6 +886,129 @@ class WorkflowPandaConversationGateway:
         task.parameters["dataset_id"] = dataset_id
         self._action_store.put(task)
 
+    async def _persist_managed_agent_table_mutation(
+        self, request: ConversationRequest, metadata: dict
+    ) -> None:
+        """Business-task-ownership/workset-continuation defect closure (PR
+        #90 correction): bridges a managed-agent COMPOUND scoped-table-
+        operation result (the managed agent's own compound scoped-price-
+        rules tool, echoed back via ``panda_bridge.
+        maybe_respond_via_managed_agent``'s ``managed_table_workbook_*``
+        metadata keys -- see that module's own docstring) into the SAME
+        SHARED ``data_intel`` dataset store the legacy engine and
+        ``_maybe_handle_bulk_table_operation`` already read.
+
+        Reuses the EXISTING ``data.ingest``/``ingest`` tool operation
+        ``DataIntelToolAdapter.execute_read`` already exposes for exactly
+        this "derived workbook -> a fresh dataset_id in the shared store"
+        job (the SAME ``DataIntelligenceService`` instance
+        ``data.excel_assistant`` is wired to -- both tool_ids share one
+        ``adapter_id="data_intel"`` registration; see
+        ``tools/platform/bootstrap.py``) -- no new ingestion path, no new
+        store.
+
+        Registers the freshly generated workbook bytes as an ``artifacts.
+        ArtifactService`` artifact FIRST (the SAME registration
+        ``DataIntelligenceService.register_generated_workbook``/
+        ``data.compare_workbooks`` already use for a newly generated
+        result workbook) and then dispatches ``data.ingest`` with a small
+        ``attachment_refs`` reference (an artifact_id, not the raw bytes)
+        -- exactly the SAME reference shape/resolution
+        ``_persist_managed_agent_dataset_context`` above and
+        ``DataIntelToolAdapter._ingest_attachment`` already use for the
+        ORIGINAL user-uploaded attachment. Never inlines the workbook
+        bytes as a ``content_b64`` tool-call ARGUMENT: every real
+        spreadsheet's base64 text is far larger than
+        ``tools.models.MAX_TOOL_ARGUMENT_STRING_LEN`` (4096 chars), so a
+        raw-bytes argument would always be rejected as
+        ``tool_argument_invalid`` before this bridge could ever run --
+        exactly the same "governed tool call, not a bytes-smuggling
+        argument" boundary every other Panda attachment already crosses
+        through ``ArtifactService``, never a second, ungoverned upload
+        path.
+
+        Without this bridge, a LATER single-scope follow-up (routed
+        through ``_maybe_handle_bulk_table_operation``'s existing
+        ``nl_ops`` probe) would keep reading the conversation's STALE
+        pre-compound-transform dataset, silently discarding the compound
+        operation's own result -- exactly the same "two competing owners
+        of the same dataset_id" class of defect this PR already closed
+        for the ORIGINAL attachment ingestion
+        (``_persist_managed_agent_dataset_context`` above), just for a
+        DERIVED dataset instead of the original upload.
+
+        A no-op whenever this turn produced no such workbook (every
+        ordinary managed-agent turn -- ``analyze_spreadsheet``/
+        ``select_product``/``explain_bitrix_write_plan``, or a scoped-
+        rules call that failed validation), whenever no artifact service
+        is wired, or on any dispatch failure -- an already-working
+        managed-agent reply must never be broken by this bookkeeping."""
+        content_b64 = str(metadata.get("managed_table_workbook_content_b64") or "")
+        if not content_b64 or self._tool_gateway is None or self._artifact_service is None:
+            return
+        tenant_id = str(request.tenant_id or "")
+        owner_id = str(request.user_id or "")
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id:
+            return
+
+        filename = str(metadata.get("managed_table_workbook_filename") or "dataset.xlsx")
+        try:
+            content = base64.b64decode(content_b64)
+            artifact_record = self._artifact_service.register_generated(
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                filename=filename,
+                content=content,
+                mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                conversation_id=conversation_id,
+                request_id=str(request.request_id or ""),
+                tool_id="managed_agent_poc.apply_scoped_price_rules",
+            )
+        except Exception:
+            return
+
+        from autonomy.capabilities import CAP_FILESYSTEM_WRITE
+        from tools.models import ToolRequest
+        from tools.platform.descriptors import TOOL_DATA_INGEST
+
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id="",
+            task_id=str(uuid.uuid4()),
+            tool_id=TOOL_DATA_INGEST,
+            operation="ingest",
+            arguments={
+                "attachment_refs": [
+                    {
+                        "kind": "spreadsheet",
+                        "artifact_id": artifact_record.artifact_id,
+                        "filename": artifact_record.safe_filename,
+                    }
+                ]
+            },
+            requested_capabilities=(CAP_FILESYSTEM_WRITE,),
+            tenant_id=tenant_id,
+            user_id=owner_id,
+            actor_id=f"{tenant_id}:{owner_id}",
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:
+            return
+        if not bool(getattr(result, "success", False)):
+            return
+        data = dict(getattr(result, "data", None) or {})
+        dataset_id = str(data.get("dataset_id") or "")
+        if not dataset_id:
+            return
+
+        task = self._get_or_create_family_excel_task(
+            tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id
+        )
+        task.parameters["dataset_id"] = dataset_id
+        self._action_store.put(task)
+
     async def _maybe_handle_bulk_table_operation(
         self, request: ConversationRequest, text: str
     ) -> ConversationResult | None:
@@ -1597,6 +1721,7 @@ class WorkflowPandaConversationGateway:
                 # ``resolve_bitrix_write_confirmation``/
                 # ``_invoke_controlled_bitrix_write`` chain.
                 await self._persist_managed_agent_dataset_context(request, spreadsheet_refs_this_turn)
+                await self._persist_managed_agent_table_mutation(request, meta)
                 self._persist_managed_agent_product_context(request, meta)
                 meta["follow_up_kind"] = resolution.kind
                 meta["follow_up_target"] = resolution.target

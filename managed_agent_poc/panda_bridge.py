@@ -245,6 +245,65 @@ def _redact_for_log(text: str) -> str:
 # pass-through call.
 _PRODUCT_RESOLVING_TOOLS = ("select_product", "explain_bitrix_write_plan")
 
+# Business-task-ownership/workset-continuation defect closure (PR #90
+# correction): the compound scoped-table-operation tool -- see
+# ``managed_agent_poc.runtime_subprocess.apply_scoped_price_rules``. A
+# turn that calls this tool is NEVER a product-selection/write-plan turn
+# (mutually exclusive by tool), so it is handled by its own dedicated
+# branch below, entirely separate from ``_PRODUCT_RESOLVING_TOOLS``.
+_SCOPED_TABLE_TOOL = "apply_scoped_price_rules"
+
+
+def _scoped_table_tool_result(tool_calls: list) -> dict | None:
+    """Returns the LAST ``apply_scoped_price_rules`` tool call's OWN
+    structured, deterministic output this turn (``None`` if that tool was
+    not called), mirroring ``_iter_resolved_product_calls``'s "last call
+    wins" convention."""
+    found: dict | None = None
+    for call in tool_calls or []:
+        if not isinstance(call, Mapping):
+            continue
+        if str(call.get("tool") or "") != _SCOPED_TABLE_TOOL:
+            continue
+        output = call.get("output")
+        if isinstance(output, Mapping):
+            found = dict(output)
+    return found
+
+
+def _format_scoped_table_operation_text(result: Mapping) -> str:
+    """Deterministic rendering of ``apply_scoped_price_rules``'s OWN
+    already-computed preview -- NEVER the model's own paraphrase. Every
+    number here comes straight from ``DataIntelligenceService.
+    execute_scoped_price_rules``'s validated, per-row before/after
+    computation (see ``data_intel.transform.execute_scoped_percent_
+    rules``), so a compound multi-scope request can never surface a
+    hallucinated value, exactly like ``format_write_plan_text``/
+    ``_controlled_preparation_failure_text`` elsewhere in this vertical
+    never let the model's own text stand in for a computed number."""
+    status = str(result.get("status") or "")
+    if status != "OK":
+        message = str(result.get("message_safe") or result.get("reason") or "Не удалось применить правила.")
+        return f"Не удалось применить запрошенные изменения: {message}"
+
+    lines = [str(result.get("summary_text") or "").strip()]
+    preview_rows = result.get("preview_rows")
+    if isinstance(preview_rows, list) and preview_rows:
+        lines.append("")
+        lines.append("Изменённые строки:")
+        for row in preview_rows:
+            if not isinstance(row, Mapping):
+                continue
+            identifier = str(row.get("identifier") or "").strip() or "(без идентификатора)"
+            column = str(row.get("column") or "")
+            before = str(row.get("before") or "")
+            after = str(row.get("after") or "")
+            percent = str(row.get("percent") or "")
+            lines.append(f"- {identifier}: {column} {before} -> {after} ({percent}%)")
+    lines.append("")
+    lines.append("В Bitrix/Aspro ничего не записано и не опубликовано.")
+    return "\n".join(ln for ln in lines if ln is not None)
+
 
 def _iter_resolved_product_calls(tool_calls: list):
     """Shared scan (used by BOTH ``_selected_product_raw_fields`` and
@@ -894,6 +953,32 @@ async def maybe_respond_via_managed_agent(
         "artifacts": [],
         "mutated": False,
     }
+
+    # Business-task-ownership/workset-continuation defect closure (PR #90
+    # correction): a compound scoped-table-operation turn is handled
+    # entirely here, BEFORE the product-selection/write-plan branch below
+    # -- it is never a product resolution (mutually exclusive by tool; see
+    # ``_SCOPED_TABLE_TOOL``). The reply text is the tool's OWN
+    # deterministic preview (never the model's ``final_output``), and the
+    # derived dataset (as freshly generated workbook bytes -- never raw
+    # SQL/dataset internals) is echoed back so
+    # ``WorkflowPandaConversationGateway`` -- the sole owner of
+    # ``ActiveTaskStore`` -- can bridge it into the SAME shared
+    # ``data_intel`` store the legacy engine and ``_maybe_handle_bulk_
+    # table_operation`` already read (see that gateway's own
+    # ``_persist_managed_agent_table_mutation``).
+    scoped_table_result = _scoped_table_tool_result(turn_result.tool_calls)
+    if scoped_table_result is not None:
+        metadata["managed_agent_tool"] = _SCOPED_TABLE_TOOL
+        metadata["preparation_status"] = "SCOPED_TABLE_OPERATION"
+        response_text = _format_scoped_table_operation_text(scoped_table_result)
+        if str(scoped_table_result.get("status") or "") == "OK":
+            metadata["managed_table_dataset_id"] = str(scoped_table_result.get("dataset_id") or "")
+            workbook = turn_result.scoped_rules_workbook
+            if isinstance(workbook, Mapping) and workbook.get("content_b64"):
+                metadata["managed_table_workbook_content_b64"] = str(workbook.get("content_b64") or "")
+                metadata["managed_table_workbook_filename"] = str(workbook.get("filename") or "dataset.xlsx")
+        return {"text": response_text, "metadata": metadata}
 
     # Production defect closure (explicit user retail-price refinement
     # lost between turns): applied BEFORE ``_canonical_fields_and_retail_
