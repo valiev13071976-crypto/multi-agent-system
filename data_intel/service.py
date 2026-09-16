@@ -1095,7 +1095,8 @@ class DataIntelligenceService:
         tenant_id: str,
     ) -> dict:
         """Business-task-ownership/workset-continuation defect closure (PR
-        #90 correction): the deterministic counterpart to
+        #90 correction) -- REUSABLE DETERMINISTIC PRIMITIVE, currently
+        UNWIRED to any production caller: the deterministic counterpart to
         ``execute_nl_request`` for a COMPOUND request that assigns two or
         more DIFFERENT percentage price changes to two or more DIFFERENT,
         non-overlapping row scopes in the SAME turn (e.g. "first three
@@ -1104,13 +1105,13 @@ class DataIntelligenceService:
         specific dictionary of ordinals/"the rest"/etc. (see
         ``data_intel.nl_ops``'s own "Compound scoped-rule contract" note).
 
-        Callers (see the separate, sanctioned managed conversational
-        agent's own ``apply_scoped_price_rules`` tool) must already have
-        used a MODEL to
+        A future caller must already have used a MODEL/semantic seam to
         interpret free text into ``rules`` -- this method only ever
         VALIDATES that structure (``nl_ops.validate_scoped_price_rules``)
         and EXECUTES it (``data_intel.transform.
-        execute_scoped_percent_rules``); it never interprets text itself
+        execute_scoped_percent_rules``), persisting the result as a fresh
+        derived dataset in this SAME ``DataIntelligenceService``/store --
+        never a second dataset universe. It never interprets text itself
         and never runs model-generated code -- only the same whitelisted
         percent/filter/compare primitives ``execute_nl_request`` already
         uses, applied per-scope instead of to the whole table at once.

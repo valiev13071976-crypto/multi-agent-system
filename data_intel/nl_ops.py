@@ -442,7 +442,8 @@ def _compile_column_edits(table: TableDescriptor, text: str, ops: list[PlannedOp
 
 # ---------------------------------------------------------------------------
 # Compound scoped-rule contract (business-task-ownership/workset-
-# continuation defect closure, PR #90 correction).
+# continuation defect closure, PR #90 correction -- REUSABLE DETERMINISTIC
+# PRIMITIVE, currently UNWIRED to any production caller).
 #
 # Unlike every operation above, a COMPOUND request that assigns two or
 # more DIFFERENT transformations to two or more DIFFERENT, non-overlapping
@@ -450,17 +451,20 @@ def _compile_column_edits(table: TableDescriptor, text: str, ops: list[PlannedOp
 # cannot be safely recognized by ``compile_request``'s bounded regex/stem
 # compiler without an ever-growing, wording-specific dictionary (ordinals,
 # "the rest", ...) -- exactly the "finite dictionary of user wording" this
-# project's architecture forbids. The MODEL is the correct place to
-# interpret that free text into a STRUCTURED shape (see the separate,
-# sanctioned managed conversational agent's own ``apply_scoped_price_
-# rules`` tool -- an ordinary typed function-calling tool the model
-# fills in from free text, never a second language router). This
-# module's job is UNCHANGED: validate that
-# structure against a small, explicit, non-extensible whitelist of
-# operation/column/scope shapes BEFORE any arithmetic ever runs, exactly
-# like ``compile_request`` already does for a flat operation list --
-# never evaluate an expression, never accept an arbitrary column name,
-# never accept an operation type outside this whitelist.
+# project's architecture forbids. Interpreting that free text into this
+# STRUCTURED shape requires a model/semantic seam, deliberately NOT wired
+# up in this codebase yet (an earlier revision of this defect closure
+# wired it directly into a managed conversational agent's own tool +
+# private dataset, which reintroduced a private/shared dual-dataset split
+# and was reverted). This module's job is narrower and UNCHANGED either
+# way: validate an already-produced structure against a small, explicit,
+# non-extensible whitelist of operation/column/scope shapes BEFORE any
+# arithmetic ever runs, exactly like ``compile_request`` already does for
+# a flat operation list -- never evaluate an expression, never accept an
+# arbitrary column name, never accept an operation type outside this
+# whitelist. Intended as an Operation-IR building block for the future
+# canonical Workset/structured-operation-plan phase, whichever seam
+# ultimately produces the structure.
 # ---------------------------------------------------------------------------
 
 SCOPE_ROW_POSITION_RANGE = "row_position_range"
@@ -470,12 +474,9 @@ SCOPE_REMAINDER = "remainder"
 _SCOPE_KINDS = (SCOPE_ROW_POSITION_RANGE, SCOPE_TEXT_CONTAINS, SCOPE_PRICE_COMPARE, SCOPE_REMAINDER)
 _COMPARE_OPERATORS = ("gt", "gte", "lt", "lte", "eq")
 
-# The SAME field-name vocabulary the managed conversational agent's
-# existing row-projection tools already expose to the model (its own
-# row-field projection helper's ``role_to_key``) -- never a second
-# naming scheme, and never a raw
-# spreadsheet column header (which varies per uploaded file and the model
-# is never asked to know).
+# A small, fixed semantic field-name vocabulary a future caller supplies
+# instead of a raw spreadsheet column header (which varies per uploaded
+# file and no caller should be required to know).
 PRICE_FIELD_ROLES = {
     "retail_price": ROLE_SELLING_PRICE,
     "purchase_price": ROLE_PURCHASE_PRICE,
