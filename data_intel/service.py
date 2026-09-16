@@ -65,13 +65,14 @@ from data_intel.nl_ops import (
     AmbiguousOperationError,
     UnsupportedOperationError,
     compile_request,
+    validate_scoped_price_rules,
 )
 from data_intel.product_match import match_products
 from data_intel.quality import build_quality_report
 from data_intel.query import aggregate, pivot_report, search_rows
 from data_intel.reconcile import reconcile_payments, reconcile_vat_amounts
 from data_intel.store import InMemoryDatasetStore
-from data_intel.transform import execute_plan
+from data_intel.transform import execute_plan, execute_scoped_percent_rules
 from data_intel.workflow_def import register_data_intel_workflows
 from security.tenant import normalize_tenant_id
 
@@ -1085,6 +1086,130 @@ class DataIntelligenceService:
             "wants_workbook": plan.wants_workbook,
         }
         return out
+
+    def execute_scoped_price_rules(
+        self,
+        dataset_id: str,
+        rules: list,
+        *,
+        tenant_id: str,
+    ) -> dict:
+        """Business-task-ownership/workset-continuation defect closure (PR
+        #90 correction) -- REUSABLE DETERMINISTIC PRIMITIVE, currently
+        UNWIRED to any production caller: the deterministic counterpart to
+        ``execute_nl_request`` for a COMPOUND request that assigns two or
+        more DIFFERENT percentage price changes to two or more DIFFERENT,
+        non-overlapping row scopes in the SAME turn (e.g. "first three
+        rows +7%, the rest +15%") -- a shape ``nl_ops.compile_request``'s
+        single flat operation list cannot express without a wording-
+        specific dictionary of ordinals/"the rest"/etc. (see
+        ``data_intel.nl_ops``'s own "Compound scoped-rule contract" note).
+
+        A future caller must already have used a MODEL/semantic seam to
+        interpret free text into ``rules`` -- this method only ever
+        VALIDATES that structure (``nl_ops.validate_scoped_price_rules``)
+        and EXECUTES it (``data_intel.transform.
+        execute_scoped_percent_rules``), persisting the result as a fresh
+        derived dataset in this SAME ``DataIntelligenceService``/store --
+        never a second dataset universe. It never interprets text itself
+        and never runs model-generated code -- only the same whitelisted
+        percent/filter/compare primitives ``execute_nl_request`` already
+        uses, applied per-scope instead of to the whole table at once.
+
+        Never raises for an invalid/unresolvable rule set -- mirrors
+        ``execute_nl_request``'s own typed-``status`` contract so a caller
+        can react (e.g. report the rejection) instead of guessing."""
+
+        desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
+        if desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        if not desc.tables:
+            raise DataIntelError(DATASET_PARSE_FAILED)
+        table = desc.tables[0]
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id, table_id=table.table_id)
+        assert_sync_data_allowed(row_count=len(rows), operations=("scoped_price_rules",))
+
+        try:
+            resolved_rules = validate_scoped_price_rules(rules, table)
+        except UnsupportedOperationError as exc:
+            return {"status": "UNSUPPORTED", "dataset_id": dataset_id, "message_safe": exc.message_safe}
+
+        result = execute_scoped_percent_rules(rows, table.columns, resolved_rules)
+        new_dataset_id = new_id("ds-")
+        new_table = replace(table, columns=result.columns, row_count=len(result.rows))
+        new_desc = DatasetDescriptor(
+            dataset_id=new_dataset_id,
+            tenant_id=tenant_id,
+            source_document_id=desc.source_document_id,
+            format=desc.format,
+            sheets=desc.sheets,
+            tables=(new_table,),
+            row_count=len(result.rows),
+            column_count=len(new_table.columns),
+            checksum=desc.checksum,
+            provenance={
+                **{k: v for k, v in dict(desc.provenance).items()},
+                "derived_from": dataset_id,
+                "scoped_price_rules_count": len(resolved_rules),
+            },
+        )
+        self.store.save_dataset(new_desc, {table.table_id: result.rows})
+        tx = DataTransformation(
+            operation="scoped_price_rules",
+            input_refs=(dataset_id,),
+            output_ref=new_dataset_id,
+            parameters={"rules": resolved_rules},
+            provenance={"rule_count": len(resolved_rules)},
+        )
+        self.store.save_transformation(tenant_id, tx)
+        self._emit(
+            "data.scoped_price_rules_applied",
+            dataset_id=new_dataset_id,
+            source_dataset_id=dataset_id,
+            rules=len(resolved_rules),
+            rows_changed=len(result.row_changes),
+            tenant=tenant_id,
+        )
+
+        identifier_role_priority = (ROLE_SKU, ROLE_ARTICLE, ROLE_PRODUCT_NAME, ROLE_EAN, ROLE_BARCODE)
+
+        def _identifier(row: dict) -> str:
+            for role in identifier_role_priority:
+                value = _role_value(row, table, role)
+                if value:
+                    return value
+            return ""
+
+        preview_rows = []
+        for change in result.row_changes:
+            row = result.rows[change["row_index"]]
+            preview_rows.append(
+                {
+                    "identifier": _identifier(row),
+                    "column": change["column"],
+                    "before": change["before"],
+                    "after": change["after"],
+                    "percent": change["percent"],
+                    "rule_index": change["rule_index"],
+                }
+            )
+
+        lines = [f"Строк было: {result.row_count_before}, изменено: {len(result.row_changes)}."]
+        for rule_index, rule in enumerate(resolved_rules):
+            matched = sum(1 for c in result.row_changes if c["rule_index"] == rule_index)
+            lines.append(f"Правило {rule_index + 1}: {rule['column']} {rule['percent']}% -- строк: {matched}.")
+
+        return {
+            "status": "OK",
+            "dataset_id": new_dataset_id,
+            "previous_dataset_id": dataset_id,
+            "row_count_before": result.row_count_before,
+            "row_count_after": result.row_count_after,
+            "rules_applied": resolved_rules,
+            "rows_changed": len(result.row_changes),
+            "preview_rows": preview_rows,
+            "summary_text": " ".join(lines),
+        }
 
     def register_generated_workbook(
         self,

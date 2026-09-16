@@ -38,6 +38,11 @@ class TransformResult:
     row_count_after: int
     applied: list[dict] = field(default_factory=list)
     duplicate_groups: list[dict] = field(default_factory=list)
+    # Business-task-ownership/workset-continuation defect closure (PR #90
+    # correction): per-row before/after changes, populated only by
+    # ``execute_scoped_percent_rules`` below -- empty for every existing
+    # ``execute_plan`` caller (a purely additive field, never required).
+    row_changes: list[dict] = field(default_factory=list)
 
 
 def _dec(value: object) -> Decimal | None:
@@ -250,4 +255,152 @@ def execute_plan(
         row_count_after=len(current),
         applied=applied,
         duplicate_groups=duplicate_groups,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Compound scoped-rule executor (business-task-ownership/workset-
+# continuation defect closure, PR #90 correction).
+#
+# A COMPOUND request assigns two or more DIFFERENT transformations to two
+# or more DIFFERENT, non-overlapping row scopes in the SAME turn -- e.g.
+# "first three rows +7%, the rest +15%". ``OperationPlan``/``execute_plan``
+# above only ever describe ONE flat sequence of operations applied to
+# WHATEVER rows survive each filter in turn; they cannot express "subset A
+# gets transform A, subset B gets transform B" in one shape. Rather than
+# inventing a second execution engine, this reuses the EXACT SAME
+# validated, whitelisted primitives (percent-round arithmetic, text-
+# contains matching, numeric comparison -- see ``_dec``/``_round_value``/
+# ``clean_text`` above) per scope, plus one new scope kind
+# (``row_position_range``) for "first N"/"rows K..M" requests that has no
+# equivalent in ``OperationPlan`` at all (a POSITION range, not a column
+# filter).
+#
+# Callers MUST have already validated ``rules`` against the real table
+# schema (see ``data_intel.nl_ops.validate_scoped_price_rules``) -- this
+# function trusts its input completely, exactly like every other function
+# in this module trusts an already-validated ``OperationPlan``.
+# ---------------------------------------------------------------------------
+
+
+def _match_row_position_range(row_count: int, *, start_position, end_position) -> set[int]:
+    start = max(1, int(start_position or 1))
+    end = int(end_position) if end_position not in (None, "") else row_count
+    end = min(end, row_count)
+    if end < start:
+        return set()
+    return set(range(start - 1, end))
+
+
+def _match_text_contains(rows: list[dict], *, column: str, contains: str) -> set[int]:
+    needle = (clean_text(contains) or "").casefold()
+    if not needle:
+        return set()
+    return {i for i, r in enumerate(rows) if needle in (clean_text(r.get(column)) or "").casefold()}
+
+
+def _match_price_compare(rows: list[dict], *, column: str, operator: str, threshold) -> set[int]:
+    if threshold in (None, ""):
+        return set()
+    value = Decimal(str(threshold))
+    out: set[int] = set()
+    for i, r in enumerate(rows):
+        v = _dec(r.get(column))
+        if v is None:
+            continue
+        keep = (
+            (operator == "gt" and v > value)
+            or (operator == "gte" and v >= value)
+            or (operator == "lt" and v < value)
+            or (operator == "lte" and v <= value)
+            or (operator == "eq" and v == value)
+        )
+        if keep:
+            out.add(i)
+    return out
+
+
+def _match_scope(rows: list[dict], scope: dict) -> set[int]:
+    kind = scope.get("kind")
+    if kind == "row_position_range":
+        return _match_row_position_range(
+            len(rows), start_position=scope.get("start_position"), end_position=scope.get("end_position")
+        )
+    if kind == "text_contains":
+        return _match_text_contains(rows, column=scope["column"], contains=scope.get("contains"))
+    if kind == "price_compare":
+        return _match_price_compare(
+            rows, column=scope["column"], operator=scope.get("operator") or "gte", threshold=scope.get("threshold")
+        )
+    if kind == "remainder":
+        return set(range(len(rows)))
+    return set()
+
+
+def execute_scoped_percent_rules(
+    rows: list[dict], columns: tuple[ColumnDescriptor, ...], rules: list[dict]
+) -> TransformResult:
+    """Deterministically applies a COMPOUND list of percent-adjustment
+    ``rules``, each scoped to a DIFFERENT, non-overlapping subset of
+    ``rows``, in ONE execution -- the counterpart to ``execute_plan`` for a
+    shape ``OperationPlan`` cannot express (see module note above).
+
+    Every ``rule`` is ``{"scope": {...}, "column": <price column
+    source_name>, "percent": <signed percent string/number>}``. Rules are
+    applied IN ORDER; a rule's scope only ever matches rows NOT ALREADY
+    claimed by an earlier rule in this SAME call, so a ``"remainder"``
+    scope (or any scope that happens to overlap an earlier one) can never
+    double-apply a change to the same row. Rows never claimed by any rule
+    are returned completely unchanged -- this function never requires full
+    coverage.
+
+    Returns a ``TransformResult`` whose ``row_changes`` records exactly
+    which row/column changed from what value to what value, for which
+    rule -- the deterministic source of every number a caller-facing
+    preview may show (never re-derived from free text or a model's own
+    paraphrase)."""
+
+    current = [dict(r) for r in rows]
+    claimed: set[int] = set()
+    applied: list[dict] = []
+    row_changes: list[dict] = []
+
+    for rule_index, rule in enumerate(rules):
+        scope = dict(rule.get("scope") or {})
+        column = rule["column"]
+        percent = Decimal(str(rule["percent"]))
+        matched = _match_scope(current, scope) - claimed
+        for idx in sorted(matched):
+            row = current[idx]
+            before = _dec(row.get(column))
+            if before is None:
+                continue
+            after = _round_value(before * (Decimal("1") + percent / Decimal("100")), round_mode=None, round_to=None)
+            row[column] = format(after, "f")
+            row_changes.append(
+                {
+                    "row_index": idx,
+                    "column": column,
+                    "before": format(before, "f"),
+                    "after": format(after, "f"),
+                    "percent": format(percent, "f"),
+                    "rule_index": rule_index,
+                }
+            )
+        claimed |= matched
+        applied.append(
+            {
+                "op": "scoped_percent_rule",
+                "params": {"scope": scope, "column": column, "percent": format(percent, "f"), "matched_rows": len(matched)},
+            }
+        )
+
+    return TransformResult(
+        rows=current,
+        columns=columns,
+        row_count_before=len(rows),
+        row_count_after=len(current),
+        applied=applied,
+        duplicate_groups=[],
+        row_changes=row_changes,
     )

@@ -762,6 +762,251 @@ class WorkflowPandaConversationGateway:
             task.parameters["bitrix_retail_price_preview"] = retail_price_preview
         self._action_store.put(task)
 
+    def _get_or_create_family_excel_task(self, *, tenant_id: str, owner_id: str, conversation_id: str):
+        """Helper for ``_persist_managed_agent_dataset_context`` below:
+        returns this conversation's existing FAMILY_EXCEL ``ActiveTask``
+        (Panda's ONE canonical owner of "current business task + current
+        dataset", already used by the legacy ``ROW_FOUND``/
+        ``CALL_PRODUCT_ENRICHMENT`` handlers above), creating a fresh one
+        with the SAME shape ``_persist_managed_agent_product_context``
+        already builds if none exists yet or an unrelated family is
+        active. Never a new state store/schema."""
+        from business_assistant.action_continuation import (
+            EXCEL_CONTRACT,
+            FAMILY_EXCEL,
+            RISK_READ,
+            STATUS_DRAFT,
+            ActiveTask,
+        )
+
+        task = self._action_store.get(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
+        if task is None or task.family != FAMILY_EXCEL:
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                family=FAMILY_EXCEL,
+                tool_id=EXCEL_CONTRACT.tool_id,
+                operation=EXCEL_CONTRACT.operation,
+                goal="",
+                artifact_type="workbook",
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+        return task
+
+    async def _persist_managed_agent_dataset_context(
+        self, request: ConversationRequest, spreadsheet_refs_this_turn: list[dict]
+    ) -> None:
+        """Business-task-ownership/workset-continuation defect closure
+        (production: a managed-agent-only conversation's follow-up turn
+        that needed a bulk/multi-row spreadsheet calculation was told
+        "attach the file" even though one was already attached, and a
+        reattachment then only ever produced a generic whole-sheet
+        summary instead of the requested transformation).
+
+        ROOT CAUSE (proven by static audit, not guessed): ``managed_agent_
+        poc`` ingests an attached spreadsheet into its OWN private, per-
+        conversation ``data_intel`` dataset store/dataset_id (see
+        ``managed_agent_poc.panda_bridge._durable_paths`` --
+        ``PANDA_DATA_DIR/managed_agent/<tenant>/<conversation>/dataset.
+        sqlite3``, a physically separate SQLite file from whatever store
+        the legacy ``resolve_action_turn``/FAMILY_EXCEL/``data.
+        excel_assistant`` path's ``DataIntelligenceService`` is wired to
+        (``data_intel.runtime.build_data_intelligence_runtime`` /
+        ``main.py``). A dataset_id minted by the managed-agent path is
+        therefore meaningless to the legacy engine. Compounding this,
+        ``_persist_managed_agent_product_context`` above only ever
+        persists product-selection fields onto ``ActiveTaskStore`` --
+        never a ``dataset_id`` -- so a later turn that falls back out of
+        the managed agent (disabled, MaxTurnsExceeded, ...) finds an
+        active FAMILY_EXCEL task with NO usable dataset_id at all and
+        asks the user to re-attach the file it already has.
+
+        MINIMAL FIX: whenever a managed-agent turn used a FRESH spread-
+        sheet attachment this turn, ingest that SAME artifact into the
+        SAME SHARED ``data_intel`` store the legacy engine already reads
+        -- by dispatching the EXISTING ``data.excel_assistant``/``assist``
+        tool through ``self._tool_gateway`` (the SAME tool/adapter/
+        ingestion code ``_invoke_tool`` already uses for FAMILY_EXCEL --
+        no second parser, no new store) -- and persist the resulting
+        SHARED dataset_id onto ``ActiveTaskStore`` under the SAME existing
+        ``parameters["dataset_id"]`` key the legacy ``ROW_FOUND`` handler
+        already uses. This runs independently of whether a product was
+        also resolved this turn (a pure ``analyze_spreadsheet`` turn must
+        still establish dataset ownership), and is a no-op -- exactly like
+        every other optional integration point in this module -- on any
+        failure (missing artifact service, tool dispatch error, disabled
+        feature, ...): an already-working managed-agent reply must never
+        be broken by this bookkeeping."""
+        if not spreadsheet_refs_this_turn or self._tool_gateway is None:
+            return
+        tenant_id = str(request.tenant_id or "")
+        owner_id = str(request.user_id or "")
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id:
+            return
+
+        from business_assistant.action_continuation import CONTRACTS, EXCEL_CONTRACT, FAMILY_EXCEL
+        from tools.models import ToolRequest
+
+        contract = CONTRACTS.get(FAMILY_EXCEL)
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id="",
+            task_id=str(uuid.uuid4()),
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation=EXCEL_CONTRACT.operation,
+            arguments={
+                "attachment_refs": [dict(spreadsheet_refs_this_turn[0])],
+                "conversation_id": conversation_id,
+            },
+            requested_capabilities=tuple(contract.required_capabilities) if contract else (),
+            tenant_id=tenant_id,
+            user_id=owner_id,
+            actor_id=f"{tenant_id}:{owner_id}",
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:
+            return
+        if not bool(getattr(result, "success", False)):
+            return
+        data = dict(getattr(result, "data", None) or {})
+        dataset_id = str(data.get("dataset_id") or "")
+        if not dataset_id:
+            return
+
+        task = self._get_or_create_family_excel_task(
+            tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id
+        )
+        task.parameters["dataset_id"] = dataset_id
+        self._action_store.put(task)
+
+    async def _maybe_handle_bulk_table_operation(
+        self, request: ConversationRequest, text: str
+    ) -> ConversationResult | None:
+        """TEMPORARY / COMPATIBILITY (business-task-ownership/workset-
+        continuation defect closure, PART 2): prevents the production
+        ``MaxTurnsExceeded`` failure mode for a SINGLE-scope bulk/multi-row
+        operation. This is NOT the target semantic architecture -- it is a
+        stopgap kept only because it fixes a real, proven production
+        regression using an EXISTING, already-relied-upon deterministic
+        compiler, with ZERO new phrase/keyword/value-specific rules added
+        here or in ``data_intel.nl_ops`` for this fix. It is expected to be
+        deleted once the canonical Workset/structured-operation-plan phase
+        lands and gives the managed agent itself a general table-operation
+        capability; nothing here should be extended or generalized further
+        in the meantime.
+
+        ROOT CAUSE: the managed agent's tool set (``analyze_spreadsheet``/
+        ``select_product``/``explain_bitrix_write_plan`` -- see
+        ``managed_agent_poc/runtime_subprocess.py``) has NO tool for
+        applying a calculation/transformation across a SET of spreadsheet
+        rows -- only whole-sheet aggregate analysis or one-row-at-a-time
+        selection. When a user's follow-up asks for exactly that kind of
+        bulk/multi-row operation, the model has no matching tool to call
+        and, in production, spent enough internal turns on the single-
+        product tools before giving up that it exceeded the Agents SDK's
+        internal turn budget (``MaxTurnsExceeded``), surfacing as a
+        generic subprocess ``status=ERROR``.
+
+        MINIMAL FIX: BEFORE the managed agent is ever invoked for a turn,
+        ask -- using the SAME existing deterministic ``data_intel.nl_ops``
+        compiler the legacy ``resolve_action_turn``/FAMILY_EXCEL/``data.
+        excel_assistant`` path already uses for this exact purpose --
+        whether this turn's free text compiles into a real, executable
+        table-wide operation (a percent change, a filter, a sort, a
+        column edit, ...) against the conversation's ALREADY-ingested
+        dataset. This is a CAPABILITY probe, never a phrase/keyword list:
+        it recognizes any RU/EN paraphrase that compiler already
+        recognizes today, and nothing else -- no percentage, row count,
+        product identity, or wording is hardcoded here. When it IS such
+        an operation, the SAME existing tool call that would eventually
+        run it anyway is dispatched directly (reusing the EXISTING
+        ``data.excel_assistant``/``execute_nl_request``/``data_intel.
+        transform`` deterministic execution engine -- no duplicated
+        pricing/spreadsheet math) and its ALREADY-COMPUTED real answer is
+        returned immediately, so the managed agent is never even entered
+        for this turn (no wasted turns, no ``MaxTurnsExceeded``) and the
+        legacy engine's own single-product "stickiness" fallback (which
+        only applies when nl_ops does NOT recognize a table-wide request)
+        is never reached either. Any other outcome (no active dataset,
+        tool dispatch failure, or nl_ops does not recognize this text as
+        a structured operation -- ``AMBIGUOUS``/``ROW_FOUND``/``ANALYZED``/
+        ``BATCH_QUEUED``) is a pure, side-effect-free read; this method
+        returns ``None`` and the caller proceeds exactly as before
+        (managed agent, then legacy fallback), completely unaffected."""
+        if self._tool_gateway is None:
+            return None
+        tenant_id = str(request.tenant_id or "")
+        owner_id = str(request.user_id or "")
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id:
+            return None
+
+        from business_assistant.action_continuation import (
+            CALL_TOOL,
+            CONTRACTS,
+            EXCEL_CONTRACT,
+            FAMILY_EXCEL,
+            format_tool_user_text,
+            mark_executed,
+        )
+        from tools.models import ToolRequest
+
+        task = self._action_store.get(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
+        if task is None or task.family != FAMILY_EXCEL:
+            return None
+        dataset_id = str(task.parameters.get("dataset_id") or "")
+        if not dataset_id:
+            return None
+
+        contract = CONTRACTS.get(FAMILY_EXCEL)
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id="",
+            task_id=str(task.task_id),
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation=EXCEL_CONTRACT.operation,
+            arguments={"text": text, "dataset_id": dataset_id, "conversation_id": conversation_id},
+            requested_capabilities=tuple(contract.required_capabilities) if contract else (),
+            tenant_id=tenant_id,
+            user_id=owner_id,
+            actor_id=f"{tenant_id}:{owner_id}",
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:
+            return None
+        if not bool(getattr(result, "success", False)):
+            return None
+        data = dict(getattr(result, "data", None) or {})
+        if str(data.get("status") or "") != "OK":
+            # Not a table-wide operation this compiler recognizes (a plain
+            # product question, a row lookup, an ambiguous request, ...) --
+            # nothing was mutated (execute_nl_request's non-"OK" branches
+            # are pure reads); let the caller continue as before.
+            return None
+
+        new_dataset_id = str(data.get("dataset_id") or dataset_id)
+        task.parameters["dataset_id"] = new_dataset_id
+        # ``mark_executed`` re-reads its own fresh snapshot of the task from
+        # the store (see its own docstring-adjacent comment above, and the
+        # SAME existing put-before-mark_executed pattern the FAMILY_EXCEL
+        # branch of ``_invoke_tool`` already follows for this exact reason)
+        # -- the dataset_id mutation above must be persisted FIRST or it is
+        # silently discarded by that re-fetch.
+        self._action_store.put(task)
+        mark_executed(self._action_store, task)
+        reply = format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[])
+        return ConversationResult(
+            text=reply,
+            task_id=task.task_id,
+            metadata={"action_decision": CALL_TOOL, "artifacts": [], "follow_up_kind": None},
+        )
+
     async def _invoke_controlled_bitrix_write(
         self, request: ConversationRequest, action
     ) -> ConversationResult:
@@ -1303,6 +1548,26 @@ class WorkflowPandaConversationGateway:
         from managed_agent_poc.panda_bridge import managed_agent_enabled
 
         if managed_agent_enabled() and not is_explicit_bitrix_write_confirmation(text):
+            # Business-task-ownership/workset-continuation defect closure,
+            # PART 2 (see ``_maybe_handle_bulk_table_operation``'s own
+            # docstring): a bulk/multi-row spreadsheet calculation the
+            # managed agent has no tool for must never be attempted by it
+            # at all (that is what produced production's ``MaxTurnsExceeded``)
+            # -- checked BEFORE the managed agent is invoked, using the SAME
+            # existing deterministic data_intel.nl_ops capability the legacy
+            # engine already relies on, never a phrase/keyword gate.
+            bulk_result = await self._maybe_handle_bulk_table_operation(request, text)
+            if bulk_result is not None:
+                self._record_latency(t0, follow_up_ms)
+                meta = dict(bulk_result.metadata or {})
+                meta["follow_up_kind"] = resolution.kind
+                meta["follow_up_target"] = resolution.target
+                return ConversationResult(
+                    text=bulk_result.text,
+                    task_id=bulk_result.task_id or task_id,
+                    metadata=meta,
+                )
+
             from managed_agent_poc.panda_bridge import maybe_respond_via_managed_agent
 
             managed_result = await maybe_respond_via_managed_agent(
@@ -1340,6 +1605,7 @@ class WorkflowPandaConversationGateway:
                 # context through the EXISTING, unmodified
                 # ``resolve_bitrix_write_confirmation``/
                 # ``_invoke_controlled_bitrix_write`` chain.
+                await self._persist_managed_agent_dataset_context(request, spreadsheet_refs_this_turn)
                 self._persist_managed_agent_product_context(request, meta)
                 meta["follow_up_kind"] = resolution.kind
                 meta["follow_up_target"] = resolution.target

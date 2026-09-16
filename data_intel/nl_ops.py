@@ -440,6 +440,159 @@ def _compile_column_edits(table: TableDescriptor, text: str, ops: list[PlannedOp
             )
 
 
+# ---------------------------------------------------------------------------
+# Compound scoped-rule contract (business-task-ownership/workset-
+# continuation defect closure, PR #90 correction -- REUSABLE DETERMINISTIC
+# PRIMITIVE, currently UNWIRED to any production caller).
+#
+# Unlike every operation above, a COMPOUND request that assigns two or
+# more DIFFERENT transformations to two or more DIFFERENT, non-overlapping
+# row scopes in the SAME turn (e.g. "first three rows +7%, the rest +15%")
+# cannot be safely recognized by ``compile_request``'s bounded regex/stem
+# compiler without an ever-growing, wording-specific dictionary (ordinals,
+# "the rest", ...) -- exactly the "finite dictionary of user wording" this
+# project's architecture forbids. Interpreting that free text into this
+# STRUCTURED shape requires a model/semantic seam, deliberately NOT wired
+# up in this codebase yet (an earlier revision of this defect closure
+# wired it directly into a managed conversational agent's own tool +
+# private dataset, which reintroduced a private/shared dual-dataset split
+# and was reverted). This module's job is narrower and UNCHANGED either
+# way: validate an already-produced structure against a small, explicit,
+# non-extensible whitelist of operation/column/scope shapes BEFORE any
+# arithmetic ever runs, exactly like ``compile_request`` already does for
+# a flat operation list -- never evaluate an expression, never accept an
+# arbitrary column name, never accept an operation type outside this
+# whitelist. Intended as an Operation-IR building block for the future
+# canonical Workset/structured-operation-plan phase, whichever seam
+# ultimately produces the structure.
+# ---------------------------------------------------------------------------
+
+SCOPE_ROW_POSITION_RANGE = "row_position_range"
+SCOPE_TEXT_CONTAINS = "text_contains"
+SCOPE_PRICE_COMPARE = "price_compare"
+SCOPE_REMAINDER = "remainder"
+_SCOPE_KINDS = (SCOPE_ROW_POSITION_RANGE, SCOPE_TEXT_CONTAINS, SCOPE_PRICE_COMPARE, SCOPE_REMAINDER)
+_COMPARE_OPERATORS = ("gt", "gte", "lt", "lte", "eq")
+
+# A small, fixed semantic field-name vocabulary a future caller supplies
+# instead of a raw spreadsheet column header (which varies per uploaded
+# file and no caller should be required to know).
+PRICE_FIELD_ROLES = {
+    "retail_price": ROLE_SELLING_PRICE,
+    "purchase_price": ROLE_PURCHASE_PRICE,
+    "price": ROLE_PRICE,
+}
+TEXT_FIELD_ROLES = {
+    "brand": ROLE_BRAND,
+    "category": ROLE_CATEGORY,
+    "name": ROLE_PRODUCT_NAME,
+}
+
+
+def _resolve_role_column(table: TableDescriptor, role: str, *, field_label: str) -> ColumnDescriptor:
+    col = next((c for c in table.columns if c.semantic_role == role), None)
+    if col is None:
+        raise UnsupportedOperationError(f"В таблице не найден столбец «{field_label}».")
+    return col
+
+
+def validate_scoped_price_rules(raw_rules: Any, table: TableDescriptor) -> list[dict]:
+    """Validates an untrusted, model-supplied list of compound scoped
+    price-adjustment rules against ``table``'s ACTUAL schema and the small,
+    fixed set of shapes declared above, resolving each rule's semantic
+    field name to its real column ``source_name``. Never evaluates an
+    expression, never accepts a raw column name from the caller, never
+    accepts a scope/operation shape outside ``_SCOPE_KINDS``/
+    ``_COMPARE_OPERATORS``. Raises ``UnsupportedOperationError`` for any
+    structurally invalid, unresolvable, or empty rule set -- the caller
+    must then decline (never guess) exactly like every other
+    ``UnsupportedOperationError`` site in this module."""
+
+    if not isinstance(raw_rules, (list, tuple)) or not raw_rules:
+        raise UnsupportedOperationError("Не указано ни одного правила изменения цены.")
+
+    resolved: list[dict] = []
+    for raw in raw_rules:
+        if not isinstance(raw, Mapping):
+            raise UnsupportedOperationError("Некорректный формат правила.")
+        scope_raw = raw.get("scope")
+        if not isinstance(scope_raw, Mapping):
+            raise UnsupportedOperationError("Не указана область применения правила.")
+        kind = str(scope_raw.get("kind") or "")
+        if kind not in _SCOPE_KINDS:
+            raise UnsupportedOperationError(f"Неизвестная область применения правила: {kind!r}.")
+
+        scope: dict = {"kind": kind}
+        if kind == SCOPE_ROW_POSITION_RANGE:
+            start = scope_raw.get("start_position")
+            if start is None:
+                raise UnsupportedOperationError("Не указана начальная позиция строки.")
+            try:
+                start_i = int(start)
+            except (TypeError, ValueError) as exc:
+                raise UnsupportedOperationError("Некорректная начальная позиция строки.") from exc
+            if start_i < 1:
+                raise UnsupportedOperationError("Начальная позиция строки должна быть не меньше 1.")
+            end = scope_raw.get("end_position")
+            end_i = None
+            if end is not None:
+                try:
+                    end_i = int(end)
+                except (TypeError, ValueError) as exc:
+                    raise UnsupportedOperationError("Некорректная конечная позиция строки.") from exc
+            scope["start_position"] = start_i
+            scope["end_position"] = end_i
+        elif kind == SCOPE_TEXT_CONTAINS:
+            field = str(scope_raw.get("text_field") or "")
+            role = TEXT_FIELD_ROLES.get(field)
+            if role is None:
+                raise UnsupportedOperationError(f"Неизвестное текстовое поле: {field!r}.")
+            col = _resolve_role_column(table, role, field_label=field)
+            needle = str(scope_raw.get("contains") or "").strip()
+            if not needle:
+                raise UnsupportedOperationError("Не указано значение для текстового фильтра.")
+            scope["column"] = col.source_name
+            scope["contains"] = needle
+        elif kind == SCOPE_PRICE_COMPARE:
+            field = str(scope_raw.get("price_field") or "")
+            role = PRICE_FIELD_ROLES.get(field)
+            if role is None:
+                raise UnsupportedOperationError(f"Неизвестное поле цены: {field!r}.")
+            col = _resolve_role_column(table, role, field_label=field)
+            operator = str(scope_raw.get("operator") or "")
+            if operator not in _COMPARE_OPERATORS:
+                raise UnsupportedOperationError(f"Неизвестный оператор сравнения: {operator!r}.")
+            threshold = scope_raw.get("threshold")
+            if threshold is None:
+                raise UnsupportedOperationError("Не указано пороговое значение цены.")
+            try:
+                Decimal(str(threshold))
+            except InvalidOperation as exc:
+                raise UnsupportedOperationError("Некорректное пороговое значение цены.") from exc
+            scope["column"] = col.source_name
+            scope["operator"] = operator
+            scope["threshold"] = str(threshold)
+        # SCOPE_REMAINDER needs no further parameters.
+
+        price_field = str(raw.get("price_field") or "retail_price")
+        price_role = PRICE_FIELD_ROLES.get(price_field)
+        if price_role is None:
+            raise UnsupportedOperationError(f"Неизвестное поле цены: {price_field!r}.")
+        price_col = _resolve_role_column(table, price_role, field_label=price_field)
+
+        percent_raw = raw.get("percent")
+        if percent_raw is None:
+            raise UnsupportedOperationError("Не указан процент изменения цены.")
+        try:
+            percent = Decimal(str(percent_raw))
+        except InvalidOperation as exc:
+            raise UnsupportedOperationError("Некорректное значение процента.") from exc
+
+        resolved.append({"scope": scope, "column": price_col.source_name, "percent": str(percent)})
+
+    return resolved
+
+
 def wants_workbook_export(text: str) -> bool:
     return _has_stem(text, _SAVE_STEMS)
 
