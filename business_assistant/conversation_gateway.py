@@ -1050,10 +1050,12 @@ class WorkflowPandaConversationGateway:
 
         from business_assistant.action_continuation import (
             EXCEL_CONTRACT,
+            EXPLAIN_BITRIX_WRITE_PLAN,
             FAMILY_EXCEL,
             artifacts_from_tool_data,
             format_tool_user_text,
             mark_executed,
+            resolve_bitrix_write_plan_question,
         )
         from business_assistant import workset as workset_lib
         from tools.models import ToolRequest
@@ -1122,6 +1124,58 @@ class WorkflowPandaConversationGateway:
                     "artifacts": [],
                     "canonical_product_selection": True,
                 },
+            )
+
+        if status == "FIELD_VALUE":
+            # Production defect closure (Defect 2): a specific-attribute
+            # question about the currently selected product ("what
+            # quantity does this product have") is answered from the
+            # canonical row itself -- never by re-showing the generic
+            # product card, never inventing a value. Nothing about the
+            # Workset/task changes: this is a pure read.
+            mark_executed(self._action_store, task, failed=False)
+            column = str(data.get("column") or "")
+            label = column or str(data.get("field_label") or "").strip() or "запрошенное поле"
+            if data.get("present"):
+                reply_text = f"{label}: {data.get('value')}"
+            else:
+                reply_text = f"В исходных данных нет значения для «{label}»."
+            return ConversationResult(
+                text=reply_text,
+                task_id=task.task_id,
+                metadata={"action_decision": "FIELD_QUERY", "artifacts": []},
+            )
+
+        if status == "WRITE_PLAN_REQUESTED":
+            # Production defect closure (Defect 4): "show me what would be
+            # written to Bitrix" for the CURRENTLY SELECTED product,
+            # recognized by the SAME one-shot model call regardless of
+            # wording/language -- dispatches into the EXISTING, unchanged
+            # deterministic write-plan renderer
+            # (``resolve_bitrix_write_plan_question`` ->
+            # ``_explain_bitrix_write_plan``), reading the SAME canonical
+            # ``bitrix_product_fields``/``bitrix_retail_price_preview``
+            # state a prior selection already persisted. Never a second
+            # write-plan implementation, never a real Bitrix write.
+            write_plan_action = resolve_bitrix_write_plan_question(
+                text,
+                active=task,
+                store=self._action_store,
+                request_id=str(request.request_id or request.correlation_id or ""),
+            )
+            if write_plan_action.decision == EXPLAIN_BITRIX_WRITE_PLAN:
+                mark_executed(self._action_store, task, failed=False)
+                result = await self._explain_bitrix_write_plan(request, write_plan_action)
+                return ConversationResult(
+                    text=result.text,
+                    task_id=result.task_id or task.task_id,
+                    metadata=dict(result.metadata or {}),
+                )
+            mark_executed(self._action_store, task, failed=True)
+            return ConversationResult(
+                text=str(write_plan_action.user_message or ""),
+                task_id=task.task_id,
+                metadata={"action_decision": write_plan_action.decision, "artifacts": []},
             )
 
         if status == "OK":

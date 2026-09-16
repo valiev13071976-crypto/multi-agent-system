@@ -72,7 +72,7 @@ UI maps internal statuses to readable labels. Progress is rendered only from bac
 
 - `POST /attachments` (multipart) stores tenant-scoped uploads
 - Allowed: xlsx, xls, csv, pdf, docx, png, jpg, jpeg, webp, txt (max 10 MB)
-- Returns `artifact_ref` (`artifact://upload/{uuid}/{filename}`) sent with the request
+- Returns `artifact_ref` (`artifact://upload/{uuid}`, an opaque id independent of the display filename) sent with the request
 
 ## Polling and reconnect
 

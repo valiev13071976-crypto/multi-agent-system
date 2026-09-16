@@ -1086,6 +1086,41 @@ class DataIntelligenceService:
         }
         return out
 
+    _IDENTIFIER_LOOKUP_ROLES = (ROLE_SKU, ROLE_ARTICLE, ROLE_EAN, ROLE_BARCODE)
+
+    def _deterministic_identifier_row(
+        self, text: str, *, rows: list[dict], table
+    ) -> tuple[dict, str, str] | None:
+        """Pure, deterministic data lookup (never a phrase/language rule):
+        true only when the ENTIRE (trimmed) message equals -- case-
+        insensitively -- one existing SKU/article/EAN/barcode value in
+        THIS dataset, and exactly one row has that value. Returns the
+        SAME ``(row, matched_column, matched_value)`` shape ``_row_lookup_
+        result`` already accepts, or ``None`` for every other message
+        (including one that merely CONTAINS an identifier as a substring
+        of a longer sentence -- that is a job for the model's own
+        ``product_selection`` judgment, not this narrow, exact-match
+        safety net)."""
+
+        needle = (text or "").strip().casefold()
+        if not needle:
+            return None
+        id_columns = [c for c in table.columns if c.semantic_role in self._IDENTIFIER_LOOKUP_ROLES]
+        if not id_columns:
+            return None
+        hits: list[tuple[dict, str, str]] = []
+        for row in rows:
+            for col in id_columns:
+                value = row.get(col.source_name)
+                if value in (None, ""):
+                    continue
+                if str(value).strip().casefold() == needle:
+                    hits.append((row, col.source_name, str(value)))
+                    break
+        if len(hits) == 1:
+            return hits[0]
+        return None
+
     async def execute_structured_plan_via_model(
         self,
         dataset_id: str,
@@ -1129,8 +1164,10 @@ class DataIntelligenceService:
         assert_sync_data_allowed(row_count=len(rows), operations=("nl_plan_via_model",))
 
         from data_intel.nl_plan_llm import (
+            ModelFieldQuery,
             ModelPlanError,
             ModelProductSelection,
+            ModelWritePlanQuery,
             compile_request_via_model,
         )
 
@@ -1145,6 +1182,19 @@ class DataIntelligenceService:
             ]
             if len(hits) == 1:
                 selected_row_index = hits[0]
+
+        # Production defect closure (deterministic identifier follow-up):
+        # a message consisting of exactly one existing SKU/article/EAN
+        # value (any language, any formatting the source workbook itself
+        # already used) selects that row directly -- a pure, deterministic
+        # data-driven string match against THIS dataset's own identifier
+        # columns, never a phrase/stem/language heuristic, and never
+        # dependent on the model call succeeding at all. This guarantees
+        # "send the exact SKU again" always resolves/selects the product,
+        # never falls into a table-operation failure response.
+        identifier_hit = self._deterministic_identifier_row(text, rows=rows, table=table)
+        if identifier_hit is not None:
+            return self._row_lookup_result(dataset_id, identifier_hit, "", table)
 
         try:
             plan = await compile_request_via_model(
@@ -1182,6 +1232,23 @@ class DataIntelligenceService:
                 "",
                 table,
             )
+        except ModelFieldQuery as field_query:
+            value = None
+            present = False
+            if field_query.column_name is not None and selected_row_index is not None:
+                raw_value = rows[selected_row_index].get(field_query.column_name)
+                present = raw_value not in (None, "")
+                value = raw_value if present else None
+            return {
+                "status": "FIELD_VALUE",
+                "dataset_id": dataset_id,
+                "column": field_query.column_name or "",
+                "field_label": field_query.field_label,
+                "value": value,
+                "present": present,
+            }
+        except ModelWritePlanQuery:
+            return {"status": "WRITE_PLAN_REQUESTED", "dataset_id": dataset_id}
         except ModelPlanError as exc:
             return {
                 "status": exc.status,
@@ -1243,12 +1310,26 @@ class DataIntelligenceService:
             "wants_workbook": plan.wants_workbook,
         }
         if selected_row_index is not None:
-            selected_was_targeted = any(
-                op.scope.kind == "row_range"
-                and op.scope.start == selected_row_index
-                and op.scope.end == selected_row_index + 1
-                for op in plan.operations
-            )
+            # Production defect closure (selected-product scope
+            # continuity): whether THIS mutation stayed scoped to the
+            # canonical selection is decided from the EXECUTOR's OWN
+            # ground truth of which rows it actually touched
+            # (``result.row_changes``), never from matching a scope
+            # object's literal ``kind``/``start``/``end`` against
+            # ``selected_row_index`` -- the model may express "the
+            # selected row" as scope "selected" (translated to an
+            # identical row_range by ``data_intel.nl_plan_llm._validate_
+            # scope``) or as an explicitly equivalent row_range; either
+            # way, if the ONLY row actually mutated is the selected one,
+            # this is a selected-product operation, full stop. Business
+            # scope and executor row selection are deliberately kept
+            # distinct here: an internal ``row_range`` representation
+            # must never, by itself, demote canonical SINGLE-product
+            # ownership to a general table scope.
+            touched_indices = {
+                rc.get("row_index") for rc in (result.row_changes or []) if rc.get("row_index") is not None
+            }
+            selected_was_targeted = bool(touched_indices) and touched_indices == {selected_row_index}
             if selected_was_targeted and selected_row_index < len(result.rows):
                 selected = self._row_lookup_result(
                     new_dataset_id,
