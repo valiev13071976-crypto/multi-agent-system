@@ -4,8 +4,21 @@ import httpx
 
 class OpenAIAgent:
     def __init__(self):
-        self.api_key = os.getenv("OPENAI_API_KEY")
-        self.model = os.getenv("OPENAI_MODEL")
+        # Deployment/secret-injection pipelines (e.g. Cloud Agent secrets)
+        # can append a trailing newline/whitespace to an injected env var
+        # without that being visible in any UI. An untrimmed value here
+        # becomes an "Illegal header value" the underlying HTTP client
+        # (httpx) rejects outright before ever reaching the network,
+        # turning a perfectly valid key into a hard technical failure of
+        # this whole boundary. Several other credential readers in this
+        # repo already ``.strip()`` for the exact same reason (see e.g.
+        # ``integrations/production/adapters/speech.py``,
+        # ``production_validation/providers_live.py``) -- this is the
+        # ONE shared model-call seam ``data_intel.nl_plan_llm``/
+        # ``managed_agent_poc`` both rely on, so it gets the same
+        # defensive treatment.
+        self.api_key = (os.getenv("OPENAI_API_KEY") or "").strip()
+        self.model = (os.getenv("OPENAI_MODEL") or "").strip()
 
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY not found")
