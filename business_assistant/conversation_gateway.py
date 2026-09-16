@@ -998,21 +998,35 @@ class WorkflowPandaConversationGateway:
         never consulted here, and ``text`` is never interpreted a second
         time after the model call returns.
 
-        Returns a concrete ``ConversationResult`` ONLY when the model
-        itself judged this text a genuine table-wide (or table-subset)
-        operation AND its output passed strict deterministic validation
-        AND ``execute_plan`` applied it -- the tool's own
-        ``status == "OK"``. Returns ``None`` for EVERY other outcome (no
-        canonical Workset/dataset yet for this conversation,
-        ``status == "NOT_APPLICABLE"`` -- the model's own judgment that
-        this is a single-product selection/plain analysis/write-plan
-        question/anything else that is not a table-wide operation -- or
-        any tool/model/validation failure) so the caller falls straight
-        through to the existing managed-agent/legacy routing completely
-        unchanged. Nothing is persisted for a ``NOT_APPLICABLE`` outcome
+        Returns a concrete successful ``ConversationResult`` when the
+        model itself judged this text a genuine table-wide (or table-
+        subset) operation AND its output passed strict deterministic
+        validation AND ``execute_plan`` applied it -- the tool's own
+        ``status == "OK"``. Returns ``None`` (falls straight through to
+        the existing managed-agent/legacy routing, completely unchanged)
+        ONLY for no canonical Workset/dataset yet for this conversation,
+        or ``status == "NOT_APPLICABLE"`` -- a genuine, validly-parsed
+        model judgment that this is a single-product selection/plain
+        analysis/write-plan question/anything else that is not a table-
+        wide operation.
+
+        PRODUCTION DEFECT CLOSURE (PR #93): every OTHER outcome --
+        ``MODEL_ERROR``/``PARSE_ERROR``/``VALIDATION_ERROR`` (a provider
+        failure, malformed model output, an unknown column reference, an
+        invalid scope, ...; see ``data_intel.nl_plan_llm.ModelPlanError``)
+        -- is a TECHNICAL failure of this boundary itself, NOT a judgment
+        that the text isn't a table operation, and returns a fail-closed
+        ``ConversationResult`` (a plain "the table operation was not
+        executed, nothing changed" message) INSTEAD of ``None``. A real
+        production request over a column name containing a comma failed
+        exactly this way, and the previous revision's ``return None`` on
+        any non-"OK" status let it silently fall through to managed-agent
+        product selection/enrichment -- an unrelated workflow the user
+        never asked for. Nothing is persisted for any non-"OK" outcome
         (no ``store.save_dataset`` call outside the ``status == "OK"``
-        branch), so a discarded probe here has zero side effects on the
-        shared ``data_intel`` store or on ``ActiveTaskStore``.
+        branch either way), so this has zero side effects on the shared
+        ``data_intel`` store beyond ``ActiveTaskStore``'s own executed/
+        failed bookkeeping.
 
         Adds no new agent, router, dataset store, or executor: it is the
         SAME tool_id/operation, the SAME ``DataIntelligenceService``, and
@@ -1077,25 +1091,68 @@ class WorkflowPandaConversationGateway:
         if not getattr(result, "success", False):
             return None
         data = dict(getattr(result, "data", None) or {})
-        if str(data.get("status") or "") != "OK":
+        status = str(data.get("status") or "")
+
+        if status == "OK":
+            new_dataset_id = str(data.get("dataset_id") or "")
+            if new_dataset_id:
+                workset_lib.apply_to_task(task, workset_lib.apply_tool_result(workset, data))
+                self._action_store.put(task)
+            mark_executed(self._action_store, task, failed=False)
+
+            reply = format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[])
+            return ConversationResult(
+                text=reply,
+                task_id=task.task_id,
+                metadata={
+                    "action_decision": "CALL_TOOL",
+                    "artifacts": [],
+                    "follow_up_kind": None,
+                    "canonical_table_execution": True,
+                    "table_operation_preview": _table_operation_preview(data),
+                },
+            )
+
+        if status in ("", "NOT_APPLICABLE"):
+            # Either nothing was even attempted, or the model itself
+            # returned a genuine, validly-parsed judgment that this text
+            # is not a table operation (``data_intel.nl_plan_llm.
+            # STATUS_NOT_APPLICABLE``) -- safe to defer to the existing
+            # managed-agent/legacy routing for this turn exactly as
+            # before.
             return None
 
-        new_dataset_id = str(data.get("dataset_id") or "")
-        if new_dataset_id:
-            workset_lib.apply_to_task(task, workset_lib.apply_tool_result(workset, data))
-            self._action_store.put(task)
-        mark_executed(self._action_store, task, failed=False)
-
-        reply = format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[])
+        # PRODUCTION DEFECT CLOSURE (PR #93): every OTHER status
+        # (``MODEL_ERROR``/``PARSE_ERROR``/``VALIDATION_ERROR`` -- see
+        # ``data_intel.nl_plan_llm.ModelPlanError``) is a TECHNICAL
+        # failure of the model-plan boundary itself, never a judgment
+        # about the user's text. A real production request over a
+        # column name containing a comma ("Предоплата, Цена с НДС")
+        # failed exactly this way (the model could not reproduce the
+        # column string verbatim -- since fixed by resolving columns via
+        # stable ids instead, see ``data_intel.nl_plan_llm._column_ids``)
+        # -- and that technical failure was previously folded into the
+        # SAME outcome as "not a table operation", silently letting the
+        # turn fall through to managed-agent product selection/
+        # enrichment. Never again: fail closed here with a normal,
+        # user-safe message and STOP -- returning ``None`` would let this
+        # turn continue on to the managed agent as if it had never been a
+        # table-operation attempt at all.
+        mark_executed(self._action_store, task, failed=True)
         return ConversationResult(
-            text=reply,
+            text=(
+                "Не удалось выполнить операцию над таблицей — данные не изменены. "
+                "Попробуйте переформулировать запрос."
+            ),
             task_id=task.task_id,
             metadata={
                 "action_decision": "CALL_TOOL",
                 "artifacts": [],
                 "follow_up_kind": None,
-                "canonical_table_execution": True,
-                "table_operation_preview": _table_operation_preview(data),
+                "canonical_table_execution": False,
+                "table_operation_failed_closed": True,
+                "table_operation_failure_status": status,
+                "table_operation_failure_reason": str(data.get("reason_code") or ""),
             },
         )
 

@@ -1,5 +1,6 @@
 """CANONICAL TABLE EXECUTION -- ONE-SHOT model-call NL -> structured
-``OperationPlan`` compiler (Block 5.1 follow-up, PR #92 correction).
+``OperationPlan`` compiler (Block 5.1 follow-up, PR #92; PR #93 defect
+closure).
 
 This is the PRIMARY semantic boundary for new canonical table execution
 (``business_assistant.conversation_gateway._maybe_execute_canonical_table_
@@ -11,7 +12,7 @@ backward compatibility -- it is never invoked from here.
 
 Architecture (exactly one model call, never a loop):
 
-    user text + table schema (columns, row_count)
+    user text + table schema (stable column IDs, never raw column text)
         |
         v
     ONE model semantic call (``model_call``, default: the EXISTING
@@ -22,7 +23,7 @@ Architecture (exactly one model call, never a loop):
         |
         v
     strict JSON text -> parsed -> DETERMINISTICALLY validated against
-    THIS table's actual columns/row count (never trusted blindly)
+    THIS table's actual column IDs/row count (never trusted blindly)
         |
         v
     validated ``data_intel.nl_ops.OperationPlan`` (with per-rule
@@ -35,12 +36,43 @@ Architecture (exactly one model call, never a loop):
 The model interprets language ONLY: it returns text, never runs code,
 never touches a dataset/session/store, and is called exactly once per
 turn -- there is no second interpretation of ``text`` after this
-function returns (or raises ``ModelPlanNotApplicable``).
+function returns (or raises ``ModelPlanError``).
+
+PRODUCTION DEFECT CLOSURE (PR #93): a real production request over a
+table with a column named ``"Предоплата, Цена с НДС"`` (containing an
+internal comma) failed to execute -- Railway logs proved the model call
+itself succeeded (HTTP 200), but the turn still fell through to managed-
+agent product selection/enrichment. Root cause, reproduced against a
+REAL (unmocked) model call in this fix's own test suite: the model could
+not reliably reproduce that exact column string verbatim (it echoed back
+only ``"Предоплата"``, truncated at the internal comma), so column
+validation failed -- and that VALIDATION failure was silently folded into
+the exact same ``ModelPlanNotApplicable`` used for a genuine "this is not
+a table operation" judgment, which the caller could not distinguish from
+a technical failure and therefore let the turn fall through to the
+managed agent.
+
+Two closures:
+
+1. The model NEVER has to reproduce a column name at all -- the prompt
+   exposes each column under a stable, deterministic id (``c0``, ``c1``,
+   ...); the model returns ``column_id``, and this module resolves it
+   back to the exact real column name. An unknown id fails validation --
+   no fuzzy matching after the fact.
+2. ``ModelPlanError`` now carries a ``status`` (``NOT_APPLICABLE`` /
+   ``MODEL_ERROR`` / ``PARSE_ERROR`` / ``VALIDATION_ERROR``) and a
+   ``reason_code``, so a caller can -- and, per
+   ``business_assistant.conversation_gateway``, MUST -- treat a genuine,
+   validly-parsed ``NOT_APPLICABLE`` judgment differently from every
+   other (technical) failure: only ``NOT_APPLICABLE`` may fall through to
+   non-table routing; every other status must fail closed instead of
+   being silently reinterpreted as an unrelated workflow.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 from decimal import Decimal, InvalidOperation
 from typing import Any, Awaitable, Callable
 
@@ -65,6 +97,51 @@ from data_intel.nl_ops import (
 
 ModelCall = Callable[[str], Awaitable[str]]
 
+_LOGGER = logging.getLogger("data_intel.nl_plan_llm")
+
+# Bounded, typed outcome of ONE model-plan attempt (observability
+# requirement, PR #93): every attempt ends in exactly one of these,
+# never a bare boolean/opaque exception string.
+STATUS_OK = "OK"
+STATUS_NOT_APPLICABLE = "NOT_APPLICABLE"
+STATUS_MODEL_ERROR = "MODEL_ERROR"
+STATUS_PARSE_ERROR = "PARSE_ERROR"
+STATUS_VALIDATION_ERROR = "VALIDATION_ERROR"
+
+# THE fail-open/fail-closed line this module's caller must draw: only a
+# VALID, successfully-parsed model judgment that this text is not a
+# table operation may defer to other routing. Every other status is a
+# TECHNICAL failure of this boundary itself, not a judgment about the
+# user's text, and must never be silently reinterpreted as some other
+# workflow (see module docstring / PR #93).
+NON_TECHNICAL_STATUSES = (STATUS_OK, STATUS_NOT_APPLICABLE)
+
+REASON_MODEL_CALL_FAILED = "model_call_failed"
+REASON_MODEL_NOT_CONFIGURED = "model_not_configured"
+REASON_NOT_JSON = "model_output_not_json"
+REASON_INVALID_KIND = "invalid_or_missing_kind"
+REASON_NO_OPERATIONS = "no_operations"
+REASON_MALFORMED_OPERATION = "malformed_operation"
+REASON_DISALLOWED_OPERATION = "disallowed_operation"
+REASON_MISSING_COLUMN_ID = "missing_column_id"
+REASON_UNKNOWN_COLUMN_ID = "unknown_column_id"
+REASON_INVALID_NUMERIC_VALUE = "invalid_numeric_value"
+REASON_INVALID_OPERATOR = "invalid_operator"
+REASON_MISSING_NEW_COLUMN = "missing_new_column"
+REASON_MISSING_NEW_NAME = "missing_new_name"
+REASON_INVALID_LIMIT = "invalid_limit"
+REASON_MALFORMED_SCOPE = "malformed_scope"
+REASON_UNKNOWN_SCOPE_KIND = "unknown_scope_kind"
+REASON_INVALID_ROW_RANGE = "invalid_row_range"
+REASON_ROW_RANGE_OUT_OF_BOUNDS = "row_range_out_of_bounds"
+REASON_MODEL_MARKED_NOT_APPLICABLE = "model_marked_not_applicable"
+
+# kind discriminator the model itself must return (PR #93: replaces the
+# previous single "applicable" boolean with an explicit, harder-to-
+# misinterpret two-value tag).
+KIND_TABLE_OPERATION = "table_operation"
+KIND_NOT_APPLICABLE = "not_applicable"
+
 _ALLOWED_OPS = (
     OP_PERCENT_ROUND,
     OP_ADD_COLUMN_PERCENT,
@@ -76,7 +153,9 @@ _ALLOWED_OPS = (
     OP_RENAME_COLUMN,
     OP_DEDUP,
 )
-_COLUMN_REQUIRED_OPS = (
+# Operations that reference an EXISTING column -- resolved via
+# ``column_id`` (never a raw name the model would have to reproduce).
+_COLUMN_ID_REQUIRED_OPS = (
     OP_PERCENT_ROUND,
     OP_ADD_COLUMN_PERCENT,
     OP_FILTER_CONTAINS,
@@ -88,15 +167,51 @@ _COLUMN_REQUIRED_OPS = (
 _SCOPE_KINDS = (SCOPE_ALL, SCOPE_ROW_RANGE, SCOPE_REMAINDER)
 
 
-class ModelPlanNotApplicable(Exception):
+class ModelPlanError(Exception):
     """Raised for EVERY outcome other than "the model produced a strictly
-    valid, executable table-wide plan": the model itself decided this text
-    is not a table-wide operation (``applicable: false`` -- e.g. a plain
-    analysis, a single-product selection, a write-plan question), a
-    network/provider failure, malformed JSON, or a plan that failed
-    deterministic validation against THIS table's actual schema/row
-    count. The caller must defer to the existing managed-agent/legacy
-    routing for this turn -- never guess, never partially execute."""
+    valid, executable table-wide plan". Carries a typed ``status``
+    (``STATUS_NOT_APPLICABLE`` for a genuine, validly-parsed "this is not
+    a table operation" model judgment; ``STATUS_MODEL_ERROR``/
+    ``STATUS_PARSE_ERROR``/``STATUS_VALIDATION_ERROR`` for a TECHNICAL
+    failure of this boundary itself) and a ``reason_code`` -- see the
+    ``REASON_*`` constants above. The caller MUST distinguish these:
+    only ``STATUS_NOT_APPLICABLE`` may defer to non-table routing; every
+    other status is a technical failure that must fail closed instead of
+    being silently reinterpreted as an unrelated workflow (PR #93)."""
+
+    def __init__(self, status: str, reason_code: str, detail: str = ""):
+        self.status = status
+        self.reason_code = reason_code
+        self.detail = detail
+        super().__init__(f"{status}:{reason_code}" + (f" ({detail})" if detail else ""))
+
+
+# Backward-compatible alias: PR #92 raised ``ModelPlanNotApplicable`` for
+# every non-"OK" outcome. Existing callers that only need "should I defer
+# to legacy routing" (never inspecting status) keep working unchanged.
+ModelPlanNotApplicable = ModelPlanError
+
+
+def _log_attempt(
+    *, status: str, reason_code: str, operation_count: int = 0, scope_kinds: tuple[str, ...] = ()
+) -> None:
+    """Bounded observability (PR #93 requirement 1): ONE concise log line
+    per model-plan attempt -- status/reason_code/operation_count/scope
+    kinds only. Never logs API keys, prompts, workbook contents, or
+    dataset rows."""
+
+    _LOGGER.info(
+        "canonical_table_model_plan status=%s reason_code=%s operation_count=%d scope_kinds=%s",
+        status,
+        reason_code or "-",
+        operation_count,
+        ",".join(scope_kinds) if scope_kinds else "-",
+    )
+
+
+def _fail(status: str, reason_code: str, detail: str = "") -> None:
+    _log_attempt(status=status, reason_code=reason_code)
+    raise ModelPlanError(status, reason_code, detail)
 
 
 def _default_model_call() -> ModelCall:
@@ -118,42 +233,78 @@ def _default_model_call() -> ModelCall:
     return _call
 
 
+def _column_ids(table: TableDescriptor) -> dict[str, str]:
+    """Stable, deterministic ``c<index>`` id -> real column name mapping
+    (PR #93 requirement 3): the model is NEVER asked to reproduce an
+    arbitrary source column string (e.g. one containing punctuation like
+    ``"Предоплата, Цена с НДС"``) verbatim -- it only ever has to copy
+    back a short id it was just given. Index-based, so it is stable for
+    the lifetime of one prompt/response round trip regardless of how
+    unusual any actual column name is."""
+
+    return {f"c{i}": c.source_name for i, c in enumerate(table.columns)}
+
+
 def _build_prompt(text: str, table: TableDescriptor, row_count: int) -> str:
-    columns = ", ".join(c.source_name for c in table.columns)
+    column_ids = _column_ids(table)
+    column_lines = "\n".join(f'  {cid} = "{name}"' for cid, name in column_ids.items())
     return (
         "You translate ONE user request about a data table into STRICT JSON. "
         "Respond with ONLY a single JSON object -- no prose, no markdown code fences, "
         "no explanation before or after it.\n\n"
-        f"Table columns (use these EXACT names, nothing else): {columns}\n"
+        f"Table columns (id = exact name):\n{column_lines}\n"
         f"Current row count: {row_count}\n\n"
         "Output JSON schema:\n"
         "{\n"
-        '  "applicable": <bool>,\n'
-        '  "wants_workbook": <bool>,\n'
+        '  "kind": "table_operation" | "not_applicable",\n'
+        '  "wants_workbook": <bool, only for "table_operation">,\n'
         '  "operations": [\n'
         "    {\n"
         '      "scope": {"kind": "all" | "row_range" | "remainder", "start": <int, only for row_range>, "end": <int, only for row_range>},\n'
-        '      "column": <string, one of the table columns above>,\n'
+        '      "column_id": <one of the column ids above, e.g. "c0" -- NEVER the actual column name>,\n'
         '      "operation": "percent_round" | "add_column_percent" | "filter_contains" | "filter_compare" | "sort" | "limit" | "remove_column" | "rename_column" | "dedup",\n'
         '      "value": <string or number, meaning depends on "operation" -- e.g. the signed percent for percent_round/add_column_percent, the comparison operator threshold for filter_compare, the substring for filter_contains, the row count for limit>,\n'
         '      "operator": <one of ">"|"<"|">="|"<=" -- ONLY for filter_compare>,\n'
-        '      "new_column": <string -- ONLY for add_column_percent/rename_column>,\n'
+        '      "new_column": <string, a brand-new column NAME (not an id) -- ONLY for add_column_percent/rename_column>,\n'
         '      "descending": <bool -- ONLY for sort>\n'
         "    }\n"
-        "  ]\n"
+        '  ] (omit/empty for "not_applicable")\n'
         "}\n\n"
-        'Set "applicable" to false (and "operations" to an empty list) when the user is NOT asking to '
-        "transform/filter/sort/deduplicate this WHOLE table -- for example: analyzing/summarizing the table, "
-        "selecting or inspecting one specific product/row, preparing a product card, or asking what would be "
-        "written to an external system. Only set it to true for a genuine table-wide (or table-subset) "
-        "mutation/filter/sort/dedup request.\n"
-        'Use "row_range" with a 0-based, half-open [start, end) row-index window for an explicit ordinal subset '
-        '(e.g. "the first 3 rows" is start=0, end=3). Use "remainder" for every row NOT covered by an earlier rule '
-        'in THIS SAME response -- you may emit several rules, each with its own scope, to express a compound '
-        'request such as "the first N rows get X, everyone else gets Y". Use "all" when a rule applies to the '
-        "whole table.\n"
-        "Never invent a column name that is not in the list above, never invent row values, and never describe or "
-        "produce any code -- only the operations listed above, applied by an existing deterministic engine.\n\n"
+        'Use "column_id" (e.g. "c0") for EVERY reference to an EXISTING column -- copy the short id exactly '
+        "as given, never the column's actual name (some column names contain punctuation/commas and are easy "
+        "to reproduce incorrectly; the id avoids that entirely). Only \"new_column\" for add_column_percent/"
+        "rename_column is a real, brand-new NAME you invent (it does not exist yet, so it has no id).\n\n"
+        'Set "kind" to "not_applicable" ONLY when the user is NOT asking to transform/filter/sort/deduplicate '
+        'this table at all -- for example: analyzing/summarizing the table, selecting or inspecting one '
+        "specific product/row, preparing a product card, or asking what would be written to an external "
+        'system with no accompanying local table change. Set "kind" to "table_operation" for a genuine '
+        "table-wide (or table-subset) mutation/filter/sort/dedup request.\n"
+        'IMPORTANT: also set "kind" to "not_applicable" when the request refers to a single, already-'
+        'selected/discussed item by reference rather than by an explicit table-wide criterion -- e.g. '
+        '"this product\'s price", "set its price to X", "for this item" -- with NO explicit multi-row '
+        "criterion (an ordinal range like \"the first N rows\", a percentage split across the whole table, "
+        "a filter/sort/dedup condition, or \"all rows\"/\"every product\"). You are given the table's shape "
+        "only, never which single row (if any) the conversation currently has in focus, so you cannot safely "
+        "resolve \"this product\"/\"it\" to one specific row -- guessing that it means every row would be "
+        "wrong. That case is handled elsewhere; correctly say not_applicable instead of guessing.\n"
+        "IMPORTANT: a request to modify/filter/sort rows in THIS table is a table_operation even when the "
+        "SAME request also explicitly says not to write/publish/export the result anywhere else (e.g. "
+        '"...do not write this to Bitrix/CRM/any external system") -- that is a separate, local-only-scope '
+        "instruction about where the result must NOT go, not a reason to call the table change itself "
+        "not_applicable. This is a general rule about ANY external-system qualifier, not specific wording.\n"
+        'To modify an EXISTING column\'s values in place (the common case, e.g. "increase the price in this '
+        'column by X%"), use "percent_round" on that column\'s id. Use "add_column_percent" ONLY when the '
+        "user explicitly asks to ADD A NEW, additional column (e.g. a separate margin/markup column) rather "
+        "than changing an existing one.\n"
+        'Use "row_range" with a 0-based, half-open [start, end) row-index window for an explicit ordinal '
+        'subset (e.g. "the first 3 rows" is start=0, end=3). Prefer "remainder" (rather than an explicit '
+        'row_range covering the tail) for "everyone else"/"the rest"/"all other rows" -- every row NOT '
+        "covered by an earlier rule in THIS SAME response -- so the plan stays correct even if the actual "
+        'row count differs from what you assumed. You may emit several rules, each with its own scope, to '
+        'express a compound request such as "the first N rows get X, everyone else gets Y". Use "all" when '
+        "a rule applies to the whole table.\n"
+        "Never invent row values, and never describe or produce any code -- only the operations listed "
+        "above, applied by an existing deterministic engine.\n\n"
         f"User request: {text}"
     )
 
@@ -177,41 +328,55 @@ def _validate_decimal(value: Any) -> Decimal:
         cleaned = str(value).strip().replace(",", ".").replace("%", "").replace(" ", "")
         return Decimal(cleaned)
     except (InvalidOperation, AttributeError, TypeError):
-        raise ModelPlanNotApplicable(f"invalid_numeric_value:{value!r}") from None
+        _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_NUMERIC_VALUE, repr(value))
 
 
 def _validate_scope(raw_scope: Any, *, row_count: int) -> OperationScope:
     if raw_scope is None:
         return OperationScope(kind=SCOPE_ALL)
     if not isinstance(raw_scope, dict):
-        raise ModelPlanNotApplicable("malformed_scope")
+        _fail(STATUS_PARSE_ERROR, REASON_MALFORMED_SCOPE)
     kind = str(raw_scope.get("kind") or SCOPE_ALL)
     if kind not in _SCOPE_KINDS:
-        raise ModelPlanNotApplicable(f"unknown_scope_kind:{kind}")
+        _fail(STATUS_VALIDATION_ERROR, REASON_UNKNOWN_SCOPE_KIND, kind)
     if kind in (SCOPE_ALL, SCOPE_REMAINDER):
         return OperationScope(kind=kind)
     try:
         start = int(raw_scope.get("start"))
         end = int(raw_scope.get("end"))
     except (TypeError, ValueError):
-        raise ModelPlanNotApplicable("invalid_row_range") from None
+        _fail(STATUS_PARSE_ERROR, REASON_INVALID_ROW_RANGE)
     if start < 0 or end < start or end > row_count:
-        raise ModelPlanNotApplicable(f"row_range_out_of_bounds:{start}-{end}/{row_count}")
+        _fail(STATUS_VALIDATION_ERROR, REASON_ROW_RANGE_OUT_OF_BOUNDS, f"{start}-{end}/{row_count}")
     return OperationScope(kind=SCOPE_ROW_RANGE, start=start, end=end)
 
 
-def _validate_operation(raw_op: Any, *, valid_columns: set[str], row_count: int) -> PlannedOperation:
+def _resolve_column_id(raw_op: dict, *, column_by_id: dict[str, str]) -> str:
+    """Deterministic ``column_id`` -> real column name resolution (PR #93
+    requirement 3): an unknown id fails validation outright -- no fuzzy/
+    best-effort name guessing after the model response."""
+
+    column_id = raw_op.get("column_id")
+    if column_id is None:
+        _fail(STATUS_VALIDATION_ERROR, REASON_MISSING_COLUMN_ID)
+    column_id = str(column_id).strip()
+    resolved = column_by_id.get(column_id)
+    if resolved is None:
+        _fail(STATUS_VALIDATION_ERROR, REASON_UNKNOWN_COLUMN_ID, column_id)
+    return resolved
+
+
+def _validate_operation(raw_op: Any, *, column_by_id: dict[str, str], row_count: int) -> PlannedOperation:
     if not isinstance(raw_op, dict):
-        raise ModelPlanNotApplicable("malformed_operation")
+        _fail(STATUS_PARSE_ERROR, REASON_MALFORMED_OPERATION)
     op_name = str(raw_op.get("operation") or "")
     if op_name not in _ALLOWED_OPS:
-        raise ModelPlanNotApplicable(f"disallowed_operation:{op_name}")
+        _fail(STATUS_VALIDATION_ERROR, REASON_DISALLOWED_OPERATION, op_name)
     scope = _validate_scope(raw_op.get("scope"), row_count=row_count)
 
-    column = raw_op.get("column")
-    if op_name in _COLUMN_REQUIRED_OPS:
-        if not isinstance(column, str) or column not in valid_columns:
-            raise ModelPlanNotApplicable(f"unknown_column:{column!r}")
+    column = None
+    if op_name in _COLUMN_ID_REQUIRED_OPS:
+        column = _resolve_column_id(raw_op, column_by_id=column_by_id)
 
     value = raw_op.get("value")
     if op_name == OP_PERCENT_ROUND:
@@ -221,14 +386,14 @@ def _validate_operation(raw_op: Any, *, valid_columns: set[str], row_count: int)
         pct = _validate_decimal(value)
         new_column = raw_op.get("new_column")
         if not isinstance(new_column, str) or not new_column.strip():
-            raise ModelPlanNotApplicable("missing_new_column")
+            _fail(STATUS_VALIDATION_ERROR, REASON_MISSING_NEW_COLUMN)
         params = {"source_column": column, "new_column": new_column.strip(), "percent": str(pct)}
     elif op_name == OP_FILTER_CONTAINS:
         params = {"column": column, "value": str(value if value is not None else "")}
     elif op_name == OP_FILTER_COMPARE:
         operator = str(raw_op.get("operator") or "")
         if operator not in (">", "<", ">=", "<="):
-            raise ModelPlanNotApplicable(f"invalid_operator:{operator!r}")
+            _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_OPERATOR, operator)
         threshold = _validate_decimal(value)
         params = {"column": column, "operator": operator, "value": str(threshold)}
     elif op_name == OP_SORT:
@@ -237,21 +402,21 @@ def _validate_operation(raw_op: Any, *, valid_columns: set[str], row_count: int)
         try:
             n = int(value)
         except (TypeError, ValueError):
-            raise ModelPlanNotApplicable(f"invalid_limit:{value!r}") from None
+            _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_LIMIT, repr(value))
         if n < 0:
-            raise ModelPlanNotApplicable(f"invalid_limit:{value!r}")
+            _fail(STATUS_VALIDATION_ERROR, REASON_INVALID_LIMIT, repr(value))
         params = {"n": n}
     elif op_name == OP_REMOVE_COLUMN:
         params = {"column": column}
     elif op_name == OP_RENAME_COLUMN:
         new_name = raw_op.get("new_column") or value
         if not isinstance(new_name, str) or not new_name.strip():
-            raise ModelPlanNotApplicable("missing_new_name")
+            _fail(STATUS_VALIDATION_ERROR, REASON_MISSING_NEW_NAME)
         params = {"column": column, "new_name": new_name.strip()}
     elif op_name == OP_DEDUP:
         params = {"remove": bool(value)}
     else:  # pragma: no cover -- unreachable, _ALLOWED_OPS already checked above
-        raise ModelPlanNotApplicable(f"unsupported_operation:{op_name}")
+        _fail(STATUS_VALIDATION_ERROR, REASON_DISALLOWED_OPERATION, op_name)
 
     return PlannedOperation(op_name, params, scope=scope)
 
@@ -264,41 +429,81 @@ async def compile_request_via_model(
     model_call: ModelCall | None = None,
 ) -> OperationPlan:
     """Make ONE model call to interpret ``text`` against ``table``'s own
-    schema, then DETERMINISTICALLY parse and validate its JSON response
-    into a validated ``OperationPlan`` -- never trusting the model's
-    output as-is. Raises ``ModelPlanNotApplicable`` for every non-genuine-
-    table-operation outcome (the model's own "applicable: false" judgment,
-    a provider/parse failure, or a plan that fails schema/column/numeric
-    validation against THIS table); the caller must treat that exactly
-    like ``compile_request``'s own ``UnsupportedOperationError``/
-    ``AmbiguousOperationError`` -- defer, never guess, never partially
-    execute."""
+    schema (exposed as stable column ids, never raw names -- see
+    ``_column_ids``), then DETERMINISTICALLY parse and validate its JSON
+    response into a validated ``OperationPlan`` -- never trusting the
+    model's output as-is. Raises ``ModelPlanError`` for every non-
+    genuine-table-operation outcome; ``exc.status`` distinguishes a valid
+    model judgment (``STATUS_NOT_APPLICABLE`` -- safe to defer to other
+    routing) from a technical failure of this boundary itself
+    (``STATUS_MODEL_ERROR``/``STATUS_PARSE_ERROR``/
+    ``STATUS_VALIDATION_ERROR`` -- the caller must fail closed instead of
+    silently reinterpreting the request as an unrelated workflow; see
+    module docstring / PR #93)."""
 
+    column_by_id = _column_ids(table)
     prompt = _build_prompt(text, table, row_count)
+
+    if model_call is None:
+        try:
+            caller = _default_model_call()
+        except Exception as exc:
+            # No default model call could even be constructed (e.g.
+            # OPENAI_API_KEY/OPENAI_MODEL are not configured in this
+            # deployment/environment at all -- see
+            # ``agents.openai_agent.OpenAIAgent.__init__``). This is NOT a
+            # technical failure of an ATTEMPTED call: canonical-table-
+            # execution via the model is simply UNAVAILABLE here, exactly
+            # as if this whole boundary did not exist. Defer to legacy/
+            # managed-agent routing (``STATUS_NOT_APPLICABLE``) instead of
+            # failing closed -- failing closed here would turn "the model
+            # feature isn't configured in this deployment" into "every
+            # Excel-family turn now returns a 'not executed' error",
+            # which is a regression, not a fix.
+            _fail(STATUS_NOT_APPLICABLE, REASON_MODEL_NOT_CONFIGURED, str(exc))
+    else:
+        caller = model_call
+
     try:
-        caller = model_call or _default_model_call()
         raw_text = await caller(prompt)
+    except ModelPlanError:
+        raise
     except Exception as exc:
-        raise ModelPlanNotApplicable(f"model_call_failed:{exc}") from None
+        # The provider WAS configured/reachable enough to attempt a call,
+        # and that attempt itself failed (network error, timeout, bad
+        # HTTP status, ...) -- a genuine TECHNICAL failure of this
+        # boundary, per PR #93 this must fail closed, never be silently
+        # reinterpreted as "not a table operation".
+        _fail(STATUS_MODEL_ERROR, REASON_MODEL_CALL_FAILED, str(exc))
 
     payload = _parse_json_object(raw_text)
     if not isinstance(payload, dict):
-        raise ModelPlanNotApplicable("model_output_not_json")
-    if not payload.get("applicable"):
-        raise ModelPlanNotApplicable("model_marked_not_applicable")
+        _fail(STATUS_PARSE_ERROR, REASON_NOT_JSON)
+
+    kind = payload.get("kind")
+    if kind == KIND_NOT_APPLICABLE:
+        _fail(STATUS_NOT_APPLICABLE, REASON_MODEL_MARKED_NOT_APPLICABLE)
+    if kind != KIND_TABLE_OPERATION:
+        _fail(STATUS_PARSE_ERROR, REASON_INVALID_KIND, repr(kind))
 
     raw_ops = payload.get("operations")
     if not isinstance(raw_ops, list) or not raw_ops:
-        raise ModelPlanNotApplicable("no_operations")
+        _fail(STATUS_PARSE_ERROR, REASON_NO_OPERATIONS)
 
-    valid_columns = {c.source_name for c in table.columns}
     operations = tuple(
-        _validate_operation(raw_op, valid_columns=valid_columns, row_count=row_count) for raw_op in raw_ops
+        _validate_operation(raw_op, column_by_id=column_by_id, row_count=row_count) for raw_op in raw_ops
     )
 
-    return OperationPlan(
+    plan = OperationPlan(
         operations=operations,
         wants_workbook=bool(payload.get("wants_workbook")),
         raw_text=text,
         intent_summary=", ".join(op.op for op in operations),
     )
+    _log_attempt(
+        status=STATUS_OK,
+        reason_code="",
+        operation_count=len(operations),
+        scope_kinds=tuple(op.scope.kind for op in operations),
+    )
+    return plan
