@@ -32,10 +32,12 @@ that could.
 
 from __future__ import annotations
 
+import base64
 import json
 import os
 import sys
 from dataclasses import dataclass, field
+from typing import Literal
 
 # ---------------------------------------------------------------------------
 # Step 1 (BEFORE any other import): make the isolated OpenAI Agents SDK
@@ -49,6 +51,7 @@ sys.path.insert(0, _PKGS_DIR)
 from agents import Agent, ModelSettings, RunConfig, RunContextWrapper, Runner, SQLiteSession, function_tool  # noqa: E402
 from agents.testing import ScriptedModel, assistant_message, function_call  # noqa: E402
 from openai.types.shared import Reasoning  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Step 2: only now append the repo root, so the existing, UNMODIFIED
@@ -94,6 +97,18 @@ class ConversationState:
     shown_identifiers: list = field(default_factory=list)
     current_identifier: str = ""
     svc: object = None
+    # Business-task-ownership/workset-continuation defect closure (PR #90
+    # correction): set by ``apply_scoped_price_rules`` below on a
+    # successful compound scoped-rule execution -- the freshly generated
+    # workbook bytes (base64) + filename for the dataset it just produced.
+    # Deliberately NEVER included in that tool's own JSON return value
+    # (which IS model-visible and would otherwise waste tokens on/expose
+    # raw file bytes to the model) -- only ``main()`` reads this AFTER the
+    # run, exactly like ``dataset_id``/``shown_identifiers`` above, so
+    # ``managed_agent_poc.panda_bridge``/``business_assistant.
+    # conversation_gateway`` can bridge the derived dataset into the SAME
+    # shared ``data_intel`` store the legacy engine reads.
+    scoped_rules_workbook: dict | None = None
     # Not model-visible, not tool-visible -- only ``main()`` reads this after
     # the run to persist the (possibly mutated) fields above. See
     # ``managed_agent_poc.state_store`` for why this exists at all.
@@ -313,18 +328,149 @@ def explain_bitrix_write_plan(
     return {"status": "NOT_FOUND", "reason": f"no product matching {target!r}"}
 
 
-_TOOLS = [analyze_spreadsheet, select_product, explain_bitrix_write_plan]
+# ---------------------------------------------------------------------------
+# 4TH TOOL: compound scoped price-adjustment rules (business-task-
+# ownership/workset-continuation defect closure, PR #90 correction).
+#
+# SAME semantic-tool-selection principle as the 3 tools above: the model
+# turns free text (ANY language/paraphrase -- "first three rows +7%, the
+# rest +15%", "brand X gets +10%, everything else gets -5%", ...) into
+# these TYPED, VALIDATED pydantic arguments; this file never parses free
+# text. What is NEW here is that a SINGLE call can now describe MULTIPLE
+# different row scopes with MULTIPLE different percent changes in ONE
+# deterministic operation -- the 3 read-only tools above only ever
+# describe the WHOLE sheet or ONE row. The model interprets language; the
+# EXISTING deterministic executors below (``data_intel.nl_ops.
+# validate_scoped_price_rules`` + ``data_intel.transform.
+# execute_scoped_percent_rules``, wired together by
+# ``DataIntelligenceService.execute_scoped_price_rules``) validate the
+# structure and do 100% of the arithmetic -- there is no model-generated
+# code or arbitrary-expression path anywhere in this tool.
+# ---------------------------------------------------------------------------
+
+
+class ScopedRuleScope(BaseModel):
+    """WHICH rows of the already-uploaded spreadsheet a rule applies to."""
+
+    kind: Literal["row_position_range", "text_contains", "price_compare", "remainder"] = Field(
+        description=(
+            "'row_position_range': rows by their 1-based position in the file's ORIGINAL row "
+            "order (e.g. 'the first three rows' -> start_position=1, end_position=3). "
+            "'text_contains': rows whose brand/category/name field contains a substring. "
+            "'price_compare': rows whose purchase/retail/price field is above/below/at a "
+            "threshold. 'remainder': every row not already claimed by an EARLIER rule in this "
+            "SAME tool call -- use this for 'the rest'/'everything else'/'остальные'."
+        )
+    )
+    start_position: int | None = Field(
+        default=None, description="1-based inclusive start row position (row_position_range only)."
+    )
+    end_position: int | None = Field(
+        default=None,
+        description="1-based inclusive end row position (row_position_range only); omit for 'to the end'.",
+    )
+    text_field: Literal["brand", "category", "name"] | None = Field(
+        default=None, description="Which text field to match (text_contains only)."
+    )
+    contains: str | None = Field(default=None, description="Substring to match (text_contains only).")
+    price_field: Literal["retail_price", "purchase_price", "price"] | None = Field(
+        default=None, description="Which price field to compare (price_compare only)."
+    )
+    operator: Literal["gt", "gte", "lt", "lte", "eq"] | None = Field(
+        default=None, description="Comparison operator (price_compare only)."
+    )
+    threshold: float | None = Field(default=None, description="Comparison threshold (price_compare only).")
+
+
+class ScopedPriceRule(BaseModel):
+    """ONE rule: a percent price change applied to exactly ``scope``'s
+    matched rows."""
+
+    scope: ScopedRuleScope
+    price_field: Literal["retail_price", "purchase_price", "price"] = Field(
+        default="retail_price", description="Which price field this rule adjusts."
+    )
+    percent: float = Field(description="Signed percent change, e.g. 7 for +7% or -15 for -15%.")
+
+
+def _scoped_rule_to_raw(rule: ScopedPriceRule) -> dict:
+    scope = rule.scope
+    scope_dict: dict = {"kind": scope.kind}
+    if scope.kind == "row_position_range":
+        scope_dict["start_position"] = scope.start_position
+        scope_dict["end_position"] = scope.end_position
+    elif scope.kind == "text_contains":
+        scope_dict["text_field"] = scope.text_field
+        scope_dict["contains"] = scope.contains
+    elif scope.kind == "price_compare":
+        scope_dict["price_field"] = scope.price_field
+        scope_dict["operator"] = scope.operator
+        scope_dict["threshold"] = scope.threshold
+    return {"scope": scope_dict, "price_field": rule.price_field, "percent": rule.percent}
+
+
+@function_tool
+def apply_scoped_price_rules(
+    ctx: RunContextWrapper[ConversationState],
+    rules: list[ScopedPriceRule],
+) -> dict:
+    """Apply TWO OR MORE different percentage price changes to TWO OR MORE
+    different, non-overlapping row scopes of the already-uploaded
+    spreadsheet, in ONE deterministic operation, and return a precise
+    preview of every affected row (identifier, price field, value before,
+    value after). Use this ONLY when the user's message assigns MORE THAN
+    ONE distinct percentage change to MORE THAN ONE distinct subset of
+    rows in the SAME message -- for example "first three rows get +7%,
+    the rest get +15%", "brand A gets a 10% increase, everything else
+    gets a 5% discount", or any other combination of row scopes (position
+    ranges, text filters, price thresholds, or "the remainder") with
+    percentage changes.
+
+    Rules are applied IN ORDER; a later rule's scope only ever considers
+    rows not already claimed by an earlier rule in this SAME call, so a
+    "remainder" scope is always safe and can never double-apply a change
+    to the same row.
+
+    For a request with only ONE change applying to ONE scope (or to the
+    whole sheet), do NOT use this tool -- that is handled elsewhere in
+    this conversation, before this tool is ever offered.
+
+    This NEVER writes or publishes anything to Bitrix/Aspro.
+    """
+    state = ctx.context
+    raw_rules = [_scoped_rule_to_raw(rule) for rule in rules]
+    result = state.svc.execute_scoped_price_rules(state.dataset_id, raw_rules, tenant_id=state.tenant_id)
+
+    if result.get("status") == "OK":
+        state.dataset_id = str(result["dataset_id"])
+        try:
+            wb = state.svc.generate_excel(state.dataset_id, tenant_id=state.tenant_id, kind="data")
+            state.scoped_rules_workbook = {
+                "content_b64": base64.b64encode(wb["content"]).decode("ascii"),
+                "filename": str(wb.get("filename") or "dataset.xlsx"),
+            }
+        except Exception:  # noqa: BLE001 -- the bridging workbook is best-effort, never blocks the preview
+            state.scoped_rules_workbook = None
+
+    # Model-visible output only -- raw workbook bytes never reach the
+    # model (see ``ConversationState.scoped_rules_workbook`` above).
+    return result
+
+
+_TOOLS = [analyze_spreadsheet, select_product, explain_bitrix_write_plan, apply_scoped_price_rules]
 
 _INSTRUCTIONS = (
     "You are Panda's data/product assistant for an already-uploaded spreadsheet "
     "(a supplier price list). Decide, from the user's message alone -- in any "
     "language or phrasing -- which ONE of your tools fits their request: "
-    "overall spreadsheet analysis, selecting/previewing a single product, or "
+    "overall spreadsheet analysis, selecting/previewing a single product, "
     "explaining what would be written to Bitrix/Aspro for an already-selected "
-    "product. Never claim to write, publish, or confirm anything to Bitrix/"
-    "Aspro yourself -- you have no tool that does that. After calling a tool, "
-    "answer the user in the SAME language they used, summarizing the tool's "
-    "structured result."
+    "product, or applying two or more different percentage price changes to "
+    "two or more different row scopes in the same request (e.g. 'first three "
+    "rows +7%, the rest +15%'). Never claim to write, publish, or confirm "
+    "anything to Bitrix/Aspro yourself -- you have no tool that does that. "
+    "After calling a tool, answer the user in the SAME language they used, "
+    "summarizing the tool's structured result."
 )
 
 
@@ -471,6 +617,7 @@ def main() -> int:
         "dataset_id": state.dataset_id,
         "shown_identifiers": state.shown_identifiers,
         "current_identifier": state.current_identifier,
+        "scoped_rules_workbook": state.scoped_rules_workbook,
         "model": model_name if not scripted_plan else "SCRIPTED_MODEL_TEST_DOUBLE",
         "usage": usage_payload,
     }
