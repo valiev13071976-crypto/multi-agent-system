@@ -36,7 +36,23 @@ def save_upload(
     tenant_dir.mkdir(parents=True, exist_ok=True)
     target = tenant_dir / safe
     target.write_bytes(content)
-    ref = f"artifact://upload/{upload_id}/{safe}"
+    # Production defect closure (artifact_ref filename contract): the ref
+    # is an OPAQUE, stable identifier -- ``upload_id`` alone, never the
+    # user's display filename -- so it always satisfies the strict
+    # ``business_assistant_api.normalizer._ARTIFACT_REF_RE`` character set
+    # POST /requests validates against, regardless of what characters a
+    # real user filename contains (spaces, parentheses, Cyrillic/Unicode,
+    # ...). The user-visible filename is preserved unchanged for display/
+    # storage (``safe`` above, returned separately as ``filename``) and
+    # never required to be renamed. Resolution never re-parses this ref
+    # string for the filename component: every consumer (``artifacts.
+    # service.ArtifactService._resolve_owned`` via ``legacy_ref``,
+    # ``store.get_by_legacy_ref``) already treats the whole ref as an
+    # opaque lookup key, and file bytes are independently readable from
+    # ``target`` (this same ``upload_id`` directory) or the canonical
+    # artifact blob store -- neither depends on the ref string carrying
+    # the filename.
+    ref = f"artifact://upload/{upload_id}"
     return {
         "artifact_ref": ref,
         "upload_id": upload_id,
