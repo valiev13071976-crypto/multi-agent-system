@@ -31,6 +31,7 @@ from business_assistant.follow_up import (
     FollowUpResolution,
 )
 from business_assistant.intent import requires_business_integration
+from business_assistant import workset as workset_lib
 from data_intel.cleaning import normalize_decimal_string
 from security.tenant import require_tenant_id
 
@@ -2635,9 +2636,26 @@ def resolve_action_turn(
             # ``_next_distinct_row_hit``/``_row_hit_by_source_row``) --
             # never included for a brand-new dataset (a fresh attachment
             # always starts a clean selection).
-            row_selection = dict(task.parameters.get("bitrix_row_selection") or {})
-            if row_selection:
-                args["current_selection"] = row_selection
+            #
+            # CANONICAL WORKSET (single business-data ownership): this
+            # stored ``bitrix_row_selection`` is exactly the "selected
+            # product exists in separate state" duplicate-ownership shape
+            # the canonical Workset (see ``business_assistant.workset``)
+            # replaces -- it must never keep dominating a turn on its own
+            # once the ONE authoritative Workset has already moved this
+            # task's focus away from a single product (e.g. a deterministic
+            # bulk transform reset scope to FULL_DATASET/FILTERED_SET). Gated
+            # on the EXISTING Workset scope this task already carries --
+            # never a new store, never a phrase/stem check -- so a stale
+            # single-product selection can no longer override a later
+            # multi-row request ("stale single-product override" defect).
+            # A task with no Workset yet (pre-existing/legacy task shape)
+            # keeps the exact previous behaviour, unaffected.
+            workset = workset_lib.get_workset(task)
+            if workset is None or workset.scope == workset_lib.SCOPE_SINGLE:
+                row_selection = dict(task.parameters.get("bitrix_row_selection") or {})
+                if row_selection:
+                    args["current_selection"] = row_selection
 
         cap_status = inspect_capability(gateway, contract.tool_id)
         if cap_status != CAPABILITY_AVAILABLE_AND_AUTHORIZED:

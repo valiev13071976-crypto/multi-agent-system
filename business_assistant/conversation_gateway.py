@@ -558,15 +558,42 @@ class WorkflowPandaConversationGateway:
         if idem and success:
             self._executed_keys.add(idem)
         if family == FAMILY_EXCEL and success and task is not None:
-            # Block 5.1 multi-turn continuation (spec section 13): persist the
-            # resulting dataset_id (new dataset after a transform, or the
-            # unchanged source dataset after an analyze/ambiguous turn) BEFORE
-            # mark_executed() below re-reads the task from the store, so the
-            # next turn can resolve "them"/"it" without re-upload.
+            # CANONICAL WORKSET (single business-data ownership): the
+            # resulting dataset_id -- a fresh source on a new attachment, a
+            # derived version after a transform, or the unchanged current
+            # dataset after an analyze/ambiguous turn -- is applied onto the
+            # ONE authoritative Workset this task owns (see
+            # business_assistant.workset), never assigned to the flat
+            # ``dataset_id`` key directly. ``workset.apply_to_task`` keeps
+            # that flat key mirrored for ``resolve_action_turn``'s own
+            # EXISTING ``has_dataset``/continuation gate, so that large,
+            # already-tested resolver needs no change of its own. Persisted
+            # BEFORE mark_executed() below re-reads the task from the store,
+            # so the next turn can resolve "them"/"it" without re-upload.
+            from business_assistant import workset as workset_lib
+
             new_dataset_id = str(data.get("dataset_id") or "")
             changed = False
             if new_dataset_id:
-                task.parameters["dataset_id"] = new_dataset_id
+                # Mirrors the EXISTING "a new attachment always wins" rule
+                # ``resolve_action_turn`` already applies immediately before
+                # dispatching this call (no inherited ``dataset_id`` was
+                # forwarded as an argument): that is exactly when THIS
+                # dataset must become the new canonical SOURCE, never merely
+                # the current one.
+                had_inherited_dataset_id = bool(dict(action.arguments or {}).get("dataset_id"))
+                current_workset = workset_lib.get_workset(task)
+                if not had_inherited_dataset_id or current_workset is None:
+                    base_workset = workset_lib.start_new_source(
+                        current_workset,
+                        tenant_id=task.tenant_id,
+                        owner_id=task.owner_id,
+                        conversation_id=task.conversation_id,
+                        dataset_id=new_dataset_id,
+                    )
+                else:
+                    base_workset = current_workset
+                workset_lib.apply_to_task(task, workset_lib.apply_tool_result(base_workset, data))
                 changed = True
             # PANDA -- first controlled production Bitrix product write
             # (PR #43 conversational glue): a ROW_FOUND preview identifies
@@ -631,11 +658,25 @@ class WorkflowPandaConversationGateway:
             # uploaded spreadsheet would already use.
             new_dataset_id = str(data.get("dataset_id") or "")
             if new_dataset_id:
-                task.parameters["dataset_id"] = new_dataset_id
+                from business_assistant import workset as workset_lib
+
                 task.family = FAMILY_EXCEL
                 task.tool_id = TOOL_DATA_EXCEL_ASSISTANT
                 task.operation = "assist"
                 task.artifact_type = "workbook"
+                # This acquisition result IS a brand-new canonical source for
+                # the FAMILY_EXCEL context it just became -- same reasoning
+                # as a fresh spreadsheet attachment above.
+                workset_lib.apply_to_task(
+                    task,
+                    workset_lib.start_new_source(
+                        workset_lib.get_workset(task),
+                        tenant_id=task.tenant_id,
+                        owner_id=task.owner_id,
+                        conversation_id=task.conversation_id,
+                        dataset_id=new_dataset_id,
+                    ),
+                )
                 self._action_store.put(task)
         if family == FAMILY_PRODUCT and success and task is not None:
             # Block 5.5 multi-turn continuation (spec section 20): persist the
@@ -760,7 +801,134 @@ class WorkflowPandaConversationGateway:
         retail_price_preview = str(metadata.get("bitrix_retail_price_preview") or "")
         if retail_price_preview:
             task.parameters["bitrix_retail_price_preview"] = retail_price_preview
+
+        # CANONICAL WORKSET (single business-data ownership): the managed
+        # agent resolved ONE specific product this turn -- narrow the
+        # EXISTING canonical Workset's scope to SINGLE (requirement 3:
+        # "single product is only a scope", never a second/competing
+        # business context). ``managed_agent_poc``'s own private dataset
+        # (see ``managed_agent_poc.panda_bridge``'s module docstring) is
+        # NEVER read here -- if no canonical Workset exists yet for this
+        # conversation (e.g. ``_establish_canonical_workset_from_attachment``
+        # was never reached -- no attachment/no tool_gateway this turn),
+        # this is a no-op: there is deliberately nothing non-authoritative
+        # to promote into authoritative state.
+        from business_assistant import workset as workset_lib
+
+        current_workset = workset_lib.get_workset(task)
+        if current_workset is not None:
+            workset_lib.apply_to_task(
+                task, workset_lib.select_single(current_workset, str(product_fields.get("sku") or ""))
+            )
         self._action_store.put(task)
+
+    async def _establish_canonical_workset_from_attachment(
+        self, request: ConversationRequest, spreadsheet_ref: dict
+    ) -> bool:
+        """CANONICAL WORKSET (single business-data ownership): a
+        spreadsheet attached THIS turn always (re)establishes the ONE
+        authoritative business-data context this gateway owns -- BEFORE
+        the managed-agent boundary ever runs (see this method's caller in
+        ``respond()``).
+
+        Calls the SAME EXISTING ``data.excel_assistant``/``assist`` tool
+        (``business_assistant.action_continuation.EXCEL_CONTRACT``) the
+        legacy ``resolve_action_turn``/``_invoke_tool`` path already calls
+        for a fresh attachment -- reused unchanged, never a second/
+        duplicated ingestion implementation. No transformation text is
+        sent (``text=""``): this call exists ONLY to ingest the raw
+        attachment bytes into the SHARED, canonical ``data_intel`` store
+        and obtain its ``dataset_id`` -- never to apply any operation.
+
+        This is deliberately NOT a bridge/synchronization between this
+        canonical dataset and ``managed_agent_poc``'s own private dataset
+        store: the two are independent ingestions of the SAME source
+        bytes for two different purposes (this one is the durable business
+        truth; the managed agent's own copy stays a private, disposable
+        compatibility cache for its own 3 read-only tools -- see that
+        module's docstring). No data ever flows from one to the other, so
+        there is nothing to keep synchronized and nothing to delete later.
+
+        Returns ``True`` iff the canonical Workset was actually
+        (re)established from THIS attachment, ``False`` on any failure
+        (tool unavailable, ingest error, no dataset id produced).
+        Final-review correction: a ``False`` return is NOT swallowed by
+        this method's caller -- a fresh spreadsheet attachment whose
+        canonical (shared ``data_intel``) ingest failed must never let
+        the managed-agent boundary run this turn, because that would let
+        ``managed_agent_poc``'s own private dataset become the ONLY
+        authoritative continuation context for a supposedly-canonical
+        attachment (the exact split-ownership condition this module
+        exists to remove). See the caller in ``respond()`` for the
+        skip-managed-agent-this-turn gate this return value drives."""
+        if self._tool_gateway is None:
+            return False
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id:
+            return False
+
+        from business_assistant.action_continuation import (
+            ActiveTask,
+            EXCEL_CONTRACT,
+            FAMILY_EXCEL,
+            RISK_READ,
+            STATUS_DRAFT,
+        )
+        from business_assistant import workset as workset_lib
+        from tools.models import ToolRequest
+
+        tenant_id = str(request.tenant_id or "")
+        owner_id = str(request.user_id or "")
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id="",
+            task_id=str(uuid.uuid4()),
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation=EXCEL_CONTRACT.operation,
+            arguments={"text": "", "attachment_refs": [dict(spreadsheet_ref)]},
+            requested_capabilities=tuple(EXCEL_CONTRACT.required_capabilities),
+            tenant_id=tenant_id,
+            user_id=owner_id,
+            actor_id=f"{tenant_id}:{owner_id}",
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:
+            return False
+        if not getattr(result, "success", False):
+            return False
+        data = dict(getattr(result, "data", None) or {})
+        new_dataset_id = str(data.get("dataset_id") or "")
+        if not new_dataset_id:
+            return False
+
+        task = self._action_store.get(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
+        if task is None or task.family != FAMILY_EXCEL:
+            task = ActiveTask(
+                task_id=str(uuid.uuid4()),
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                family=FAMILY_EXCEL,
+                tool_id=EXCEL_CONTRACT.tool_id,
+                operation=EXCEL_CONTRACT.operation,
+                goal="",
+                artifact_type="workbook",
+                status=STATUS_DRAFT,
+                risk=RISK_READ,
+            )
+        workset_lib.apply_to_task(
+            task,
+            workset_lib.start_new_source(
+                workset_lib.get_workset(task),
+                tenant_id=tenant_id,
+                owner_id=owner_id,
+                conversation_id=conversation_id,
+                dataset_id=new_dataset_id,
+            ),
+        )
+        self._action_store.put(task)
+        return True
 
     async def _invoke_controlled_bitrix_write(
         self, request: ConversationRequest, action
@@ -1305,26 +1473,65 @@ class WorkflowPandaConversationGateway:
         if managed_agent_enabled() and not is_explicit_bitrix_write_confirmation(text):
             from managed_agent_poc.panda_bridge import maybe_respond_via_managed_agent
 
-            managed_result = await maybe_respond_via_managed_agent(
-                text=text,
-                tenant_id=str(request.tenant_id or ""),
-                owner_id=str(request.user_id or ""),
-                conversation_id=str(request.conversation_id or ""),
-                artifact_service=self._artifact_service,
-                spreadsheet_ref=spreadsheet_refs_this_turn[0] if spreadsheet_refs_this_turn else None,
-                # Production defect closure (degraded raw-row card): the
-                # SAME existing deterministic capabilities the legacy
-                # CALL_PRODUCT_ENRICHMENT path below already uses -- never
-                # a second tool_gateway/bitrix_bridge/media_fetcher/cache
-                # instance. Lets the managed-agent boundary DELEGATE a
-                # resolved product selection into the existing Product
-                # Enrichment / controlled Bitrix write-plan pipeline
-                # instead of answering from the raw tool projection.
-                tool_gateway=self._tool_gateway,
-                bitrix_bridge=self._bitrix_bridge,
-                media_fetcher=self._media_fetcher,
-                enrichment_cache=self._enrichment_cache,
-            )
+            # CANONICAL WORKSET (single business-data ownership): establish/
+            # refresh the ONE authoritative business-data context for THIS
+            # conversation BEFORE the managed agent runs, whenever a
+            # spreadsheet is attached this turn -- see
+            # ``_establish_canonical_workset_from_attachment``'s own
+            # docstring for why this never depends on, mutates, or
+            # synchronizes with ``managed_agent_poc``'s own private dataset.
+            # This is what lets a LATER turn -- whether the managed agent
+            # keeps handling it, or it falls back to the legacy
+            # ``resolve_action_turn`` path (e.g. after a ``MaxTurnsExceeded``
+            # the managed agent's own read-only tools cannot satisfy) --
+            # resolve the SAME dataset without ever asking the user to
+            # reattach the file.
+            #
+            # Final-review correction (fail-safe, never fail-open): when a
+            # spreadsheet IS attached this turn but the canonical (shared
+            # data_intel) ingest above fails, the managed agent must be
+            # SKIPPED entirely for this turn -- never run on a fresh
+            # attachment whose canonical ownership could not be
+            # established, which would otherwise let
+            # ``managed_agent_poc``'s own private dataset become the ONLY
+            # authoritative continuation context (the split-ownership
+            # condition this module exists to remove). Falling through
+            # (``managed_result`` stays ``None``) routes this turn through
+            # the EXISTING ``resolve_action_turn()`` safe-failure/
+            # clarification path below -- no new failure/error mechanism
+            # is introduced. A turn with NO spreadsheet attached this turn
+            # is completely unaffected (``skip_managed_agent_this_turn``
+            # stays ``False``).
+            skip_managed_agent_this_turn = False
+            if spreadsheet_refs_this_turn:
+                canonical_established = await self._establish_canonical_workset_from_attachment(
+                    request, spreadsheet_refs_this_turn[0]
+                )
+                if not canonical_established:
+                    skip_managed_agent_this_turn = True
+
+            managed_result = None
+            if not skip_managed_agent_this_turn:
+                managed_result = await maybe_respond_via_managed_agent(
+                    text=text,
+                    tenant_id=str(request.tenant_id or ""),
+                    owner_id=str(request.user_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    artifact_service=self._artifact_service,
+                    spreadsheet_ref=spreadsheet_refs_this_turn[0] if spreadsheet_refs_this_turn else None,
+                    # Production defect closure (degraded raw-row card): the
+                    # SAME existing deterministic capabilities the legacy
+                    # CALL_PRODUCT_ENRICHMENT path below already uses -- never
+                    # a second tool_gateway/bitrix_bridge/media_fetcher/cache
+                    # instance. Lets the managed-agent boundary DELEGATE a
+                    # resolved product selection into the existing Product
+                    # Enrichment / controlled Bitrix write-plan pipeline
+                    # instead of answering from the raw tool projection.
+                    tool_gateway=self._tool_gateway,
+                    bitrix_bridge=self._bitrix_bridge,
+                    media_fetcher=self._media_fetcher,
+                    enrichment_cache=self._enrichment_cache,
+                )
             if managed_result is not None:
                 self._record_latency(t0, follow_up_ms)
                 meta = dict(managed_result.get("metadata") or {})
