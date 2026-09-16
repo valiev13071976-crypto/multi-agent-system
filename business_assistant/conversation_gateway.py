@@ -824,7 +824,7 @@ class WorkflowPandaConversationGateway:
 
     async def _establish_canonical_workset_from_attachment(
         self, request: ConversationRequest, spreadsheet_ref: dict
-    ) -> None:
+    ) -> bool:
         """CANONICAL WORKSET (single business-data ownership): a
         spreadsheet attached THIS turn always (re)establishes the ONE
         authoritative business-data context this gateway owns -- BEFORE
@@ -849,16 +849,23 @@ class WorkflowPandaConversationGateway:
         module's docstring). No data ever flows from one to the other, so
         there is nothing to keep synchronized and nothing to delete later.
 
-        Best-effort: any failure here (tool unavailable, ingest error) is
-        swallowed -- this must never break the managed-agent turn itself;
-        the caller falls back to whatever it already does today (which,
-        before this method existed, was already "no canonical dataset for
-        this conversation")."""
+        Returns ``True`` iff the canonical Workset was actually
+        (re)established from THIS attachment, ``False`` on any failure
+        (tool unavailable, ingest error, no dataset id produced).
+        Final-review correction: a ``False`` return is NOT swallowed by
+        this method's caller -- a fresh spreadsheet attachment whose
+        canonical (shared ``data_intel``) ingest failed must never let
+        the managed-agent boundary run this turn, because that would let
+        ``managed_agent_poc``'s own private dataset become the ONLY
+        authoritative continuation context for a supposedly-canonical
+        attachment (the exact split-ownership condition this module
+        exists to remove). See the caller in ``respond()`` for the
+        skip-managed-agent-this-turn gate this return value drives."""
         if self._tool_gateway is None:
-            return
+            return False
         conversation_id = str(request.conversation_id or "")
         if not conversation_id:
-            return
+            return False
 
         from business_assistant.action_continuation import (
             ActiveTask,
@@ -887,13 +894,13 @@ class WorkflowPandaConversationGateway:
         try:
             result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
         except Exception:
-            return
+            return False
         if not getattr(result, "success", False):
-            return
+            return False
         data = dict(getattr(result, "data", None) or {})
         new_dataset_id = str(data.get("dataset_id") or "")
         if not new_dataset_id:
-            return
+            return False
 
         task = self._action_store.get(tenant_id=tenant_id, owner_id=owner_id, conversation_id=conversation_id)
         if task is None or task.family != FAMILY_EXCEL:
@@ -921,6 +928,7 @@ class WorkflowPandaConversationGateway:
             ),
         )
         self._action_store.put(task)
+        return True
 
     async def _invoke_controlled_bitrix_write(
         self, request: ConversationRequest, action
@@ -1478,31 +1486,52 @@ class WorkflowPandaConversationGateway:
             # the managed agent's own read-only tools cannot satisfy) --
             # resolve the SAME dataset without ever asking the user to
             # reattach the file.
+            #
+            # Final-review correction (fail-safe, never fail-open): when a
+            # spreadsheet IS attached this turn but the canonical (shared
+            # data_intel) ingest above fails, the managed agent must be
+            # SKIPPED entirely for this turn -- never run on a fresh
+            # attachment whose canonical ownership could not be
+            # established, which would otherwise let
+            # ``managed_agent_poc``'s own private dataset become the ONLY
+            # authoritative continuation context (the split-ownership
+            # condition this module exists to remove). Falling through
+            # (``managed_result`` stays ``None``) routes this turn through
+            # the EXISTING ``resolve_action_turn()`` safe-failure/
+            # clarification path below -- no new failure/error mechanism
+            # is introduced. A turn with NO spreadsheet attached this turn
+            # is completely unaffected (``skip_managed_agent_this_turn``
+            # stays ``False``).
+            skip_managed_agent_this_turn = False
             if spreadsheet_refs_this_turn:
-                await self._establish_canonical_workset_from_attachment(
+                canonical_established = await self._establish_canonical_workset_from_attachment(
                     request, spreadsheet_refs_this_turn[0]
                 )
+                if not canonical_established:
+                    skip_managed_agent_this_turn = True
 
-            managed_result = await maybe_respond_via_managed_agent(
-                text=text,
-                tenant_id=str(request.tenant_id or ""),
-                owner_id=str(request.user_id or ""),
-                conversation_id=str(request.conversation_id or ""),
-                artifact_service=self._artifact_service,
-                spreadsheet_ref=spreadsheet_refs_this_turn[0] if spreadsheet_refs_this_turn else None,
-                # Production defect closure (degraded raw-row card): the
-                # SAME existing deterministic capabilities the legacy
-                # CALL_PRODUCT_ENRICHMENT path below already uses -- never
-                # a second tool_gateway/bitrix_bridge/media_fetcher/cache
-                # instance. Lets the managed-agent boundary DELEGATE a
-                # resolved product selection into the existing Product
-                # Enrichment / controlled Bitrix write-plan pipeline
-                # instead of answering from the raw tool projection.
-                tool_gateway=self._tool_gateway,
-                bitrix_bridge=self._bitrix_bridge,
-                media_fetcher=self._media_fetcher,
-                enrichment_cache=self._enrichment_cache,
-            )
+            managed_result = None
+            if not skip_managed_agent_this_turn:
+                managed_result = await maybe_respond_via_managed_agent(
+                    text=text,
+                    tenant_id=str(request.tenant_id or ""),
+                    owner_id=str(request.user_id or ""),
+                    conversation_id=str(request.conversation_id or ""),
+                    artifact_service=self._artifact_service,
+                    spreadsheet_ref=spreadsheet_refs_this_turn[0] if spreadsheet_refs_this_turn else None,
+                    # Production defect closure (degraded raw-row card): the
+                    # SAME existing deterministic capabilities the legacy
+                    # CALL_PRODUCT_ENRICHMENT path below already uses -- never
+                    # a second tool_gateway/bitrix_bridge/media_fetcher/cache
+                    # instance. Lets the managed-agent boundary DELEGATE a
+                    # resolved product selection into the existing Product
+                    # Enrichment / controlled Bitrix write-plan pipeline
+                    # instead of answering from the raw tool projection.
+                    tool_gateway=self._tool_gateway,
+                    bitrix_bridge=self._bitrix_bridge,
+                    media_fetcher=self._media_fetcher,
+                    enrichment_cache=self._enrichment_cache,
+                )
             if managed_result is not None:
                 self._record_latency(t0, follow_up_ms)
                 meta = dict(managed_result.get("metadata") or {})

@@ -149,16 +149,32 @@ def start_new_source(
     conversation_id: str,
     dataset_id: str,
 ) -> Workset:
-    """A fresh spreadsheet attachment always (re)starts the canonical
-    SOURCE — the CRITICAL invariant this module exists to enforce: from
-    this point on, ``source_dataset_id`` is immutable until the NEXT
-    fresh attachment. Keeps the SAME ``workset_id`` when one already
-    exists for this conversation (a new attachment continues the SAME
-    business task, it is not a brand-new one) — mints a fresh id only the
-    very first time."""
-    workset_id = existing.workset_id if existing is not None else str(uuid.uuid4())
+    """A fresh spreadsheet attachment (or an equivalent brand-new source
+    binding, e.g. a FAMILY_ACQUISITION result becoming the FAMILY_EXCEL
+    context) always mints a BRAND-NEW ``workset_id`` — the CRITICAL
+    invariant this module exists to enforce is ``source_dataset_id`` is
+    immutable FOR THE LIFETIME OF A WORKSET, so a genuinely new source can
+    never be expressed as mutating an existing Workset's source; it must
+    be a new Workset identity instead (final-review correction: an
+    earlier version of this function kept the same ``workset_id`` across
+    reattachment, which let a second, unrelated spreadsheet silently
+    rewrite the first Workset's ``source_dataset_id`` in place).
+
+    ``existing`` is accepted (and every call site still passes the
+    conversation's current Workset, if any) purely for call-site
+    symmetry with the other transition functions below — it is never
+    read here, since every ``start_new_source`` call is, by construction
+    (see its 3 call sites in ``conversation_gateway.py``), a genuinely
+    NEW source event, never a continuation.
+
+    Derived transformations and scope switches (``advance_dataset_version``/
+    ``select_single``/``select_filtered_set``/``select_full_dataset``)
+    are a completely separate set of functions and are UNAFFECTED by this
+    — they all keep the existing ``workset_id`` exactly as before, since
+    none of them represents a new source."""
+    del existing
     return Workset(
-        workset_id=workset_id,
+        workset_id=str(uuid.uuid4()),
         tenant_id=tenant_id,
         owner_id=owner_id,
         conversation_id=conversation_id,

@@ -83,7 +83,10 @@ SKU_A, NAME_A, EAN_A, PURCHASE_A, RETAIL_A = "TV-A-1001", "Телевизор A"
 SKU_B, NAME_B, EAN_B, PURCHASE_B, RETAIL_B = "TV-B-2002", "Телевизор B", "4600000000027", "95000", "139990"
 SKU_C, NAME_C, EAN_C, PURCHASE_C, RETAIL_C = "TV-C-3003", "Телевизор C", "4600000000034", "99000", "149990"
 SKU_D, NAME_D, EAN_D, PURCHASE_D, RETAIL_D = "TV-D-4004", "Телевизор D", "4600000000041", "80000", "119990"
+SKU_E, NAME_E, EAN_E, PURCHASE_E, RETAIL_E = "TV-E-5005", "Телевизор E", "4600000000058", "70000", "109990"
+SKU_F, NAME_F, EAN_F, PURCHASE_F, RETAIL_F = "TV-F-6006", "Телевизор F", "4600000000065", "72000", "112990"
 FILENAME = "workset_acceptance.xlsx"
+SECOND_FILENAME = "workset_acceptance_second.xlsx"
 
 
 def _xlsx_bytes() -> bytes:
@@ -94,6 +97,20 @@ def _xlsx_bytes() -> bytes:
     ws.append([SKU_B, NAME_B, "Телевизоры", "LG", EAN_B, PURCHASE_B, RETAIL_B])
     ws.append([SKU_C, NAME_C, "Телевизоры", "LG", EAN_C, PURCHASE_C, RETAIL_C])
     ws.append([SKU_D, NAME_D, "Телевизоры", "LG", EAN_D, PURCHASE_D, RETAIL_D])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def _second_xlsx_bytes() -> bytes:
+    """A genuinely DIFFERENT spreadsheet (different SKUs/rows) -- used to
+    prove a second fresh attachment mints a distinct Workset/source
+    rather than reusing/leaking the first attachment's identity."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["sku", "product_name", "category", "brand", "ean", "purchase_price", "розница"])
+    ws.append([SKU_E, NAME_E, "Телевизоры", "Samsung", EAN_E, PURCHASE_E, RETAIL_E])
+    ws.append([SKU_F, NAME_F, "Телевизоры", "Samsung", EAN_F, PURCHASE_F, RETAIL_F])
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -120,7 +137,7 @@ class WorksetModuleUnitTests(unittest.TestCase):
     transition -- the exact invariants TEST A/B/C require, independent of
     any NL wording, gateway, or store."""
 
-    def test_start_new_source_mints_id_once_then_stable_across_reattachment(self):
+    def test_start_new_source_mints_a_new_id_on_every_fresh_source(self):
         w1 = workset_lib.start_new_source(
             None, tenant_id=TENANT, owner_id=OWNER, conversation_id="c1", dataset_id="ds-1"
         )
@@ -130,15 +147,23 @@ class WorksetModuleUnitTests(unittest.TestCase):
         self.assertEqual(w1.scope, workset_lib.SCOPE_FULL_DATASET)
         self.assertEqual(w1.selected_identifiers, ())
 
-        # A LATER fresh attachment on the SAME conversation continues the
-        # SAME workset_id (requirement: "a new attachment continues the
-        # same business task"), while still resetting source==current.
+        # Final-review correction: source_dataset_id is immutable FOR THE
+        # LIFETIME OF A WORKSET -- a genuinely NEW spreadsheet attachment
+        # on the SAME conversation must therefore mint a BRAND-NEW
+        # workset_id, never rewrite the previous Workset's source in
+        # place. Also proves selection state never leaks: narrowing w1 to
+        # a single product first must not survive into w2.
+        w1_single = workset_lib.select_single(w1, SKU_A)
         w2 = workset_lib.start_new_source(
-            w1, tenant_id=TENANT, owner_id=OWNER, conversation_id="c1", dataset_id="ds-2"
+            w1_single, tenant_id=TENANT, owner_id=OWNER, conversation_id="c1", dataset_id="ds-2"
         )
-        self.assertEqual(w2.workset_id, w1.workset_id)
+        self.assertNotEqual(w2.workset_id, w1.workset_id)
         self.assertEqual(w2.source_dataset_id, "ds-2")
         self.assertEqual(w2.current_dataset_id, "ds-2")
+        self.assertEqual(w2.scope, workset_lib.SCOPE_FULL_DATASET)
+        self.assertEqual(w2.selected_identifiers, ())
+        # w1 itself is untouched (Workset is frozen/immutable).
+        self.assertEqual(w1.source_dataset_id, "ds-1")
 
     def test_apply_tool_result_row_found_narrows_scope_without_touching_dataset(self):
         w0 = workset_lib.start_new_source(
@@ -514,6 +539,60 @@ class WorksetAcceptanceIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(w_final.scope, workset_lib.SCOPE_FULL_DATASET)
         self.assertEqual(w_final.selected_identifiers, ())
 
+    async def test_mandatory_a_two_fresh_attachments_same_conversation_mint_distinct_worksets(self):
+        """MANDATORY TEST A (final-review gap #1): a SECOND, genuinely new
+        spreadsheet attachment in the SAME conversation must mint a
+        brand-new Workset identity -- never mutate the first Workset's
+        immutable ``source_dataset_id`` in place. Also proves selection
+        state from the first attachment (a narrowed single-product scope)
+        never leaks into the second."""
+        await self._respond("Проанализируй этот прайс.", attach=True, request_id="ra1")
+        workset_a = self._workset()
+        self.assertIsNotNone(workset_a)
+        workset_id_a = workset_a.workset_id
+        source_a = workset_a.source_dataset_id
+
+        # Narrow workset A's scope to a single product BEFORE the second
+        # attachment arrives -- the exact state that must not leak.
+        await self._respond("Возьми первый товар из этого прайса.", request_id="ra2")
+        self.assertEqual(self._workset().scope, workset_lib.SCOPE_SINGLE)
+        self.assertEqual(self._workset().selected_identifiers, (SKU_A,))
+
+        second_artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant=TENANT,
+            owner=OWNER,
+            conv="conv-acceptance",
+            filename=SECOND_FILENAME,
+            content=_second_xlsx_bytes(),
+        )
+        await self.panda.respond(
+            ConversationRequest(
+                text="Проанализируй этот прайс.",
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="rb1",
+                conversation_id="conv-acceptance",
+                attachment_refs=(second_artifact_id,),
+            )
+        )
+        workset_b = self._workset()
+        self.assertIsNotNone(workset_b)
+
+        self.assertNotEqual(workset_b.workset_id, workset_id_a)
+        self.assertNotEqual(workset_b.source_dataset_id, source_a)
+        self.assertEqual(workset_b.current_dataset_id, workset_b.source_dataset_id)
+        self.assertEqual(workset_b.scope, workset_lib.SCOPE_FULL_DATASET)
+        # No leaked selection/state from workset A.
+        self.assertEqual(workset_b.selected_identifiers, ())
+
+        # The second dataset genuinely contains the second file's rows,
+        # not the first's -- proves this is real re-ingestion, not a
+        # relabeled copy of the original dataset.
+        store = _first_dataset_store(self.panda)
+        rows_b = store.get_rows(workset_b.source_dataset_id, tenant_id=TENANT)
+        self.assertEqual(len(rows_b), 2)
+
 
 def _first_dataset_store(panda):
     # Test-only introspection: the same DataIntelligenceService instance
@@ -675,6 +754,165 @@ class ManagedAgentCannotOverrideWorksetTests(unittest.IsolatedAsyncioTestCase):
         # Product A must not leak into product B's selection.
         self.assertEqual(w2.selected_identifiers, (SKU_B,))
         self.assertNotIn(SKU_A, w2.selected_identifiers)
+
+
+class CanonicalIngestFailureNeverPromotesManagedPrivateOwnershipTests(unittest.IsolatedAsyncioTestCase):
+    """MANDATORY TEST B (final-review gap #2): when the SHARED, canonical
+    ``data_intel`` ingest fails for a fresh spreadsheet attachment, the
+    managed-agent integration boundary must be SKIPPED entirely for that
+    turn -- its own private, per-conversation dataset must never become
+    the sole authoritative continuation context, no false canonical
+    Workset may be established, and the prior Workset (if any) must
+    survive untouched. Uses the SAME real ``panda_bridge``/
+    ``ManagedAgentPOC`` chain as ``ManagedAgentCannotOverrideWorksetTests``
+    -- only ``ToolGateway.invoke`` is forced to fail for the EXCEL_CONTRACT
+    tool, simulating a real shared-store outage."""
+
+    async def asyncSetUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self._old_data_dir = os.environ.get("PANDA_DATA_DIR")
+        self._old_flag = os.environ.get(ENABLED_ENV_VAR)
+        os.environ["PANDA_DATA_DIR"] = self.tmp
+        os.environ[ENABLED_ENV_VAR] = "true"
+        self.panda, self.artifact_service = _panda()
+        self.artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant=TENANT,
+            owner=OWNER,
+            conv="conv-ingest-fail",
+            filename=FILENAME,
+            content=_xlsx_bytes(),
+        )
+
+    async def asyncTearDown(self):
+        import shutil
+
+        if self._old_data_dir is None:
+            os.environ.pop("PANDA_DATA_DIR", None)
+        else:
+            os.environ["PANDA_DATA_DIR"] = self._old_data_dir
+        if self._old_flag is None:
+            os.environ.pop(ENABLED_ENV_VAR, None)
+        else:
+            os.environ[ENABLED_ENV_VAR] = self._old_flag
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _workset(self, conversation_id="conv-ingest-fail"):
+        task = self.panda._action_store.get(  # noqa: SLF001
+            tenant_id=TENANT, owner_id=OWNER, conversation_id=conversation_id
+        )
+        return workset_lib.get_workset(task)
+
+    async def test_shared_ingest_failure_skips_managed_agent_and_never_promotes_private_dataset(self):
+        real_invoke = self.panda._tool_gateway.invoke  # noqa: SLF001
+
+        async def _failing_invoke(request, **kwargs):
+            if request.tool_id == EXCEL_CONTRACT.tool_id:
+                raise RuntimeError("simulated shared data_intel outage")
+            return await real_invoke(request, **kwargs)
+
+        run_turn_calls: list = []
+        real_run_turn = ManagedAgentPOC.run_turn
+
+        def _tracking_run_turn(self, **kwargs):
+            run_turn_calls.append(kwargs)
+            return real_run_turn(self, **kwargs)
+
+        with mock.patch.object(self.panda._tool_gateway, "invoke", new=_failing_invoke), mock.patch.object(  # noqa: SLF001
+            ManagedAgentPOC, "run_turn", new=_tracking_run_turn
+        ):
+            result = await self.panda.respond(
+                ConversationRequest(
+                    text="Подготовь один товар из этого прайса для Bitrix/Aspro. Ничего не записывай.",
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="req-fail-1",
+                    conversation_id="conv-ingest-fail",
+                    attachment_refs=(self.artifact_id,),
+                )
+            )
+
+        # The managed agent must NEVER have been invoked once canonical
+        # establishment failed for this fresh attachment -- its own
+        # private dataset can never become the sole authoritative
+        # continuation context.
+        self.assertEqual(run_turn_calls, [])
+        self.assertNotEqual(result.metadata.get("action_decision"), "MANAGED_AGENT")
+
+        # No canonical Workset was falsely/silently established either.
+        self.assertIsNone(self._workset())
+
+        # The turn fails safely through the EXISTING resolve_action_turn
+        # path -- no crash, no silent false success.
+        self.assertIsInstance(result.text, str)
+        self.assertTrue(result.text)
+
+    async def test_shared_ingest_failure_does_not_corrupt_a_prior_established_workset(self):
+        # Turn 1: establish a REAL canonical Workset first (managed agent
+        # disabled for this turn's setup so the establishment call itself
+        # succeeds against the real shared store).
+        os.environ[ENABLED_ENV_VAR] = "false"
+        await self.panda.respond(
+            ConversationRequest(
+                text="Проанализируй этот прайс.",
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="req-setup",
+                conversation_id="conv-ingest-fail",
+                attachment_refs=(self.artifact_id,),
+            )
+        )
+        prior_workset = self._workset()
+        self.assertIsNotNone(prior_workset)
+        prior_workset_id = prior_workset.workset_id
+        prior_source_id = prior_workset.source_dataset_id
+        os.environ[ENABLED_ENV_VAR] = "true"
+
+        # Turn 2: a SECOND fresh attachment whose canonical ingest fails.
+        second_artifact_id = await _register_upload(
+            self.artifact_service,
+            tenant=TENANT,
+            owner=OWNER,
+            conv="conv-ingest-fail",
+            filename=SECOND_FILENAME,
+            content=_second_xlsx_bytes(),
+        )
+        real_invoke = self.panda._tool_gateway.invoke  # noqa: SLF001
+
+        async def _failing_invoke(request, **kwargs):
+            if request.tool_id == EXCEL_CONTRACT.tool_id:
+                raise RuntimeError("simulated shared data_intel outage")
+            return await real_invoke(request, **kwargs)
+
+        run_turn_calls: list = []
+        real_run_turn = ManagedAgentPOC.run_turn
+
+        def _tracking_run_turn(self, **kwargs):
+            run_turn_calls.append(kwargs)
+            return real_run_turn(self, **kwargs)
+
+        with mock.patch.object(self.panda._tool_gateway, "invoke", new=_failing_invoke), mock.patch.object(  # noqa: SLF001
+            ManagedAgentPOC, "run_turn", new=_tracking_run_turn
+        ):
+            await self.panda.respond(
+                ConversationRequest(
+                    text="Подготовь один товар из этого прайса для Bitrix/Aspro.",
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="req-fail-2",
+                    conversation_id="conv-ingest-fail",
+                    attachment_refs=(second_artifact_id,),
+                )
+            )
+
+        self.assertEqual(run_turn_calls, [])
+        # The prior, already-canonical Workset must survive completely
+        # untouched -- a failed second attachment must never corrupt or
+        # replace it.
+        after_workset = self._workset()
+        self.assertIsNotNone(after_workset)
+        self.assertEqual(after_workset.workset_id, prior_workset_id)
+        self.assertEqual(after_workset.source_dataset_id, prior_source_id)
 
 
 if __name__ == "__main__":
