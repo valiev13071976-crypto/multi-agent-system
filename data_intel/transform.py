@@ -159,16 +159,53 @@ def _round_value(value: Decimal, *, round_mode: str | None, round_to: object) ->
     return value.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
-def _apply_percent_round(rows: list[dict], params: dict, indices: set[int] | None = None) -> list[dict]:
+def _derived_price_base_column(
+    column: str, columns: tuple[ColumnDescriptor, ...] | None
+) -> str | None:
+    """Production defect closure (multi-row escape onto a retail column that
+    only some rows have populated yet): when ``column`` is a derived retail/
+    selling-price column (``semantic_role == ROLE_SELLING_PRICE`` -- set
+    deterministically by ``_update_columns``/``OP_ADD_COLUMN_PERCENT`` from
+    the model's own ``price_role`` judgment, never guessed here) a row with
+    no value there yet has no percent base *within that column* to change.
+    Its purchase price is the only well-defined starting point -- exactly
+    the same base ``_apply_add_column_percent`` already uses the FIRST time
+    it creates this same retail column for ``price_role="retail"``. Returns
+    None for every other column (e.g. plain ``purchase_price`` in-place
+    edits), which keeps prior behavior byte-for-byte unchanged."""
+    if not columns:
+        return None
+    target_role = None
+    for c in columns:
+        if c.source_name == column:
+            target_role = c.semantic_role
+            break
+    if target_role != ROLE_SELLING_PRICE:
+        return None
+    for c in columns:
+        if c.semantic_role == ROLE_PURCHASE_PRICE:
+            return c.source_name
+    return None
+
+
+def _apply_percent_round(
+    rows: list[dict],
+    params: dict,
+    indices: set[int] | None = None,
+    columns: tuple[ColumnDescriptor, ...] | None = None,
+) -> list[dict]:
     column = params["column"]
     pct = Decimal(str(params["percent"]))
     round_mode = params.get("round_mode")
     round_to = params.get("round_to")
+    base_column = _derived_price_base_column(column, columns)
     out: list[dict] = []
     for i, r in enumerate(rows):
         row = dict(r)
         if indices is None or i in indices:
             v = _dec(row.get(column))
+            if v is None and base_column:
+                v = _dec(row.get(base_column))
             if v is not None:
                 new_v = v * (Decimal("1") + pct / Decimal("100"))
                 new_v = _round_value(new_v, round_mode=round_mode, round_to=round_to)
@@ -177,7 +214,12 @@ def _apply_percent_round(rows: list[dict], params: dict, indices: set[int] | Non
     return out
 
 
-def _apply_add_column_percent(rows: list[dict], params: dict, indices: set[int] | None = None) -> list[dict]:
+def _apply_add_column_percent(
+    rows: list[dict],
+    params: dict,
+    indices: set[int] | None = None,
+    columns: tuple[ColumnDescriptor, ...] | None = None,
+) -> list[dict]:
     source = params["source_column"]
     new_col = params["new_column"]
     pct = Decimal(str(params["percent"]))
@@ -315,7 +357,7 @@ def execute_plan(
             indices = _resolve_scope_indices(op.scope, total=len(current), covered=covered_indices)
             handler = _DISPATCH[op.op]
             before_rows = {i: dict(current[i]) for i in indices if i < len(current)}
-            current = handler(current, op.params, indices)
+            current = handler(current, op.params, indices, columns)
             column = op.params.get("column") or op.params.get("source_column")
             result_column = op.params.get("new_column") or column
             for i in sorted(before_rows):
