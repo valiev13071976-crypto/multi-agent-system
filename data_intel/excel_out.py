@@ -173,6 +173,40 @@ def generate_economics_workbook(
     return generate_workbook(summary=dict(summary or {}), sheets=sheets, provenance=dict(provenance or {}))
 
 
+def generate_user_result_workbook(
+    *,
+    headers: list[str],
+    rows: list[list],
+    text_cols: set[int] | None = None,
+    sheet_name: str = "Прайс",
+) -> bytes:
+    """User-facing single-sheet workbook (production defect closure --
+    downloadable Excel exposing internal dataset/debug structure): exactly
+    the caller's own business columns, in the caller's own order, with the
+    caller's own row values -- no ``SUMMARY``/``ISSUES``/``Provenance``
+    sheet, no internal dataset metadata. Reuses the SAME table-rendering
+    helper (``_write_table``) every other workbook in this module already
+    uses -- never a second export engine."""
+    try:
+        from openpyxl import Workbook
+    except ImportError as exc:
+        raise DataIntelError(EXCEL_GENERATION_FAILED) from exc
+    try:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = str(sheet_name)[:31] or "Sheet1"
+        _write_table(ws, headers, rows, text_cols=text_cols or set())
+        buf = io.BytesIO()
+        wb.save(buf)
+        data = buf.getvalue()
+        _validate_xlsx_bytes(data)
+        return data
+    except DataIntelError:
+        raise
+    except Exception as exc:
+        raise DataIntelError(EXCEL_GENERATION_FAILED) from exc
+
+
 def generate_business_result_workbook(
     *,
     result_headers: list[str],

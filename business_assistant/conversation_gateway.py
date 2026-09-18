@@ -969,6 +969,33 @@ class WorkflowPandaConversationGateway:
         self._action_store.put(task)
         return True
 
+    def _persist_resolved_selection(self, task, workset, resolved: dict) -> None:
+        """Production defect closure (Defect B: SINGLE -> MULTI -> SINGLE
+        scope recovery): applies an already-computed ``ROW_FOUND``-shaped
+        resolution (``DataIntelligenceService._resolve_product_reference``
+        via ``execute_structured_plan_via_model``'s ``resolved_selection``)
+        onto the CURRENT canonical Workset -- the exact SAME transition
+        ``status == "ROW_FOUND"`` already applies for an explicit
+        selection turn, just reused here for a selection that was
+        recovered IMPLICITLY from this turn's own text because there was
+        no current SINGLE selection to answer/preview against. Restores
+        ``scope=SINGLE`` and persists the selected product's fields so the
+        REST of this SAME turn (a field query / write-plan preview) reads
+        the newly-selected product, never a stale/previous one."""
+        from business_assistant import workset as workset_lib
+
+        next_workset = workset_lib.apply_tool_result(workset, resolved)
+        workset_lib.apply_to_task(task, next_workset)
+        fields = resolved.get("product_fields")
+        if isinstance(fields, dict):
+            task.parameters["bitrix_product_fields"] = dict(fields)
+        task.parameters.pop("bitrix_enrichment_write_request", None)
+        task.parameters.pop("product_enrichment_result", None)
+        task.parameters["bitrix_retail_price_preview"] = str(
+            resolved.get("retail_price_preview") or ""
+        )
+        self._action_store.put(task)
+
     async def _maybe_execute_canonical_table_operation(
         self, request: ConversationRequest, text: str
     ) -> ConversationResult | None:
@@ -1131,8 +1158,19 @@ class WorkflowPandaConversationGateway:
             # question about the currently selected product ("what
             # quantity does this product have") is answered from the
             # canonical row itself -- never by re-showing the generic
-            # product card, never inventing a value. Nothing about the
-            # Workset/task changes: this is a pure read.
+            # product card, never inventing a value.
+            #
+            # Defect B (SINGLE -> MULTI -> SINGLE recovery): when this
+            # turn's OWN text resolved a product deterministically
+            # because there was no prior SINGLE selection (``data
+            # ["resolved_selection"]`` -- see ``DataIntelligenceService.
+            # execute_structured_plan_via_model``), restore canonical
+            # SINGLE scope and persist that selection FIRST, in this SAME
+            # turn, exactly like an explicit ``ROW_FOUND`` selection
+            # would -- never a second, competing selection mechanism.
+            resolved = data.get("resolved_selection")
+            if isinstance(resolved, dict):
+                self._persist_resolved_selection(task, workset, resolved)
             mark_executed(self._action_store, task, failed=False)
             column = str(data.get("column") or "")
             label = column or str(data.get("field_label") or "").strip() or "запрошенное поле"
@@ -1157,6 +1195,15 @@ class WorkflowPandaConversationGateway:
             # ``bitrix_product_fields``/``bitrix_retail_price_preview``
             # state a prior selection already persisted. Never a second
             # write-plan implementation, never a real Bitrix write.
+            #
+            # Defect B (SINGLE -> MULTI -> SINGLE recovery): see the SAME
+            # comment on ``FIELD_VALUE`` above -- restore/persist the
+            # resolved selection BEFORE building the write-plan preview so
+            # it reads the newly-selected product's own fields, not stale
+            # ones from before the scope was lost.
+            resolved = data.get("resolved_selection")
+            if isinstance(resolved, dict):
+                self._persist_resolved_selection(task, workset, resolved)
             write_plan_action = resolve_bitrix_write_plan_question(
                 text,
                 active=task,
@@ -1176,6 +1223,23 @@ class WorkflowPandaConversationGateway:
                 text=str(write_plan_action.user_message or ""),
                 task_id=task.task_id,
                 metadata={"action_decision": write_plan_action.decision, "artifacts": []},
+            )
+
+        if status == "AMBIGUOUS":
+            # Human product resolution (generic, data-driven): the
+            # one-shot model call recognized a product-selection intent
+            # but the deterministic resolver
+            # (``DataIntelligenceService._resolve_product_reference``)
+            # found more than one plausible candidate in the CURRENT
+            # dataset -- never guessed; returns the SAME clarification
+            # text/candidate list ``format_tool_user_text`` already knows
+            # how to render for this family. Nothing about the Workset
+            # changes: no candidate was actually selected.
+            mark_executed(self._action_store, task, failed=True)
+            return ConversationResult(
+                text=format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[]),
+                task_id=task.task_id,
+                metadata={"action_decision": "AMBIGUOUS_PRODUCT_REFERENCE", "artifacts": []},
             )
 
         if status == "OK":

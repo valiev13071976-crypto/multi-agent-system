@@ -220,12 +220,22 @@ class DataIntelToolAdapter:
             current_selection=args.get("current_selection"),
         )
         if result.get("status") == "OK" and result.get("wants_workbook"):
+            # Production defect closure (downloadable Excel): the user
+            # explicitly asked to see/download the RESULT of a table
+            # operation -- render it as a normal, user-facing business
+            # workbook (``kind="business_result"``, see
+            # ``DataIntelligenceService.generate_excel``), never the
+            # internal debug-oriented ``SUMMARY``/``ISSUES``/``Provenance``
+            # export ``kind="data"`` (still available, unchanged, for any
+            # caller that explicitly asks for it via the standalone
+            # ``generate_excel`` tool operation).
             reg = self._svc.register_generated_workbook(
                 result["dataset_id"],
                 tenant_id=tenant,
                 owner_id=str(getattr(request, "user_id", "") or ""),
                 conversation_id=str(args.get("conversation_id") or ""),
                 request_id=str(getattr(request, "request_id", "") or ""),
+                kind="business_result",
             )
             result["workbook"] = reg
         if ingest_tables is not None:
@@ -256,12 +266,15 @@ class DataIntelToolAdapter:
             selected_identifiers=tuple(str(x) for x in (args.get("selected_identifiers") or ())),
         )
         if result.get("status") == "OK" and result.get("wants_workbook"):
+            # Production defect closure (downloadable Excel) -- see the
+            # SAME comment in ``_assist`` above.
             reg = self._svc.register_generated_workbook(
                 result["dataset_id"],
                 tenant_id=tenant,
                 owner_id=str(getattr(request, "user_id", "") or ""),
                 conversation_id=str(args.get("conversation_id") or ""),
                 request_id=str(getattr(request, "request_id", "") or ""),
+                kind="business_result",
             )
             result["workbook"] = reg
         return result
