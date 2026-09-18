@@ -55,6 +55,7 @@ from data_intel.planner import assert_sync_data_allowed, plan_data_job
 from data_intel.excel_out import (
     generate_comparison_workbook,
     generate_searchable_payments_workbook,
+    generate_user_result_workbook,
     generate_workbook,
 )
 from data_intel.ingest import ingest_bytes
@@ -320,6 +321,166 @@ def _role_value(row: dict, table, role: str) -> str:
         return ""
     value = row.get(col.source_name)
     return str(value) if value not in (None, "") else ""
+
+
+def _compact_alnum(value: str) -> str:
+    """Unicode-normalized, casefolded, alphanumeric-only projection of a
+    string -- drops spaces/dots/hyphens/underscores/punctuation so a human
+    reference such as "ABC 32 LQ 63806 LC" and the canonical
+    "ABC32LQ-63806.LC" collapse to the SAME comparable string, without
+    ever touching the row's own stored value (display/canonical identity is
+    unaffected; this exists purely for comparison)."""
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKC", value or "")
+    return "".join(ch for ch in normalized.casefold() if ch.isalnum())
+
+
+def _longest_common_substring_len(a: str, b: str) -> int:
+    import difflib
+
+    matcher = difflib.SequenceMatcher(a=a, b=b, autojunk=False)
+    match = matcher.find_longest_match(0, len(a), 0, len(b))
+    return match.size
+
+
+# Human product reference resolution (generic, data-driven -- see
+# ``_resolve_product_reference`` below): identifier-ish columns eligible
+# for reference matching, reusing the SAME ``_PRODUCT_ID_ROLES`` the
+# legacy ``_find_row_by_identifier`` already matches against, plus brand
+# (used only as a disambiguating signal for a partial model/article match,
+# never as a standalone match by itself -- a bare brand name matches many
+# rows and must stay ambiguous/no-match).
+_MIN_PARTIAL_REFERENCE_LEN = 6
+
+
+def _reference_candidate_summary(row: dict, table) -> str:
+    name = _role_value(row, table, ROLE_PRODUCT_NAME)
+    sku = _role_value(row, table, ROLE_SKU) or _role_value(row, table, ROLE_ARTICLE)
+    ean = _role_value(row, table, ROLE_EAN)
+    parts = [name] if name else []
+    if sku:
+        parts.append(f"SKU: {sku}")
+    elif ean:
+        parts.append(f"EAN: {ean}")
+    return ", ".join(parts) if parts else "товар без названия"
+
+
+def _resolve_product_reference(
+    text: str, rows: list[dict], table
+) -> tuple[str, object]:
+    """Generic, deterministic human-reference resolution of ``text``
+    against THIS dataset's own identifier/name/brand columns -- never an
+    LLM guess, never a phrase/product-specific rule.
+
+    Returns exactly one of:
+    - ('UNIQUE', (row_index, matched_column, matched_value)) -- a single,
+      sufficiently strong candidate;
+    - ('AMBIGUOUS', [candidate_summary, ...]) -- more than one plausible
+      candidate, so the caller must ask instead of guessing;
+    - ('NONE', None) -- no sufficiently reliable candidate.
+
+    Tier 1 (exact substring, case-insensitive): the SAME rule
+    ``_find_row_by_identifier`` already uses for the legacy path, made
+    ambiguity-aware here (that function collapses "0 hits" and "2+ hits"
+    into the same ``None``, which is fine for its own narrow fallback but
+    not enough to satisfy "ambiguous -> clarify" here).
+
+    Tier 2 (normalized substring): the SAME check after stripping
+    whitespace/punctuation/separators and Unicode-normalizing both sides
+    -- covers a human typing a real identifier with different spacing or
+    separators than the source file uses.
+
+    Tier 3 (brand + meaningful partial model/article): a sufficiently long
+    normalized common substring with the row's own SKU/article/product
+    name, AND the row's own brand value also present in the text -- covers
+    a human naming only part of a longer model code together with the
+    brand. Never matches on brand alone.
+    """
+    blob = (text or "").strip()
+    if not blob:
+        return ("NONE", None)
+
+    id_columns = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
+    if id_columns:
+        blob_cf = blob.casefold()
+        exact_hits: list[tuple[int, str, str]] = []
+        for index, row in enumerate(rows):
+            for col in id_columns:
+                value = str(row.get(col.source_name) or "").strip()
+                if len(value) < _MIN_IDENTIFIER_MATCH_LEN:
+                    continue
+                if value.casefold() in blob_cf:
+                    exact_hits.append((index, col.source_name, value))
+                    break
+        if len(exact_hits) == 1:
+            return ("UNIQUE", exact_hits[0])
+        if len(exact_hits) > 1:
+            return (
+                "AMBIGUOUS",
+                [_reference_candidate_summary(rows[h[0]], table) for h in exact_hits],
+            )
+
+    compact_blob = _compact_alnum(blob)
+    if not compact_blob:
+        return ("NONE", None)
+    ref_columns = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
+    if not ref_columns:
+        return ("NONE", None)
+    candidates: list[tuple[int, str, str]] = []
+    for index, row in enumerate(rows):
+        brand_value = _role_value(row, table, ROLE_BRAND)
+        compact_brand = _compact_alnum(brand_value) if brand_value else ""
+        matched = None
+        for col in ref_columns:
+            value = str(row.get(col.source_name) or "").strip()
+            compact_value = _compact_alnum(value)
+            if not compact_value or len(compact_value) < _MIN_IDENTIFIER_MATCH_LEN:
+                continue
+            if compact_value in compact_blob:
+                matched = (col.source_name, value)
+                break
+            if (
+                len(compact_value) >= _MIN_PARTIAL_REFERENCE_LEN
+                and compact_brand
+                and compact_brand in compact_blob
+            ):
+                common_len = _longest_common_substring_len(compact_blob, compact_value)
+                if common_len >= _MIN_PARTIAL_REFERENCE_LEN:
+                    matched = (col.source_name, value)
+                    break
+        if matched is not None:
+            candidates.append((index, matched[0], matched[1]))
+    if len(candidates) == 1:
+        return ("UNIQUE", candidates[0])
+    if len(candidates) > 1:
+        return (
+            "AMBIGUOUS",
+            [_reference_candidate_summary(rows[c[0]], table) for c in candidates],
+        )
+    return ("NONE", None)
+
+_SAFE_FILENAME_RE = re.compile(r"[\\/\x00-\x1f:*?\"<>|]+")
+
+
+def _derive_result_filename(desc) -> str:
+    """Production defect closure (downloadable Excel): a sensible,
+    user-facing filename derived from the ORIGINALLY uploaded file name
+    (``DatasetDescriptor.provenance['filename']`` -- set once at ingest,
+    see ``data_intel.ingest.ingest_bytes``, and carried forward unchanged
+    through every later derived dataset's provenance, see
+    ``execute_structured_plan_via_model``'s ``new_desc`` construction),
+    never the internal ``dataset_id``. Falls back to a generic name only
+    when no original filename was ever recorded (e.g. a dataset created
+    by some other, non-upload path)."""
+    original = str(dict(desc.provenance or {}).get("filename") or "").strip()
+    base = original.rsplit(".", 1)[0].strip() if original else ""
+    base = _SAFE_FILENAME_RE.sub(" ", base).strip()
+    if not base:
+        base = "прайс"
+    base = base[:120]
+    return f"{base} - результат.xlsx"
+
 
 _OP_HUMAN_RU = {
     "filter_contains": "фильтр по тексту",
@@ -707,6 +868,34 @@ class DataIntelligenceService:
         elif kind == "comparison":
             data = generate_comparison_workbook(comparison or {})
             name = "comparison.xlsx"
+        elif kind == "business_result":
+            # Production defect closure (downloadable Excel exposing
+            # internal dataset/debug structure): the user-facing result of
+            # a table operation is the caller's OWN business columns, in
+            # the SCHEMA's declared order (``table.columns`` -- never
+            # ``rows[0].keys()``, which also carries the per-role search
+            # ALIASES ``ingest()`` adds onto every row, e.g. a row keeps
+            # both its own "Наименование" header AND an alias
+            # "product_name" for internal lookups -- those aliases must
+            # never leak into a user-facing download as duplicate
+            # columns). No SUMMARY/ISSUES/Provenance sheet; a sensible
+            # filename derived from the originally uploaded file.
+            table = desc.tables[0] if desc.tables else None
+            if table is not None and table.columns:
+                headers = [c.source_name for c in table.columns]
+            elif rows:
+                headers = [k for k in rows[0].keys() if not str(k).startswith("__")]
+            else:
+                headers = ["empty"]
+            body = [[r.get(h) for h in headers] for r in rows]
+            text_cols = {
+                i
+                for i, h in enumerate(headers)
+                if str(h).strip().casefold()
+                in {"inn", "kpp", "ogrn", "ean", "sku", "article", "document_number"}
+            }
+            data = generate_user_result_workbook(headers=headers, rows=body, text_cols=text_cols)
+            name = _derive_result_filename(desc)
         else:
             if not rows:
                 headers = ["empty"]
@@ -1196,6 +1385,34 @@ class DataIntelligenceService:
         if identifier_hit is not None:
             return self._row_lookup_result(dataset_id, identifier_hit, "", table)
 
+        # Production defect closure (SINGLE -> MULTI -> SINGLE scope
+        # recovery, generic across ANY non-SINGLE scope): the canonical
+        # Workset has no current SINGLE selection (``selected_row_index``
+        # is still ``None`` here -- e.g. right after a multi-row table
+        # operation cleared it, see ``business_assistant.workset.
+        # apply_tool_result``), but THIS turn's own text may already
+        # name a specific product from the CURRENT dataset (an
+        # identifier, a normalized/differently-spaced identifier, or a
+        # brand + meaningful partial model/article -- see
+        # ``_resolve_product_reference``). When it resolves to exactly
+        # ONE product, that product becomes ``selected_row_index`` for
+        # THIS SAME model call -- so a single-product action requested in
+        # the SAME turn (write-plan preview, field query, ...) is no
+        # longer technically invalid for lack of a selection -- and
+        # ``reference_resolution`` is kept so the caller
+        # (``business_assistant.conversation_gateway``) can restore
+        # canonical SINGLE scope and persist this selection, all within
+        # THIS turn. Ambiguous/no-match leaves ``selected_row_index``
+        # untouched (``None``) -- never guesses, never blocks a
+        # legitimate table-wide operation that merely happens to mention
+        # a substring coincidentally.
+        reference_resolution: tuple[int, str, str] | None = None
+        if selected_row_index is None:
+            ref_status, ref_payload = _resolve_product_reference(text, rows, table)
+            if ref_status == "UNIQUE":
+                reference_resolution = ref_payload
+                selected_row_index = reference_resolution[0]
+
         try:
             plan = await compile_request_via_model(
                 text,
@@ -1211,15 +1428,29 @@ class DataIntelligenceService:
                 row_index = int(selection.value)
                 matched_value = str(row_index + 1)
             else:
-                needle = str(selection.value).strip().casefold()
-                hits = [
-                    index
-                    for index, row in enumerate(rows)
-                    if any(str(value).strip().casefold() == needle for value in row.values())
-                ]
-                if len(hits) == 1:
-                    row_index = hits[0]
-                    matched_value = str(selection.value)
+                # Human product resolution (generic, data-driven -- see
+                # ``_resolve_product_reference``): exact/normalized/
+                # partial+brand candidate resolution against THIS
+                # dataset, replacing what used to be an exact-match-only
+                # lookup so a human reference written with different
+                # spacing/separators, or only a brand + meaningful partial
+                # model/article, still resolves -- never guessing when
+                # genuinely ambiguous or unmatched.
+                ref_status, ref_payload = _resolve_product_reference(
+                    str(selection.value), rows, table
+                )
+                if ref_status == "UNIQUE":
+                    row_index, _matched_column, matched_value = ref_payload
+                elif ref_status == "AMBIGUOUS":
+                    lines = ["Нашёл несколько подходящих товаров:"]
+                    lines.extend(f"{i}. {c}" for i, c in enumerate(ref_payload, 1))
+                    lines.append("Какой выбрать?")
+                    return {
+                        "status": "AMBIGUOUS",
+                        "dataset_id": dataset_id,
+                        "message_safe": "\n".join(lines),
+                        "candidates": list(ref_payload),
+                    }
             if row_index is None or not 0 <= row_index < len(rows):
                 return {
                     "status": "AMBIGUOUS",
@@ -1239,7 +1470,7 @@ class DataIntelligenceService:
                 raw_value = rows[selected_row_index].get(field_query.column_name)
                 present = raw_value not in (None, "")
                 value = raw_value if present else None
-            return {
+            out = {
                 "status": "FIELD_VALUE",
                 "dataset_id": dataset_id,
                 "column": field_query.column_name or "",
@@ -1247,8 +1478,20 @@ class DataIntelligenceService:
                 "value": value,
                 "present": present,
             }
+            if reference_resolution is not None:
+                idx, matched_column, matched_value = reference_resolution
+                out["resolved_selection"] = self._row_lookup_result(
+                    dataset_id, (rows[idx], matched_column, matched_value), "", table
+                )
+            return out
         except ModelWritePlanQuery:
-            return {"status": "WRITE_PLAN_REQUESTED", "dataset_id": dataset_id}
+            out = {"status": "WRITE_PLAN_REQUESTED", "dataset_id": dataset_id}
+            if reference_resolution is not None:
+                idx, matched_column, matched_value = reference_resolution
+                out["resolved_selection"] = self._row_lookup_result(
+                    dataset_id, (rows[idx], matched_column, matched_value), "", table
+                )
+            return out
         except ModelPlanError as exc:
             return {
                 "status": exc.status,
