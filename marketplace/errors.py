@@ -4,8 +4,13 @@ from __future__ import annotations
 
 
 class MarketplaceError(Exception):
-    def __init__(self, code: str, message: str = ""):
+    def __init__(self, code: str, message: str = "", *, decision=None):
         self.code = code
+        # Block 5.8: when raised from Price Protection, ``decision`` carries
+        # the full structured ``PriceProtectionDecision`` (breakdown,
+        # profitability, reason codes) for auditability -- optional and
+        # unused by every pre-existing raise site (spec section 15).
+        self.decision = decision
         super().__init__(message or code)
 
 

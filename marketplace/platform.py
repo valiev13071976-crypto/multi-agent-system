@@ -12,9 +12,12 @@ This module intentionally does **not**:
     ``product_intel``; canonical products are passed in as plain dicts,
     the same convention ``integrations.bitrix.product_bridge`` already
     uses for its own channel);
-  - implement 5.8 Marketplace Price Protection business policy (that is
-    ``marketplace.price_guard``/``marketplace.economics``, untouched here;
-    this module only supports price READ/WRITE mechanics per section 12);
+    - own the Block 5.8 Price Protection *calculation* (that lives in
+    ``marketplace.price_protection``, a self-contained engine); this module
+    only wires that engine's ALLOW/REQUIRE_APPROVAL/BLOCK decision as an
+    optional guard in front of ``write_price`` (spec 5.8 section 11) --
+    opt-in via the ``protection`` parameter, so pre-5.8 callers that omit
+    it keep the exact prior mechanics-only behavior;
   - talk to any provider HTTP client directly -- every read/write goes
     through ``IntegrationActivationService.execute_via_gateway``, the same
     governed path Block 5.6 (Bitrix) and the existing marketplace adapter
@@ -31,7 +34,21 @@ from integrations.activation.models import ENV_FIXTURE, OP_READ, OP_WRITE
 from integrations.activation.service import IntegrationActivationService
 from security.tenant import require_tenant_id
 
-from marketplace.errors import MARKETPLACE_CAPABILITY_UNSUPPORTED, MARKETPLACE_NOT_FOUND, MarketplaceError, classify_provider_error
+from marketplace.errors import (
+    MARKETPLACE_APPROVAL_REQUIRED,
+    MARKETPLACE_CAPABILITY_UNSUPPORTED,
+    MARKETPLACE_NOT_FOUND,
+    MarketplaceError,
+    classify_provider_error,
+)
+from marketplace.price_protection import (
+    PRICE_DECISION_BLOCK,
+    PRICE_DECISION_REQUIRE_APPROVAL,
+    PriceProtectionContext,
+    PriceProtectionDecision,
+    PriceProtectionPolicyStore,
+    evaluate_price_decision,
+)
 from marketplace.models import (
     CATEGORY_MATCHED,
     CATEGORY_UNMAPPED,
@@ -342,6 +359,7 @@ class MarketplacePlatform:
         self.provider = provider
         self._profile = _profile(provider)
         self.category_maps = MarketplaceCategoryMapStore()
+        self.price_protection_policies = PriceProtectionPolicyStore()
 
     # ---- internal governed I/O ----
 
@@ -468,6 +486,55 @@ class MarketplacePlatform:
         raw = self._read(tenant_id=tenant_id, environment=environment, capability=self._profile.price_read_capability, payload=payload, connection_id=connection_id)
         return self._normalize_price(account_id=account_id, external_sku=external_sku, raw=raw)
 
+    def evaluate_price_protection(
+        self,
+        *,
+        tenant_id: str,
+        external_sku: str,
+        context: PriceProtectionContext,
+        proposed_price: Decimal,
+        current_price: Decimal | None = None,
+    ) -> PriceProtectionDecision:
+        """Block 5.8 — evaluate the canonical Price Protection decision for
+        one (tenant, provider, sku) price change without writing anything.
+        Policy precedence (SKU override -> provider -> tenant default) is
+        resolved from ``self.price_protection_policies`` (spec section 8).
+        Safe to call repeatedly (e.g. to render HITL approval evidence
+        before a human sets ``approved_write=True``)."""
+        tenant = require_tenant_id(tenant_id)
+        policy = self.price_protection_policies.resolve(tenant_id=tenant, provider=self.provider, sku=external_sku)
+        proposed = MoneyAmount(proposed_price, context.currency)
+        current = MoneyAmount(Decimal(str(current_price)), context.currency) if current_price is not None else None
+        return evaluate_price_decision(context=context, policy=policy, proposed_price=proposed, current_price=current)
+
+    def evaluate_price_protection_batch(
+        self,
+        *,
+        tenant_id: str,
+        items: list[dict],
+        bulk: bool = False,
+    ) -> list[dict]:
+        """Block 5.8 — per-item Price Protection evaluation for a bulk price
+        change (spec section 14). Reuses the existing batch-admission gate
+        (``bulk_sync_gate``); each item still gets its own independent
+        economic evaluation -- one ALLOW/safe item never authorizes an
+        unsafe sibling SKU. ``items`` is a list of
+        ``{"external_sku", "context", "proposed_price", "current_price"?}``.
+        Returns one ``{"external_sku", "decision"}`` per item, in order --
+        never partially hides a failure."""
+        self.bulk_sync_gate(item_count=len(items), bulk=bulk)
+        results = []
+        for item in items:
+            decision = self.evaluate_price_protection(
+                tenant_id=tenant_id,
+                external_sku=item["external_sku"],
+                context=item["context"],
+                proposed_price=item["proposed_price"],
+                current_price=item.get("current_price"),
+            )
+            results.append({"external_sku": item["external_sku"], "decision": decision})
+        return results
+
     def write_price(
         self,
         *,
@@ -479,11 +546,50 @@ class MarketplacePlatform:
         environment: str = ENV_FIXTURE,
         connection_id: str | None = None,
         correlation_id: str = "",
+        protection: PriceProtectionContext | None = None,
+        current_price: Decimal | None = None,
     ) -> dict:
-        """Governed price WRITE (spec section 12). Does not decide whether
-        the price is economically safe -- that is 5.8, out of scope here."""
+        """Governed price WRITE (spec section 12), optionally gated by
+        Block 5.8 Price Protection.
+
+        When ``protection`` is omitted (default), behavior is byte-for-byte
+        identical to the pre-5.8 mechanics-only write (spec section 16).
+
+        When ``protection`` is supplied, the proposed price is evaluated
+        through the canonical Price Protection decision engine BEFORE any
+        external mutation is attempted:
+          - ``BLOCK`` is the hard economic safety floor (spec section 7) --
+            raised unconditionally, *even if* ``approved_write=True``. No
+            caller can use approval to bypass a genuinely loss-making or
+            economically invalid price.
+          - ``REQUIRE_APPROVAL`` still requires the same ``approved_write``
+            flag every governed write already requires -- no second
+            approval engine is introduced; the decision (with full cost
+            breakdown/profitability/reason codes) is attached to the
+            denial for approval evidence when not yet approved, and to the
+            successful write result once it proceeds.
+          - ``ALLOW`` proceeds through the exact same governed write path.
+        """
+        decision: PriceProtectionDecision | None = None
+        if protection is not None:
+            decision = self.evaluate_price_protection(
+                tenant_id=tenant_id,
+                external_sku=external_sku,
+                context=protection,
+                proposed_price=amount,
+                current_price=current_price,
+            )
+            if decision.outcome == PRICE_DECISION_BLOCK:
+                raise MarketplaceError(decision.reason_codes[0], f"price_protection_blocked:{decision.reason_codes}", decision=decision)
+            if decision.outcome == PRICE_DECISION_REQUIRE_APPROVAL and not approved_write:
+                raise MarketplaceError(
+                    MARKETPLACE_APPROVAL_REQUIRED,
+                    f"price_protection_requires_approval:{decision.reason_codes}",
+                    decision=decision,
+                )
+
         payload = {"operation": "price_update", self._profile.sku_param: external_sku, "new_price": str(amount)}
-        return self._write(
+        out = self._write(
             tenant_id=tenant_id,
             environment=environment,
             payload=payload,
@@ -492,6 +598,10 @@ class MarketplacePlatform:
             connection_id=connection_id,
             correlation_id=correlation_id,
         )
+        if decision is not None:
+            out = dict(out)
+            out["price_protection_decision"] = decision
+        return out
 
     # ---- STOCK ----
 
