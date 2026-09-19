@@ -332,6 +332,28 @@ class BusinessAssistantApiService:
                 tenant_id=tenant, idempotency_key=norm.idempotency_key
             )
             if existing:
+                # Production defect closure (BAA_ACCESS_DENIED root-cause):
+                # ``get_request_by_idempotency`` is scoped by
+                # ``(tenant_id, idempotency_key)`` only -- it was never
+                # checked against the CALLING owner_id. Two different
+                # owners in the same tenant colliding on the same
+                # idempotency_key + identical payload (e.g. a shared
+                # "quick action" that derives a non-random key) used to
+                # make this branch hand the SECOND owner's caller back the
+                # FIRST owner's ``ApiRequestRecord`` completely unchecked
+                # -- a 200 OK at submit time. The very next status/result
+                # poll for that SAME ``request_id`` (now correctly owner-
+                # checked by ``get_request``) then raised
+                # ``BAA_ACCESS_DENIED`` for that caller's own, just-
+                # returned request_id. Denying the collision HERE, at
+                # submit time, closes that gap without weakening the
+                # owner check itself and without ever returning (or
+                # silently overwriting via the idempotency-key UNIQUE
+                # index) another owner's data.
+                if existing.owner_id != owner_id:
+                    raise BusinessAssistantApiError(
+                        BAA_IDEMPOTENCY_CONFLICT, "idempotency_key_in_use", http_status=409
+                    )
                 if existing.payload_hash != norm.payload_hash:
                     raise BusinessAssistantApiError(
                         BAA_IDEMPOTENCY_CONFLICT, "payload_mismatch", http_status=409
@@ -1198,6 +1220,35 @@ class BusinessAssistantApiService:
         )
         if existing:
             return
+        # Production defect closure (BAA_ACCESS_DENIED root-cause,
+        # conversation/request ownership persistence): ``conversation_id``
+        # is client-supplied (``SubmitRequestBody.conversation_id`` has no
+        # format/uniqueness validation) and ``ba_api_conversations``'s
+        # primary key is ``conversation_id`` alone -- NOT
+        # ``(conversation_id, owner_id)``. Before this check, a caller
+        # whose owner_id did not match this conversation_id's ALREADY-
+        # persisted owner (e.g. a stale/reused conversation_id from a
+        # different session or a genuinely different owner) fell through
+        # to ``save_conversation`` below, which is an ``INSERT OR
+        # REPLACE`` keyed by ``conversation_id`` -- silently REASSIGNING
+        # that conversation's ownership to the current caller. The
+        # conversation's ORIGINAL owner would then, on their own very next
+        # turn in that SAME conversation, no longer match the
+        # now-reassigned owner_id either, and every message/attachment
+        # persisted for it becomes visible only to whichever owner last
+        # "won" this race -- while ``get_request``'s owner_id check
+        # correctly keeps denying stale ``ApiRequestRecord`` reads for
+        # whoever no longer matches. Failing closed here instead (denying
+        # the MISMATCHED caller up front, never touching the row) keeps
+        # the conversation's ownership permanently stable for its
+        # legitimate original owner -- the exact "same owner allowed,
+        # different owner denied" invariant -- and never weakens or
+        # bypasses the existing ``get_request`` owner check.
+        other_owner = self.store.get_conversation_owner(
+            tenant_id=tenant, conversation_id=conversation_id
+        )
+        if other_owner is not None and other_owner != owner:
+            raise BusinessAssistantApiError(BAA_ACCESS_DENIED, http_status=403)
         now = _utc_iso()
         self.store.save_conversation(
             ConversationRecord(
