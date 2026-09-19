@@ -393,19 +393,19 @@ def _reference_candidate_summary(row: dict, table) -> str:
     return ", ".join(parts) if parts else "товар без названия"
 
 
-def _resolve_product_reference(
+def _resolve_product_reference_full(
     text: str, rows: list[dict], table
-) -> tuple[str, object]:
-    """Generic, deterministic human-reference resolution of ``text``
-    against THIS dataset's own identifier/name/brand columns -- never an
+) -> tuple[str, list[tuple[int, str, str]]]:
+    """Core tier 1/2/3 matching engine shared by ``_resolve_product_
+    reference`` (public/legacy contract: a bare tuple for UNIQUE, plain
+    summary strings for AMBIGUOUS) and ``_resolve_product_reference_
+    candidates`` (rich per-candidate dicts -- row_index/column/value/
+    summary -- needed to PERSIST a candidate's identity across turns for
+    clarification-continuation; see ``business_assistant.conversation_
+    gateway``'s pending-ambiguity handling). Always returns a LIST of
+    ``(row_index, matched_column, matched_value)`` tuples: empty for
+    ``NONE``, exactly one for ``UNIQUE``, 2+ for ``AMBIGUOUS`` -- never an
     LLM guess, never a phrase/product-specific rule.
-
-    Returns exactly one of:
-    - ('UNIQUE', (row_index, matched_column, matched_value)) -- a single,
-      sufficiently strong candidate;
-    - ('AMBIGUOUS', [candidate_summary, ...]) -- more than one plausible
-      candidate, so the caller must ask instead of guessing;
-    - ('NONE', None) -- no sufficiently reliable candidate.
 
     Tier 1 (exact substring, case-insensitive): the SAME rule
     ``_find_row_by_identifier`` already uses for the legacy path, made
@@ -431,7 +431,7 @@ def _resolve_product_reference(
     """
     blob = (text or "").strip()
     if not blob:
-        return ("NONE", None)
+        return ("NONE", [])
 
     id_columns = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
     if id_columns:
@@ -446,19 +446,16 @@ def _resolve_product_reference(
                     exact_hits.append((index, col.source_name, value))
                     break
         if len(exact_hits) == 1:
-            return ("UNIQUE", exact_hits[0])
+            return ("UNIQUE", exact_hits)
         if len(exact_hits) > 1:
-            return (
-                "AMBIGUOUS",
-                [_reference_candidate_summary(rows[h[0]], table) for h in exact_hits],
-            )
+            return ("AMBIGUOUS", exact_hits)
 
     compact_blob = _compact_alnum(blob)
     if not compact_blob:
-        return ("NONE", None)
+        return ("NONE", [])
     ref_columns = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
     if not ref_columns:
-        return ("NONE", None)
+        return ("NONE", [])
     user_digit_tokens = _digit_tokens(blob)
     candidates: list[tuple[int, str, str]] = []
     for index, row in enumerate(rows):
@@ -508,13 +505,217 @@ def _resolve_product_reference(
         if matched is not None:
             candidates.append((index, matched[0], matched[1]))
     if len(candidates) == 1:
-        return ("UNIQUE", candidates[0])
+        return ("UNIQUE", candidates)
     if len(candidates) > 1:
-        return (
-            "AMBIGUOUS",
-            [_reference_candidate_summary(rows[c[0]], table) for c in candidates],
+        return ("AMBIGUOUS", candidates)
+    return ("NONE", [])
+
+
+_IDENTIFIER_ROLE_PRIORITY = (ROLE_SKU, ROLE_ARTICLE, ROLE_EAN, ROLE_BARCODE)
+
+
+def _row_canonical_identifier(row: dict, table) -> tuple[str, str] | None:
+    """The row's OWN strongest identifier column/value (SKU, else
+    article, else EAN, else barcode), or ``None`` when the row carries
+    none of those roles with a real value. Used to make a PERSISTED
+    clarification candidate's identity always the most deterministic
+    one available -- re-expressing it later (see ``business_assistant.
+    conversation_gateway``'s clarification-continuation handling) as a
+    direct reference to this value always hits the SAME exact-match
+    identifier lookup every other "send the exact SKU" turn already
+    uses, instead of depending on a free-text column value (e.g. the
+    product name) a model call would have to re-interpret."""
+    for role in _IDENTIFIER_ROLE_PRIORITY:
+        col = next((c for c in table.columns if c.semantic_role == role), None)
+        if col is None:
+            continue
+        value = str(row.get(col.source_name) or "").strip()
+        if value:
+            return (col.source_name, value)
+    return None
+
+
+def _resolve_product_reference_candidates(
+    text: str, rows: list[dict], table
+) -> tuple[str, list[dict]]:
+    """Rich-candidate wrapper around ``_resolve_product_reference_full``:
+    same tiers, same status codes, but every candidate is a dict carrying
+    its ``row_index``/``matched_column``/``matched_value``/human summary
+    -- everything ``business_assistant.conversation_gateway`` needs to
+    PERSIST a candidate's identity across turns (clarification-
+    continuation) without duplicating the row's full product data.
+
+    The persisted ``column``/``value`` prefer the row's OWN canonical
+    identifier (``_row_canonical_identifier``) over whichever column the
+    tier engine happened to key off internally for AMBIGUITY DETECTION
+    -- detection itself is unaffected (still runs against every
+    identifier/name column, see ``_resolve_product_reference_full``),
+    only the identity SURFACED for later re-selection is upgraded to the
+    strongest one available."""
+    status, hits = _resolve_product_reference_full(text, rows, table)
+    candidates = []
+    for index, column, value in hits:
+        canonical = _row_canonical_identifier(rows[index], table)
+        if canonical is not None:
+            column, value = canonical
+        candidates.append(
+            {
+                "row_index": index,
+                "column": column,
+                "value": value,
+                "summary": _reference_candidate_summary(rows[index], table),
+            }
         )
+    return status, candidates
+
+
+def _resolve_product_reference(text: str, rows: list[dict], table) -> tuple[str, object]:
+    """Legacy/public contract kept BYTE-FOR-BYTE compatible with every
+    existing caller/test: a bare ``(row_index, matched_column,
+    matched_value)`` tuple for ``UNIQUE``, plain human-readable summary
+    strings for ``AMBIGUOUS`` -- see ``_resolve_product_reference_full``
+    for the actual matching tiers, and ``_resolve_product_reference_
+    candidates`` for the richer, row-identity-carrying shape used by the
+    clarification-continuation persistence path.
+
+    Returns exactly one of:
+    - ('UNIQUE', (row_index, matched_column, matched_value)) -- a single,
+      sufficiently strong candidate;
+    - ('AMBIGUOUS', [candidate_summary, ...]) -- more than one plausible
+      candidate, so the caller must ask instead of guessing;
+    - ('NONE', None) -- no sufficiently reliable candidate.
+    """
+    status, hits = _resolve_product_reference_full(text, rows, table)
+    if status == "UNIQUE":
+        return ("UNIQUE", hits[0])
+    if status == "AMBIGUOUS":
+        return ("AMBIGUOUS", [_reference_candidate_summary(rows[h[0]], table) for h in hits])
     return ("NONE", None)
+
+
+# Production defect closure (clarification-continuation): once an
+# AMBIGUOUS product reference has produced a real candidate list, the
+# VERY NEXT turn's natural discriminator ("второй", a unique suffix, a
+# shortened fragment, an exact article/SKU/EAN) must resolve AGAINST
+# THAT SAME already-presented candidate set FIRST -- never re-searched
+# against the whole dataset. ``resolve_ambiguity_clarification`` is a
+# pure, stateless matcher over an already-produced candidate list (each
+# entry: the SAME dict shape ``_resolve_product_reference_candidates``
+# returns) -- it never touches the store/dataset itself, so any caller
+# (currently only ``business_assistant.conversation_gateway``, which
+# persists that candidate list on the EXISTING ``ActiveTask.parameters``
+# -- no new store) can call it directly with whatever candidate list it
+# persisted on a prior turn.
+_CLARIFICATION_MIN_TOKEN_LEN = 3
+_CLARIFICATION_NUMBERED_REF_RE = re.compile(
+    r"(?:номер|позици[юя]|вариант|option|number)\s*(\d{1,2})\b", re.I
+)
+# Ordinal words, RU and EN, as WHOLE-WORD forms (never a bare stem --
+# e.g. the stem "втор" alone would falsely fire on "повтори" ("repeat")
+# or "вторник" ("Tuesday"), neither of which is an ordinal reference at
+# all), each mapped to its 1-based candidate position. Bare numerals
+# ("2") and "номер 2"/"вариант 2"/"option 2" phrasing are handled
+# separately above/below -- this tuple only covers natural ordinal
+# WORDS, positions 1-10 (more than enough for any real clarification
+# list; a longer list simply never gets an ordinal-word shortcut and
+# falls through to the token/fragment matcher below instead of
+# guessing).
+_CLARIFICATION_ORDINAL_WORDS: tuple[tuple[tuple[str, ...], int], ...] = (
+    (("первый", "первая", "первое", "первую", "первого", "first", "1st"), 1),
+    (("второй", "вторая", "второе", "вторую", "второго", "second", "2nd"), 2),
+    (("третий", "третья", "третье", "третью", "третьего", "third", "3rd"), 3),
+    (("четвертый", "четвертая", "четвертое", "четвертую", "четвертого", "fourth", "4th"), 4),
+    (("пятый", "пятая", "пятое", "пятую", "пятого", "fifth", "5th"), 5),
+    (("шестой", "шестая", "шестое", "шестую", "шестого", "sixth", "6th"), 6),
+    (("седьмой", "седьмая", "седьмое", "седьмую", "седьмого", "seventh", "7th"), 7),
+    (("восьмой", "восьмая", "восьмое", "восьмую", "восьмого", "eighth", "8th"), 8),
+    (("девятый", "девятая", "девятое", "девятую", "девятого", "ninth", "9th"), 9),
+    (("десятый", "десятая", "десятое", "десятую", "десятого", "tenth", "10th"), 10),
+)
+_CLARIFICATION_ORDINAL_WORD_RE = re.compile(
+    r"\b(?:" + "|".join(sorted({w for words, _ in _CLARIFICATION_ORDINAL_WORDS for w in words})) + r")\b"
+)
+
+
+def _clarification_ordinal_index(text: str) -> int | None:
+    """1-based position ``text`` names, or ``None`` when it names none.
+    Never guesses a position from an unrelated digit that is part of a
+    longer identifier, or from an unrelated word that merely CONTAINS an
+    ordinal-looking stem (e.g. "повтори"/"repeat", "вторник"/"Tuesday")
+    -- only fires for a message that IS (after trimming trailing
+    punctuation) a bare small integer, an explicit "номер/вариант/
+    option N" phrase, or contains a genuine, whole-word ordinal."""
+    blob = (text or "").strip().casefold().replace("ё", "е")
+    if not blob:
+        return None
+    bare = blob.strip(" .!?,\u2014-")
+    if bare.isdigit() and len(bare) <= 2:
+        return int(bare)
+    match = _CLARIFICATION_NUMBERED_REF_RE.search(blob)
+    if match:
+        return int(match.group(1))
+    word_match = _CLARIFICATION_ORDINAL_WORD_RE.search(blob)
+    if word_match:
+        found = word_match.group(0)
+        for words, index in _CLARIFICATION_ORDINAL_WORDS:
+            if found in words:
+                return index
+    return None
+
+
+def resolve_ambiguity_clarification(
+    text: str, candidates: list[dict]
+) -> tuple[str, list[dict]]:
+    """Resolves a follow-up reply AGAINST an already-presented AMBIGUOUS
+    candidate list (never the whole dataset). ``candidates`` is the SAME
+    dict shape ``_resolve_product_reference_candidates`` returns: each
+    entry carries ``row_index``/``column``/``value``/``summary``.
+
+    Returns exactly one of:
+    - ('SELECTED', [one_candidate]) -- exactly one candidate matched:
+      an ordinal ("второй"), a unique suffix/token, a shortened
+      identifying fragment, or an exact article/SKU/EAN;
+    - ('STILL_AMBIGUOUS', [matched_candidates]) -- 2+ candidates still
+      match (a same-or-reduced subset of the input) -- the caller must
+      show THIS reduced list, never guess between them;
+    - ('NONE', []) -- nothing in THIS candidate set matched. The caller
+      decides what that means (ask again over the SAME set, or the user
+      started a genuinely different request) -- this function never
+      re-searches the whole dataset itself and never guesses.
+
+    Deterministic, data-driven, and generic: no candidate identity,
+    brand, SKU, or literal text is ever hardcoded here -- only the
+    candidate list the caller itself already produced and persisted."""
+    blob = (text or "").strip()
+    if not blob or not candidates:
+        return ("NONE", [])
+
+    ordinal_index = _clarification_ordinal_index(blob)
+    if ordinal_index is not None and 1 <= ordinal_index <= len(candidates):
+        return ("SELECTED", [candidates[ordinal_index - 1]])
+
+    compact_query = _compact_alnum(blob)
+    if not compact_query or len(compact_query) < _CLARIFICATION_MIN_TOKEN_LEN:
+        return ("NONE", [])
+
+    matched: list[dict] = []
+    for candidate in candidates:
+        compact_value = _compact_alnum(str(candidate.get("value") or ""))
+        compact_summary = _compact_alnum(str(candidate.get("summary") or ""))
+        is_hit = bool(compact_value) and (
+            compact_value in compact_query or compact_query in compact_value
+        )
+        if not is_hit and compact_summary:
+            is_hit = compact_query in compact_summary
+        if is_hit:
+            matched.append(candidate)
+
+    if len(matched) == 1:
+        return ("SELECTED", matched)
+    if len(matched) >= 2:
+        return ("STILL_AMBIGUOUS", matched)
+    return ("NONE", [])
+
 
 _SAFE_FILENAME_RE = re.compile(r"[\\/\x00-\x1f:*?\"<>|]+")
 
@@ -1492,20 +1693,36 @@ class DataIntelligenceService:
                 # spacing/separators, or only a brand + meaningful partial
                 # model/article, still resolves -- never guessing when
                 # genuinely ambiguous or unmatched.
-                ref_status, ref_payload = _resolve_product_reference(
+                ref_status, ref_candidates = _resolve_product_reference_candidates(
                     str(selection.value), rows, table
                 )
                 if ref_status == "UNIQUE":
-                    row_index, _matched_column, matched_value = ref_payload
+                    row_index = ref_candidates[0]["row_index"]
+                    matched_value = ref_candidates[0]["value"]
                 elif ref_status == "AMBIGUOUS":
+                    summaries = [c["summary"] for c in ref_candidates]
                     lines = ["Нашёл несколько подходящих товаров:"]
-                    lines.extend(f"{i}. {c}" for i, c in enumerate(ref_payload, 1))
+                    lines.extend(f"{i}. {c}" for i, c in enumerate(summaries, 1))
                     lines.append("Какой выбрать?")
                     return {
                         "status": "AMBIGUOUS",
                         "dataset_id": dataset_id,
                         "message_safe": "\n".join(lines),
-                        "candidates": list(ref_payload),
+                        "candidates": summaries,
+                        # Clarification-continuation (generic, data-driven):
+                        # minimum row-identity per candidate -- row_index/
+                        # matched column & value/summary, never full
+                        # product data -- so the caller
+                        # (``business_assistant.conversation_gateway``)
+                        # can PERSIST this exact candidate set on the
+                        # EXISTING ``ActiveTask``/Workset state and
+                        # resolve the VERY NEXT turn's natural
+                        # discriminator ("second", a unique suffix, a
+                        # shortened fragment, ...) against THESE
+                        # candidates first, instead of re-searching the
+                        # whole dataset. See ``data_intel.service.
+                        # resolve_ambiguity_clarification``.
+                        "candidate_rows": ref_candidates,
                     }
             if row_index is None or not 0 <= row_index < len(rows):
                 return {

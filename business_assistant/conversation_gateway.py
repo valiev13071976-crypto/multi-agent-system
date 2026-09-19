@@ -6,7 +6,7 @@ import re
 import time
 import uuid
 from dataclasses import dataclass, field
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Mapping, Protocol, runtime_checkable
 
 
 class ConversationUnavailableError(Exception):
@@ -254,6 +254,22 @@ def select_canonical_final_answer(result: dict[str, Any] | None) -> str:
 
 def extract_assistant_text(result: dict[str, Any]) -> str:
     return select_canonical_final_answer(result if isinstance(result, dict) else {})
+
+
+def _render_ambiguous_candidates_message(candidates: list[Mapping[str, Any]]) -> str:
+    """SAME visual shape ``DataIntelligenceService.
+    execute_structured_plan_via_model``'s own ``message_safe`` already
+    uses for a fresh AMBIGUOUS result -- kept as one plain function
+    (never a template/i18n system of its own) so a reduced clarification
+    list (``STILL_AMBIGUOUS``) or a restored original list (a pending-
+    ambiguity turn that matched nothing new) reads identically to the
+    very first clarification the user already saw."""
+    summaries = [str(c.get("summary") or "").strip() for c in candidates]
+    summaries = [s for s in summaries if s]
+    lines = ["Нашёл несколько подходящих товаров:"]
+    lines.extend(f"{i}. {summary}" for i, summary in enumerate(summaries, 1))
+    lines.append("Какой выбрать?")
+    return "\n".join(lines)
 
 
 def _table_operation_preview(data: dict[str, Any]) -> dict[str, Any]:
@@ -1085,6 +1101,7 @@ class WorkflowPandaConversationGateway:
             resolve_bitrix_write_plan_question,
         )
         from business_assistant import workset as workset_lib
+        from data_intel.service import resolve_ambiguity_clarification
         from tools.models import ToolRequest
 
         task = self._action_store.get(
@@ -1096,8 +1113,60 @@ class WorkflowPandaConversationGateway:
         if workset is None or not workset.current_dataset_id:
             return None
 
+        # Clarification-continuation (generic, data-driven -- production
+        # defect closure): when a PRIOR turn left a pending AMBIGUOUS
+        # candidate set on THIS SAME task (see the ``status ==
+        # "AMBIGUOUS"`` branch below, which is the only place that ever
+        # writes ``pending_product_ambiguity``), THIS turn's text is
+        # resolved AGAINST THAT candidate set FIRST -- an ordinal
+        # ("второй"), a unique suffix/token, a shortened identifying
+        # fragment, or an exact article/SKU/EAN -- never re-searched
+        # against the whole Workset unless that resolution finds nothing
+        # in the pending set AND this turn's text also fails to name any
+        # OTHER concrete product below (see ``restore_pending_message``).
+        # Persisted entirely inside the EXISTING ``ActiveTask.parameters``
+        # -- no new store, no new agent, no new dataset.
+        effective_text = text
+        restore_pending_message: str | None = None
+        pending = task.parameters.get("pending_product_ambiguity")
+        if isinstance(pending, Mapping) and pending.get("dataset_id") == workset.current_dataset_id:
+            pending_candidates = [c for c in (pending.get("candidates") or []) if isinstance(c, Mapping)]
+            outcome, matched = resolve_ambiguity_clarification(text, pending_candidates)
+            if outcome == "SELECTED" and matched:
+                # Exactly one candidate from the PRIOR turn's own list
+                # resolved -- clear the pending state and re-express this
+                # turn as a direct reference to that candidate's own
+                # canonical identifier, so the SAME deterministic,
+                # exact-match row lookup every other "send the exact
+                # SKU/article/EAN" turn already uses picks it up (never a
+                # second, competing selection mechanism).
+                task.parameters.pop("pending_product_ambiguity", None)
+                effective_text = str(matched[0].get("value") or "") or text
+            elif outcome == "STILL_AMBIGUOUS" and matched:
+                task.parameters["pending_product_ambiguity"] = {
+                    "dataset_id": pending.get("dataset_id"),
+                    "candidates": matched,
+                }
+                self._action_store.put(task)
+                mark_executed(self._action_store, task, failed=True)
+                return ConversationResult(
+                    text=_render_ambiguous_candidates_message(matched),
+                    task_id=task.task_id,
+                    metadata={"action_decision": "AMBIGUOUS_PRODUCT_REFERENCE", "artifacts": []},
+                )
+            else:
+                # Matches none of the pending candidates. Do NOT guess and
+                # do NOT drop the original candidate set yet -- only a
+                # CONCLUSIVE different outcome below (a fresh ROW_FOUND/
+                # OK/FIELD_VALUE/WRITE_PLAN_REQUESTED, i.e. this turn
+                # clearly named/started something else) abandons it; a
+                # fresh AMBIGUOUS/no-match result is not new information,
+                # so this turn re-asks against the SAME original list
+                # instead of a re-searched (and possibly empty) one.
+                restore_pending_message = _render_ambiguous_candidates_message(pending_candidates)
+
         args: dict = {
-            "text": text,
+            "text": effective_text,
             "dataset_id": workset.current_dataset_id,
             "use_model_plan": True,
             "conversation_id": conversation_id,
@@ -1125,6 +1194,36 @@ class WorkflowPandaConversationGateway:
             return None
         data = dict(getattr(result, "data", None) or {})
         status = str(data.get("status") or "")
+
+        if restore_pending_message is not None:
+            if status in ("ROW_FOUND", "OK"):
+                # A CONCLUSIVE outcome -- an outright product selection
+                # (``ROW_FOUND``) or a table-wide operation (``OK``) --
+                # this turn clearly named/started something else, so the
+                # pending ambiguity is explicitly abandoned instead of
+                # silently hijacking a later unrelated turn. Persisted
+                # immediately (not left for a downstream branch's own
+                # ``put``) so the abandonment survives regardless of
+                # what that branch does afterward.
+                task.parameters.pop("pending_product_ambiguity", None)
+                self._action_store.put(task)
+            else:
+                # AMBIGUOUS / NOT_APPLICABLE / "" / FIELD_VALUE / WRITE_
+                # PLAN_REQUESTED / any technical-failure status -- NONE
+                # of these conclusively named a NEW, different product
+                # (``FIELD_VALUE``/``WRITE_PLAN_REQUESTED`` only ever
+                # answer about an ALREADY selected product, never a
+                # fresh selection). Neither the pending candidate set nor
+                # this whole-Workset attempt distinguished a different
+                # product, so keep the ORIGINAL pending candidates alive
+                # (already persisted, untouched) and ask again against
+                # exactly them instead of guessing or losing them.
+                mark_executed(self._action_store, task, failed=True)
+                return ConversationResult(
+                    text=restore_pending_message,
+                    task_id=task.task_id,
+                    metadata={"action_decision": "AMBIGUOUS_PRODUCT_REFERENCE", "artifacts": []},
+                )
 
         if status == "ROW_FOUND":
             next_workset = workset_lib.apply_tool_result(workset, data)
@@ -1233,8 +1332,25 @@ class WorkflowPandaConversationGateway:
             # found more than one plausible candidate in the CURRENT
             # dataset -- never guessed; returns the SAME clarification
             # text/candidate list ``format_tool_user_text`` already knows
-            # how to render for this family. Nothing about the Workset
-            # changes: no candidate was actually selected.
+            # how to render for this family. Workset scope/selection is
+            # unchanged (no candidate was actually selected).
+            #
+            # Clarification-continuation (generic, data-driven -- see the
+            # pending-ambiguity check at the top of this method): the
+            # minimum candidate identity (row_index/matched column &
+            # value/summary, never full product data) is PERSISTED on
+            # this SAME ``ActiveTask`` so the VERY NEXT turn's natural
+            # discriminator resolves against THESE candidates first,
+            # instead of re-searching the whole Workset.
+            candidate_rows = data.get("candidate_rows")
+            if isinstance(candidate_rows, list) and candidate_rows:
+                task.parameters["pending_product_ambiguity"] = {
+                    "dataset_id": workset.current_dataset_id,
+                    "candidates": [dict(c) for c in candidate_rows if isinstance(c, Mapping)],
+                }
+            else:
+                task.parameters.pop("pending_product_ambiguity", None)
+            self._action_store.put(task)
             mark_executed(self._action_store, task, failed=True)
             return ConversationResult(
                 text=format_tool_user_text(family=FAMILY_EXCEL, data=data, success=True, artifacts=[]),

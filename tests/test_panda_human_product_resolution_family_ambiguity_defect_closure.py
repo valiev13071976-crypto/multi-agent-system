@@ -285,7 +285,20 @@ class ConversationalJourneyTests(unittest.IsolatedAsyncioTestCase):
         payloads = [
             {"kind": "not_applicable"},  # plain analysis turn
             {"kind": "product_selection", "selector": {"kind": "identifier", "value": "Zeta 32 50210"}},
-            {"kind": "product_selection", "selector": {"kind": "identifier", "value": SKU_32_XB}},
+            # Clarification-continuation defect closure (post PR #100):
+            # the AMBIGUOUS turn above now PERSISTS its own candidate
+            # set (row identity + canonical SKU/article/EAN, never the
+            # full row) on this SAME ``ActiveTask`` -- see
+            # ``business_assistant.conversation_gateway``'s pending-
+            # ambiguity handling and ``data_intel.service.resolve_
+            # ambiguity_clarification``. The follow-up turn below, naming
+            # the exact previously-ambiguous SKU, now resolves AGAINST
+            # that persisted candidate set FIRST via a pure, deterministic
+            # data match -- it never needs a 3rd model call at all
+            # anymore (a strictly BETTER outcome than before this
+            # closure: no model dependency, no model non-determinism
+            # risk, for a case the model already always got right
+            # anyway). This queue therefore only ever needs 2 payloads.
         ]
         env_patch, model_patch, calls = _sequential_model_mock(payloads)
         fake_run_turn, run_turn_calls = _tracking_fake_run_turn([_analyze_plan_entry()])
@@ -301,10 +314,13 @@ class ConversationalJourneyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(r2.metadata.get("action_decision"), "AMBIGUOUS_PRODUCT_REFERENCE")
 
             # D: the natural follow-up, now naming the intended suffix,
-            # resolves that ONE candidate.
+            # resolves that ONE candidate -- against the PERSISTED
+            # candidate set from the turn above, never a fresh whole-
+            # dataset search.
             r3 = await self._respond(f"Покажи {SKU_32_XB}", request_id="a3")
 
         self.assertIn(SKU_32_XB, r3.text)
+        self.assertEqual(r3.metadata.get("action_decision"), "SELECT_CANONICAL_PRODUCT")
         w3 = workset_lib.get_workset(
             self.panda._action_store.get(  # noqa: SLF001
                 tenant_id=TENANT, owner_id=OWNER, conversation_id=CONVERSATION_ID
