@@ -269,6 +269,21 @@ class SqliteBusinessAssistantApiStore:
             metadata=json.loads(row["metadata_json"] or "{}"),
         )
 
+    def get_conversation_owner(self, *, tenant_id: str, conversation_id: str) -> str | None:
+        """Resolve the persisted owner of ``conversation_id`` within this
+        tenant, ignoring the caller's own owner_id -- used ONLY to detect a
+        cross-owner ``conversation_id`` collision BEFORE any write, never to
+        grant access. ``conversation_id`` is client-supplied (see
+        ``SubmitRequestBody``) and this table's primary key is
+        ``conversation_id`` alone, so without this check a second owner
+        reusing the same id string would silently reassign ownership via
+        plain ``INSERT OR REPLACE`` on the owner-scoped lookup path."""
+        row = self._conn.execute(
+            "SELECT owner_id FROM ba_api_conversations WHERE conversation_id=? AND tenant_id=?",
+            (conversation_id, tenant_id),
+        ).fetchone()
+        return row["owner_id"] if row else None
+
     def list_conversations(self, *, tenant_id: str, owner_id: str, limit: int = 50) -> list[ConversationRecord]:
         rows = self._conn.execute(
             """
