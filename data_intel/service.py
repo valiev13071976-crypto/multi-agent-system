@@ -353,6 +353,33 @@ def _longest_common_substring_len(a: str, b: str) -> int:
 # rows and must stay ambiguous/no-match).
 _MIN_PARTIAL_REFERENCE_LEN = 6
 
+# Production defect closure (candidate resolution/ambiguity policy, real
+# LG_TV.xlsx shape): a real-world model code frequently interleaves its
+# meaningful DIGIT groups with letter suffixes/series codes, e.g.
+# "32LQ63806LA" = screen-size "32" + series letters "LQ" + family code
+# "63806" + generation suffix "LA". A human naturally separates the SAME
+# two digit groups with a plain space when referencing it ("LG 32
+# 63806"), which means the row's own identifier value is NEVER a single
+# contiguous substring of (or common-substring with) what the user typed
+# -- the "LQ" in the middle breaks any one contiguous run at exactly the
+# point ``_MIN_PARTIAL_REFERENCE_LEN`` would need it not to. This tier
+# only ADDS a second, token-set-based way for tier 3 to recognize the
+# SAME already-required brand+partial-model shape -- it never relaxes
+# the brand requirement, never lowers the overall specificity bar, and
+# never fires when the user names no digit group at all (a bare brand
+# mention still never matches, e.g. an empty token set is deliberately
+# excluded below rather than treated as a vacuous match).
+_DIGIT_TOKEN_RE = re.compile(r"\d{2,}")
+
+
+def _digit_tokens(text: str) -> set[str]:
+    """Digit-run tokens (length >= 2) found in ``text``, extracted from
+    the ORIGINAL (non-compacted) string so a space between two digit
+    groups the user typed ("32 63806") is never merged into one longer
+    run -- that merging is exactly what ``_compact_alnum`` does and why
+    it cannot be used for this extraction."""
+    return set(_DIGIT_TOKEN_RE.findall(text or ""))
+
 
 def _reference_candidate_summary(row: dict, table) -> str:
     name = _role_value(row, table, ROLE_PRODUCT_NAME)
@@ -395,7 +422,12 @@ def _resolve_product_reference(
     normalized common substring with the row's own SKU/article/product
     name, AND the row's own brand value also present in the text -- covers
     a human naming only part of a longer model code together with the
-    brand. Never matches on brand alone.
+    brand. Never matches on brand alone. Also recognizes the SAME shape
+    when the row's meaningful digit groups (e.g. screen-size "32" and
+    model-family code "63806") are spread across a letter-separated
+    identifier ("32LQ63806LA") and the user typed them with a plain space
+    instead ("32 63806") -- see ``_digit_tokens`` -- without ever lowering
+    the brand requirement or the overall specificity bar.
     """
     blob = (text or "").strip()
     if not blob:
@@ -427,11 +459,14 @@ def _resolve_product_reference(
     ref_columns = [c for c in table.columns if c.semantic_role in _PRODUCT_ID_ROLES]
     if not ref_columns:
         return ("NONE", None)
+    user_digit_tokens = _digit_tokens(blob)
     candidates: list[tuple[int, str, str]] = []
     for index, row in enumerate(rows):
         brand_value = _role_value(row, table, ROLE_BRAND)
         compact_brand = _compact_alnum(brand_value) if brand_value else ""
+        brand_in_blob = bool(compact_brand) and compact_brand in compact_blob
         matched = None
+        row_digit_tokens: set[str] = set()
         for col in ref_columns:
             value = str(row.get(col.source_name) or "").strip()
             compact_value = _compact_alnum(value)
@@ -440,13 +475,34 @@ def _resolve_product_reference(
             if compact_value in compact_blob:
                 matched = (col.source_name, value)
                 break
-            if (
-                len(compact_value) >= _MIN_PARTIAL_REFERENCE_LEN
-                and compact_brand
-                and compact_brand in compact_blob
-            ):
+            if len(compact_value) >= _MIN_PARTIAL_REFERENCE_LEN and brand_in_blob:
                 common_len = _longest_common_substring_len(compact_blob, compact_value)
                 if common_len >= _MIN_PARTIAL_REFERENCE_LEN:
+                    matched = (col.source_name, value)
+                    break
+            # Collected regardless of whether this column already matched
+            # above -- a later column in this SAME row (e.g. EAN) might
+            # carry a digit group this column's value does not, and the
+            # token-set check below always considers the row as a whole.
+            row_digit_tokens |= _digit_tokens(value)
+        if (
+            matched is None
+            and brand_in_blob
+            and user_digit_tokens
+            and user_digit_tokens <= row_digit_tokens
+            and sum(len(t) for t in user_digit_tokens) >= _MIN_PARTIAL_REFERENCE_LEN
+        ):
+            # Token-set tier (see module note above ``_digit_tokens``):
+            # every digit group the user named is present SOMEWHERE in
+            # this row's own identifier columns, even though no single
+            # column's value is one contiguous substring/common-substring
+            # of what the user typed. Report the first identifier column
+            # that actually carries a matching digit group, so the
+            # surfaced "matched value" is a real, present value from this
+            # row -- never invented.
+            for col in ref_columns:
+                value = str(row.get(col.source_name) or "").strip()
+                if value and (_digit_tokens(value) & user_digit_tokens):
                     matched = (col.source_name, value)
                     break
         if matched is not None:
