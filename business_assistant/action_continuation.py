@@ -1177,6 +1177,101 @@ def is_bitrix_write_plan_question(text: str) -> bool:
     return bool(_WRITE_PLAN_RE.search(blob))
 
 
+# Product-first routing defect closure: "покажи, что будет записано на
+# сайт" and "покажи план записи этого товара в Bitrix" express the SAME
+# business intent -- a read-only preview of what the ALREADY SELECTED
+# product would write/publish/upload -- but only the first one satisfied
+# ``_is_write_plan_ask``/``_WRITE_PLAN_RE`` (that regex only recognises the
+# narrow "будет записан"/"final plan" phrasing). Rather than growing
+# ``_WRITE_PLAN_RE`` into an ever-longer phrase list -- which would also
+# risk newly matching ``is_bitrix_write_plan_question``'s OWN Bitrix-target
+# branch for a brand-new Turn-1 message that attaches a fresh spreadsheet
+# AND asks to "покажи ... карточку и план действий перед записью" in the
+# SAME breath (Block 5.5's own row-preview request, which has no active
+# task yet and must keep routing to plain ingestion) -- this is a
+# deliberately SEPARATE, broader predicate used at exactly ONE call site:
+# the generic "already active, already-selected product" continuation
+# branch below. That branch already requires an active FAMILY_EXCEL task
+# with a resolved product (``bitrix_product_fields['sku']``) from an
+# EARLIER turn, so it structurally can never fire on a fresh Turn-1
+# attachment message -- broadening the vocabulary here is safe precisely
+# because the call site's own guard already carries the weight
+# ``is_bitrix_write_plan_question``'s Bitrix-target requirement carries for
+# its own, narrower use.
+#
+# Deliberately EXCLUDES a bare "карточка"/"card" concept stem: an existing,
+# unrelated feature already answers a plain "Покажи подготовленную
+# карточку полностью, включая закупочную цену..." follow-up with the raw
+# spreadsheet-row echo (see ``test_panda_xlsx_followup_context_hotfix.py``/
+# ``test_panda_xlsx_product_preview_response_hotfix.py``), and that
+# behaviour must keep working unchanged -- "карточка" alone never implies
+# "the WRITE plan" the way "план"/"запис"/"публикац"/"загруз" do. The
+# task's own "покажи карточку перед записью" example still matches via
+# "записью" (the "запис" stem), never via "карточку" itself.
+_WRITE_PREVIEW_ASK_STEMS = _WRITE_PLAN_ASK_STEMS + (
+    "что будет",
+    "что собира",
+    "что ты собира",
+    "что именно будет",
+    "what will",
+    "what are you going",
+    "what're you going",
+)
+# The write/publish CONCEPT itself, deliberately broad (bare "план",
+# "итог"/"результат" included, but NOT "карточка"/"card" -- see the module
+# note above) -- safe only in combination with the show-ish gate above AND
+# the caller's own active-task guard; see the module note above for why a
+# bare "план" mention cannot leak into a fresh Turn-1 attachment turn.
+_WRITE_PREVIEW_CONCEPT_STEMS = (
+    "запис",
+    "отправ",
+    "публикац",
+    "опубл",
+    "план",
+    "итог",
+    "результат",
+    "written",
+    "publish",
+    "send",
+    "sent",
+    "plan",
+    "result",
+)
+# "загруз"/"загруж"/"upload" is deliberately NOT in the unconditional set
+# above: "загруженный прайс"/"из загруженного файла" (the SOURCE
+# spreadsheet was uploaded) is common, ordinary phrasing in this domain
+# that has nothing to do with writing the PRODUCT to the site -- see
+# ``test_panda_xlsx_product_preview_response_hotfix.py``'s "...из
+# загруженного файла" follow-up, which must keep its own, unrelated
+# behaviour. "Что будет загружено в Bitrix?" only means the site-write
+# concept because it ALSO names the Bitrix/site target in the same
+# breath, so this stem only counts combined with that target mention.
+_WRITE_PREVIEW_UPLOAD_STEMS = ("загруз", "загруж", "выгруз", "выгруж", "upload")
+_WRITE_PREVIEW_SITE_TARGET_STEMS = _BITRIX_TARGET_MARKER_STEMS + ("сайт", "site")
+
+
+def is_read_only_write_preview_ask(text: str) -> bool:
+    """Generic "show me what will be written/published/uploaded" shape --
+    the SAME business intent as ``is_bitrix_write_plan_question`` but
+    without requiring an explicit "Bitrix"/"Aspro" mention or the narrow
+    "будет записан"/"final plan" phrasing, e.g. "покажи план записи
+    товара", "что будет загружено в Bitrix", "покажи карточку перед
+    записью" (matches via "записью", not the bare "карточку"), "что ты
+    собираешься отправить на сайт", "покажи итог перед публикацией", "what
+    will be uploaded to the site". Deliberately only
+    used at the ONE call site below that already requires an active,
+    already-selected product task -- see the module note above for why
+    that guard is what makes this safe to broaden this far."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if not _has_stem(blob, _WRITE_PREVIEW_ASK_STEMS):
+        return False
+    if _has_stem(blob, _WRITE_PREVIEW_CONCEPT_STEMS):
+        return True
+    return _has_stem(blob, _WRITE_PREVIEW_UPLOAD_STEMS) and _has_stem(blob, _WRITE_PREVIEW_SITE_TARGET_STEMS)
+
+
 # Production defect closure (business-process ownership: a retail-price
 # FORMULA instruction, e.g. "установи розничную цену как закупочная + 7%",
 # misread as an immediate write/publish command): ``business_assistant.
@@ -2200,13 +2295,20 @@ def resolve_action_turn(
     # write this task tracks), so it fell through to the generic
     # continuation heuristics below and, once mis-detected as an unrelated
     # new task, degraded into the legacy business workflow's generic
-    # summary instead of re-showing the write plan. Reuses the EXACT SAME
-    # write-plan-ask shape (``_is_write_plan_ask``/``_WRITE_PLAN_RE``)
-    # ``is_bitrix_write_plan_question`` already tests -- only the
-    # additional Bitrix/Aspro target-mention requirement is waived, and
-    # only when an active FAMILY_EXCEL task already carries a resolved
-    # product (``bitrix_product_fields``), i.e. never for a brand-new
-    # conversation with no established product context at all.
+    # summary instead of re-showing the write plan.
+    #
+    # Product-first routing defect closure: ordinary business phrasing for
+    # the SAME "show me what will be written/published" intent -- "покажи
+    # план записи товара", "что будет загружено в Bitrix", "покажи
+    # карточку перед записью", "что ты собираешься отправить на сайт",
+    # "покажи итог перед публикацией" -- never repeats the narrow "будет
+    # записан"/"final plan" wording either, so this uses the broader,
+    # GENERIC ``is_read_only_write_preview_ask`` here instead of
+    # ``_is_write_plan_ask`` (see that predicate's own module note for why
+    # it is only safe to broaden this far at THIS call site). Only when an
+    # active FAMILY_EXCEL task already carries a resolved product
+    # (``bitrix_product_fields``), i.e. never for a brand-new conversation
+    # with no established product context at all.
     if (
         active is not None
         and active.family == FAMILY_EXCEL
@@ -2214,7 +2316,7 @@ def resolve_action_turn(
         and dict(active.parameters.get("bitrix_product_fields") or {}).get("sku")
         and not is_explicit_bitrix_write_confirmation(current)
         and not is_explicit_product_enrichment_request(current)
-        and _is_write_plan_ask(current)
+        and is_read_only_write_preview_ask(current)
     ):
         return resolve_bitrix_write_plan_question(
             current,
