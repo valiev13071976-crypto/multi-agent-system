@@ -1215,6 +1215,77 @@ def has_explicit_bitrix_no_write_qualifier(text: str) -> bool:
     return bool(_BITRIX_NO_WRITE_RE.search(blob))
 
 
+# Product-first defect closure: a "site-ready product card" is the default
+# outcome of ANY Bitrix write-plan preview/write for an already-selected
+# single product (see ``WorkflowPandaConversationGateway.
+# _auto_prepare_site_ready_card_if_needed``) -- the user never has to say
+# "enrichment"/"обогащение"/"SEO"/"характеристики"/"галерея" for the
+# existing ``product_enrichment_bridge`` pipeline to run. These three
+# stem groups are the ONLY way the user can narrow that default, by
+# EXPLICITLY naming the stage(s) to skip in the SAME message that asks for
+# the preview/write -- never inferred from silence, never phrase-specific
+# to any one "show the plan" wording.
+_PRICE_LIST_ONLY_STEMS = (
+    "только данные из прайса",
+    "только из прайса",
+    "только цену и артикул",
+    "только цена и артикул",
+    "только цену, артикул",
+    "ничего не ищи",
+    "не ищи ничего",
+    "price list only",
+    "only the price list",
+    "only price and sku",
+    "only the price and sku",
+)
+# A compound negation ("без картинок и описания") shares ONE "без" across
+# both nouns -- a plain stem substring check ("без описан" as a literal
+# phrase) never matches the second noun in that shape, so this allows up
+# to two words (and an optional "и"/"and" conjunction) between "без"/
+# "without" and the target noun itself. Still anchored on an explicit
+# negation marker immediately in front -- never a bare "картинки"/
+# "описание" mention alone (e.g. describing what the CARD contains, not
+# what to omit).
+_NO_MEDIA_RE = re.compile(
+    r"без\s+(?:\w+[,]?\s+){0,2}(?:и\s+)?(?:картин\w*|фото\w*|изображен\w*)"
+    r"|without\s+(?:\w+[,]?\s+){0,2}(?:and\s+)?(?:images?|pictures?|photos?)"
+    r"|no\s+images?|no\s+pictures?|no\s+photos?",
+    re.I,
+)
+_NO_DESCRIPTION_RE = re.compile(
+    r"без\s+(?:\w+[,]?\s+){0,2}(?:и\s+)?описан\w*"
+    r"|without\s+(?:\w+[,]?\s+){0,2}(?:and\s+)?descriptions?"
+    r"|no\s+description",
+    re.I,
+)
+
+
+def has_explicit_price_list_only_constraint(text: str) -> bool:
+    """True when the user explicitly limits the card to raw price-list
+    data only (e.g. "только данные из прайса", "ничего не ищи") -- the
+    whole auto-preparation stage is skipped outright and the card stays
+    exactly what the spreadsheet row itself supplied (identity + price),
+    same as before this defect closure."""
+    return _has_stem(text, _PRICE_LIST_ONLY_STEMS)
+
+
+def has_explicit_no_media_constraint(text: str) -> bool:
+    """True when the user explicitly excludes images (e.g. "без картинок",
+    "без картинок и описания") -- media acquisition is skipped, every
+    other stage still runs."""
+    blob = _norm(text)
+    return bool(blob) and bool(_NO_MEDIA_RE.search(blob))
+
+
+def has_explicit_no_description_constraint(text: str) -> bool:
+    """True when the user explicitly excludes descriptions (e.g. "без
+    описания", "без картинок и описания") -- the short/detailed
+    description text is stripped from the prepared card, every other
+    stage still runs."""
+    blob = _norm(text)
+    return bool(blob) and bool(_NO_DESCRIPTION_RE.search(blob))
+
+
 def _extract_confirmed_retail_price(text: str) -> str:
     match = _CONFIRMED_RETAIL_PRICE_RE.search(text or "")
     if not match:
