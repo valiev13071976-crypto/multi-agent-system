@@ -1659,12 +1659,78 @@ class WorkflowPandaConversationGateway:
                 tenant_id=str(request.tenant_id or ""),
                 retail_price=retail_price,
             )
+        # Production duplicate-create defect closure (real Bitrix IDs
+        # 994/995 created for the SAME SKU 32LQ63806LC.ARUG): LiveBitrixAdapter's
+        # own durable pre-create idempotency check
+        # (``_write_product_create_live``'s deterministic ``xmlId`` lookup)
+        # is keyed EXACTLY by the idempotency_key it receives.
+        # ``execute_single_product_write`` already falls back to a
+        # tenant+sku+title-deterministic key (``_default_idempotency_key``)
+        # whenever it is handed an empty one -- but ``idem`` above prefers
+        # ``request.request_id``, a FRESH id generated per HTTP call, which
+        # defeats that durable check for every independent confirmation
+        # turn, even for the exact same product. Only pass an explicit key
+        # to the Bitrix write when ``action.idempotency_key`` genuinely
+        # carries one (a real caller-supplied idempotency contract);
+        # otherwise pass "" so the deterministic default is used instead of
+        # this turn's ephemeral request id. ``idem`` itself is unchanged
+        # for ``self._executed_keys`` (this gateway's own same-turn replay
+        # guard, a separate and still-useful concept).
+        bitrix_write_idem = str(action.idempotency_key or "")
+
+        # TCL.xlsx end-to-end defect closure (Step 3 -- LIVE duplicate
+        # guard reused by single-product create): re-check the CONNECTED
+        # (LIVE or FIXTURE) catalog by article/SKU immediately before this
+        # write, via the SAME governed read
+        # (``BitrixProductBridge.check_live_existence``) the batch
+        # preview/confirmation below already use. This is a genuinely
+        # different guard than ``prepare_single_product_write``'s own
+        # ``plan_sync`` check (which only ever consults this bridge's
+        # local ``self._store`` mapping cache) or LiveBitrixAdapter's
+        # xmlId-keyed pre-create idempotency check (only catches a repeat
+        # of THIS SAME deterministic key) -- it catches a product that
+        # already exists under a DIFFERENT xmlId (e.g. created through any
+        # other path/tool for the same real-world SKU), including
+        # inactive products. Only gates this conversational entry point;
+        # ``execute_single_product_write`` itself (and its own
+        # tightly-scripted unit tests) is unchanged.
+        tenant_id_for_write = str(request.tenant_id or "")
+        try:
+            existing_live_matches = self._bitrix_bridge.check_live_existence(
+                tenant_id=tenant_id_for_write, sku=write_request.sku
+            )
+        except Exception:  # noqa: BLE001 -- a failed guard read must never silently block a write; the existing plan_sync check inside execute_single_product_write still applies
+            existing_live_matches = []
+        if existing_live_matches:
+            if len(existing_live_matches) == 1:
+                target = dict(existing_live_matches[0])
+                bitrix_id = str(target.get("id") or target.get("external_product_id") or "")
+                text = (
+                    "Товар с этим артикулом/SKU уже существует в Bitrix"
+                    f"{f' (Bitrix ID: {bitrix_id})' if bitrix_id else ''}. "
+                    "Эта операция не создаёт дубликаты — запись не выполнена."
+                )
+            else:
+                text = (
+                    "Не удалось однозначно определить, существует ли этот товар в Bitrix "
+                    "(найдено несколько похожих записей по этому артикулу/SKU). Запись не выполнена."
+                )
+            return ConversationResult(
+                text=text,
+                task_id=getattr(task, "task_id", None),
+                metadata={
+                    "action_decision": CALL_CONTROLLED_BITRIX_WRITE,
+                    "artifacts": [],
+                    "write_confirmation_event": "WRITE_BLOCKED_LIVE_DUPLICATE_GUARD",
+                },
+            )
+
         result = execute_single_product_write(
             self._bitrix_bridge,
-            tenant_id=str(request.tenant_id or ""),
+            tenant_id=tenant_id_for_write,
             request=write_request,
             approved=True,
-            idempotency_key=idem,
+            idempotency_key=bitrix_write_idem,
         )
         if idem and result.get("mutated"):
             self._executed_keys.add(idem)
@@ -1949,23 +2015,26 @@ class WorkflowPandaConversationGateway:
         "Проверь весь прайс перед загрузкой на сайт. Покажи, какие товары
         уже есть в Bitrix, каких нет и где есть неоднозначность." Reuses
         the EXISTING single-product duplicate/read logic
-        (``BitrixProductBridge.plan_sync``) once per row -- the SAME
-        governed, read-only call the single-product write-plan preview
-        already makes (see ``_explain_bitrix_write_plan``/
-        ``prepare_single_product_write`` above) -- never a new Bitrix
-        client, never ``catalog.product.add``/``update``, never one
-        conversational turn per row. Rows are read through the EXISTING
-        ``data.excel_assistant`` tool's new ``canonical_identity_rows``
+        (``BitrixProductBridge.check_live_existence``) once per row -- the
+        SAME governed read boundary every other Bitrix read here already
+        uses -- never a new Bitrix client, never
+        ``catalog.product.add``/``update``, never one conversational turn
+        per row. TCL.xlsx end-to-end defect closure: this now genuinely
+        checks the CONNECTED (LIVE or FIXTURE) catalog by article/SKU,
+        never ``plan_sync``'s own local ``self._store`` mapping cache
+        (correct for FIXTURE, but never populated by a real LIVE create,
+        so it could never see what already exists remotely -- exactly the
+        "checks existing products in LIVE Bitrix" requirement this
+        closure is for). Rows are read through the EXISTING
+        ``data.excel_assistant`` tool's ``canonical_identity_rows``
         operation, which reuses the SAME cached column-role schema/
         extraction the single-row ``ROW_FOUND`` lookup already uses -- no
-        second role-detection pass, no second dataset store."""
+        second role-detection pass, no second dataset store. The frozen
+        NEW/``READY_TO_CREATE`` row list is stored on the task so a later
+        explicit batch-write confirmation (``_confirm_batch_bitrix_create``)
+        creates exactly what was previewed here, never a live re-scan at
+        confirmation time."""
         from business_assistant.action_continuation import CHECK_BITRIX_EXISTENCE_BATCH
-        from integrations.bitrix.product_bridge import (
-            SYNC_AMBIGUOUS,
-            SYNC_CREATE,
-            SYNC_UNCHANGED,
-            SYNC_UPDATE,
-        )
         from tools.models import ToolRequest
 
         task = action.task
@@ -2017,35 +2086,78 @@ class WorkflowPandaConversationGateway:
         for row in rows:
             title = str(row.get("title") or "")
             sku = str(row.get("sku") or "")
+            source_row = row.get("row_source_row")
             if not title or not sku:
-                invalid_rows.append({"sku": sku, "title": title, "reason": "missing_sku_or_title"})
+                invalid_rows.append(
+                    {
+                        "source_row": source_row,
+                        "sku": sku,
+                        "title": title,
+                        "reason": "missing_sku_or_title",
+                        "planned_action": "SKIP_INVALID",
+                    }
+                )
                 continue
             try:
-                # The EXISTING, read-only single-product duplicate check --
-                # never mutates Bitrix (see ``BitrixProductBridge.plan_sync``'s
-                # own docstring: a pure diff against the connected catalog).
-                plan = self._bitrix_bridge.plan_sync(
-                    tenant_id=tenant_id,
-                    canonical_product={"title": title, "sku": sku, "product_id": f"panda-batch:{sku}"},
-                )
+                # Genuine existence check against the CONNECTED (LIVE or
+                # FIXTURE) catalog -- never a mutation (see
+                # ``BitrixProductBridge.check_live_existence``'s own
+                # docstring).
+                matches = self._bitrix_bridge.check_live_existence(tenant_id=tenant_id, sku=sku)
             except Exception:  # noqa: BLE001 -- one row's failure must never abort the whole batch
-                invalid_rows.append({"sku": sku, "title": title, "reason": "bitrix_check_failed"})
-                continue
-            action_kind = str(plan.get("action") or "")
-            if action_kind == SYNC_CREATE:
-                new_rows.append({"sku": sku, "title": title})
-            elif action_kind in (SYNC_UPDATE, SYNC_UNCHANGED):
-                target = dict(plan.get("target") or {})
-                existing_rows.append(
-                    {"sku": sku, "title": title, "bitrix_id": str(target.get("external_product_id") or "")}
+                invalid_rows.append(
+                    {
+                        "source_row": source_row,
+                        "sku": sku,
+                        "title": title,
+                        "reason": "bitrix_check_failed",
+                        "planned_action": "SKIP_INVALID",
+                    }
                 )
-            elif action_kind == SYNC_AMBIGUOUS:
-                ambiguous_rows.append(
-                    {"sku": sku, "title": title, "candidates": list(plan.get("candidates") or [])}
+                continue
+            if not matches:
+                # Step 5 batch write closure: freeze the SAME flat fields
+                # ``build_write_request_from_fields`` already reads for the
+                # single-product path (ean/category/brand/purchase_price/
+                # retail_price) alongside identity, so the later batch
+                # create confirmation can build each row's write request
+                # from THIS frozen preview -- never a fresh dataset re-read
+                # at confirmation time.
+                new_rows.append(
+                    {
+                        "source_row": source_row,
+                        "sku": sku,
+                        "title": title,
+                        "ean": str(row.get("ean") or ""),
+                        "category": str(row.get("category") or ""),
+                        "brand": str(row.get("brand") or ""),
+                        "purchase_price": str(row.get("purchase_price") or ""),
+                        "retail_price": str(row.get("retail_price") or ""),
+                        "planned_action": "READY_TO_CREATE",
+                    }
+                )
+            elif len(matches) == 1:
+                target = dict(matches[0])
+                existing_rows.append(
+                    {
+                        "source_row": source_row,
+                        "sku": sku,
+                        "title": title,
+                        "bitrix_id": str(target.get("id") or target.get("external_product_id") or ""),
+                        "planned_action": "SKIP_EXISTS",
+                    }
                 )
             else:
-                invalid_rows.append(
-                    {"sku": sku, "title": title, "reason": str(plan.get("reason") or action_kind or "invalid")}
+                ambiguous_rows.append(
+                    {
+                        "source_row": source_row,
+                        "sku": sku,
+                        "title": title,
+                        "candidates": [
+                            str(m.get("id") or m.get("external_product_id") or "") for m in matches
+                        ],
+                        "planned_action": "SKIP_AMBIGUOUS",
+                    }
                 )
 
         total = len(rows)
@@ -2053,27 +2165,46 @@ class WorkflowPandaConversationGateway:
             "ПРОВЕРКА ПРАЙСА ПО BITRIX (только предпросмотр, ничего не записано):",
             f"ВСЕГО ТОВАРОВ: {total}",
             "",
-            f"НОВЫЕ (не найдены в Bitrix): {len(new_rows)}",
+            f"НОВЫЕ / ГОТОВЫ К СОЗДАНИЮ (READY_TO_CREATE): {len(new_rows)}",
         ]
         for r in new_rows:
-            lines.append(f"  - {r['sku']} — {r['title']}")
+            row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
+            lines.append(f"  - {row_prefix}{r['sku']} — {r['title']}")
         lines.append("")
         lines.append(f"УЖЕ СУЩЕСТВУЮТ В BITRIX: {len(existing_rows)}")
         for r in existing_rows:
+            row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
             bitrix_id_suffix = f" (Bitrix ID: {r['bitrix_id']})" if r.get("bitrix_id") else ""
-            lines.append(f"  - {r['sku']} — {r['title']}{bitrix_id_suffix}")
+            lines.append(f"  - {row_prefix}{r['sku']} — {r['title']}{bitrix_id_suffix}")
         lines.append("")
         lines.append(f"НЕОДНОЗНАЧНЫЕ (несколько возможных совпадений в Bitrix): {len(ambiguous_rows)}")
         for r in ambiguous_rows:
-            lines.append(f"  - {r['sku']} — {r['title']}")
+            row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
+            lines.append(f"  - {row_prefix}{r['sku']} — {r['title']}")
         lines.append("")
         lines.append(f"ТРЕБУЮТ УТОЧНЕНИЯ (нет артикула/SKU или другая причина): {len(invalid_rows)}")
         for r in invalid_rows:
+            row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
             sku_label = r["sku"] or "(без артикула)"
             title_label = r["title"] or "(без названия)"
-            lines.append(f"  - {sku_label} — {title_label} [{r['reason']}]")
+            lines.append(f"  - {row_prefix}{sku_label} — {title_label} [{r['reason']}]")
         lines.append("")
+        if new_rows:
+            lines.append(
+                f"Чтобы создать {len(new_rows)} новых товаров (неактивными, для проверки), "
+                "подтвердите отдельным сообщением, например: "
+                '"Подтверждаю: создай эти новые товары в Bitrix".'
+            )
         lines.append("Ничего в Bitrix не записано: это только предпросмотр.")
+
+        # Step 5 (batch write): freeze the exact approved NEW/READY_TO_CREATE
+        # list + dataset on the task now, at preview time -- a later batch
+        # confirmation turn creates exactly this list, never a fresh re-scan
+        # that could pick up rows the user never actually saw/approved.
+        if task is not None:
+            task.parameters["bitrix_batch_dataset_id"] = dataset_id
+            task.parameters["bitrix_batch_ready_rows"] = list(new_rows)
+            self._action_store.put(task)
 
         return ConversationResult(
             text="\n".join(lines),
@@ -2085,9 +2216,170 @@ class WorkflowPandaConversationGateway:
                 "bitrix_existence_check": {
                     "total": total,
                     "new": new_rows,
+                    "ready_to_create": new_rows,
                     "existing": existing_rows,
                     "ambiguous": ambiguous_rows,
                     "invalid": invalid_rows,
+                },
+            },
+        )
+
+    async def _confirm_batch_bitrix_create(
+        self, request: ConversationRequest, action
+    ) -> ConversationResult:
+        """TCL.xlsx end-to-end defect closure (Step 5 -- minimal safe batch
+        write): executes the EXISTING single-product governed write
+        primitive (``business_assistant.controlled_bitrix_write.
+        execute_single_product_write``) once per row of the FROZEN
+        ``bitrix_batch_ready_rows`` list a prior ``CHECK_BITRIX_EXISTENCE_
+        BATCH`` preview stored on the task -- NEVER a second/parallel
+        batch-write mechanism, and never a fresh dataset re-read at
+        confirmation time (only what the owner actually saw/approved in
+        the preview is ever attempted). One deterministic loop, zero
+        additional agent/model turns.
+
+        Before EACH row's create, re-checks live existence via the SAME
+        ``BitrixProductBridge.check_live_existence`` the preview already
+        used (Step 3's live duplicate guard) -- this is what makes a
+        rerun of the same batch operation safe: a row already created by
+        a previous confirmation of this same frozen list (or by any other
+        path, e.g. a concurrent single-product write for the same SKU) is
+        skipped, never re-created. Every create is inactive, exactly like
+        the single-product path's own contract."""
+        from business_assistant.action_continuation import CONFIRM_BATCH_BITRIX_CREATE, mark_executed
+        from business_assistant.controlled_bitrix_write import (
+            build_write_request_from_fields,
+            execute_single_product_write,
+        )
+
+        task = action.task
+        args = dict(action.arguments or {})
+        ready_rows = list(args.get("ready_rows") or [])
+        tenant_id = str(request.tenant_id or "")
+
+        def _fail(message: str) -> ConversationResult:
+            return ConversationResult(
+                text=message,
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CONFIRM_BATCH_BITRIX_CREATE, "artifacts": [], "mutated": False},
+            )
+
+        if self._bitrix_bridge is None:
+            return _fail("Запись в Bitrix сейчас недоступна — интеграция не настроена.")
+        if not ready_rows:
+            return _fail(
+                "Нет подготовленных новых товаров для создания. Сначала попросите "
+                "проверить прайс-лист по Bitrix, затем подтвердите создание."
+            )
+
+        row_lines: list[str] = []
+        created_count = 0
+        skipped_count = 0
+        failed_count = 0
+
+        for row in ready_rows:
+            sku = str(row.get("sku") or "")
+            title = str(row.get("title") or "")
+            source_row = row.get("source_row")
+            row_prefix = f"[стр. {source_row}] " if source_row is not None else ""
+            sku_label = sku or "(без артикула)"
+            title_label = title or "(без названия)"
+
+            if not sku or not title:
+                skipped_count += 1
+                row_lines.append(f"  - {row_prefix}{sku_label} — {title_label}: пропущено (нет артикула/названия)")
+                continue
+
+            try:
+                # Pre-create live duplicate re-check -- Step 3's guard,
+                # reused unchanged. Protects a rerun of the SAME batch
+                # (this row may have been created by an earlier
+                # confirmation of this exact frozen list) and any
+                # concurrent single-product write for the same SKU.
+                matches = self._bitrix_bridge.check_live_existence(tenant_id=tenant_id, sku=sku)
+            except Exception:  # noqa: BLE001 -- one row's failure must never abort the whole batch
+                failed_count += 1
+                row_lines.append(f"  - {row_prefix}{sku_label} — {title_label}: ошибка проверки дублей, не создан")
+                continue
+
+            if matches:
+                skipped_count += 1
+                if len(matches) == 1:
+                    target = dict(matches[0])
+                    bitrix_id = str(target.get("id") or target.get("external_product_id") or "")
+                    row_lines.append(
+                        f"  - {row_prefix}{sku_label} — {title_label}: уже существует в Bitrix"
+                        f"{f' (ID: {bitrix_id})' if bitrix_id else ''}, не создан повторно"
+                    )
+                else:
+                    row_lines.append(
+                        f"  - {row_prefix}{sku_label} — {title_label}: неоднозначно "
+                        "(несколько совпадений в Bitrix), не создан"
+                    )
+                continue
+
+            write_request = build_write_request_from_fields(
+                {
+                    "title": title,
+                    "sku": sku,
+                    "ean": row.get("ean") or "",
+                    "category": row.get("category") or "",
+                    "brand": row.get("brand") or "",
+                    "purchase_price": row.get("purchase_price") or "",
+                },
+                tenant_id=tenant_id,
+                retail_price=str(row.get("retail_price") or ""),
+            )
+            # Empty idempotency_key -- exactly like the single-product path
+            # (``_invoke_controlled_bitrix_write``) -- so
+            # ``execute_single_product_write`` falls back to its own
+            # tenant+sku+title-deterministic default key rather than any
+            # ephemeral per-turn id, keeping this row's create durably
+            # idempotent on Bitrix's own side too.
+            result = execute_single_product_write(
+                self._bitrix_bridge,
+                tenant_id=tenant_id,
+                request=write_request,
+                approved=True,
+                idempotency_key="",
+            )
+            if result.get("mutated"):
+                created_count += 1
+                row_lines.append(
+                    f"  - {row_prefix}{sku_label} — {title_label}: создан "
+                    f"(Bitrix ID: {result.get('bitrix_product_id')}, неактивен)"
+                )
+            else:
+                failed_count += 1
+                row_lines.append(
+                    f"  - {row_prefix}{sku_label} — {title_label}: не создан "
+                    f"({result.get('status') or 'unknown'})"
+                )
+
+        if task is not None:
+            mark_executed(self._action_store, task, failed=(created_count == 0 and bool(ready_rows)))
+
+        lines = [
+            "ПАКЕТНОЕ СОЗДАНИЕ НОВЫХ ТОВАРОВ В BITRIX (неактивными):",
+            f"Создано: {created_count}",
+            f"Пропущено (уже существуют/неоднозначно/нет данных): {skipped_count}",
+            f"Ошибки записи: {failed_count}",
+            "",
+        ]
+        lines.extend(row_lines)
+
+        return ConversationResult(
+            text="\n".join(lines),
+            task_id=getattr(task, "task_id", None),
+            metadata={
+                "action_decision": CONFIRM_BATCH_BITRIX_CREATE,
+                "artifacts": [],
+                "mutated": created_count > 0,
+                "bitrix_batch_create_result": {
+                    "created": created_count,
+                    "skipped": skipped_count,
+                    "failed": failed_count,
+                    "total": len(ready_rows),
                 },
             },
         )
@@ -2175,9 +2467,11 @@ class WorkflowPandaConversationGateway:
             CALL_PRODUCT_ENRICHMENT,
             CALL_TOOL,
             CHECK_BITRIX_EXISTENCE_BATCH,
+            CONFIRM_BATCH_BITRIX_CREATE,
             EXPLAIN_BITRIX_WRITE_PLAN,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
+            is_batch_bitrix_create_confirmation,
             is_batch_bitrix_existence_check_request,
             is_explicit_bitrix_write_confirmation,
             resolve_action_turn,
@@ -2288,6 +2582,14 @@ class WorkflowPandaConversationGateway:
             managed_agent_enabled()
             and not is_explicit_bitrix_write_confirmation(text)
             and not is_batch_bitrix_existence_check_request(text)
+            # TCL.xlsx end-to-end defect closure (Step 5): the managed
+            # agent has no batch-create tool either, so an explicit
+            # "Подтверждаю: создай эти новые товары в Bitrix." must be
+            # excluded exactly like the two predicates immediately above,
+            # for the SAME reason -- otherwise the model answers from
+            # general knowledge instead of running the real governed
+            # per-row create loop.
+            and not is_batch_bitrix_create_confirmation(text)
         ):
             from managed_agent_poc.panda_bridge import maybe_respond_via_managed_agent
 
@@ -2481,6 +2783,18 @@ class WorkflowPandaConversationGateway:
             )
         if action.decision == CHECK_BITRIX_EXISTENCE_BATCH:
             result = await self._check_bitrix_existence_batch(request, action)
+            self._record_latency(t0, follow_up_ms)
+            meta = dict(result.metadata or {})
+            meta["follow_up_kind"] = resolution.kind
+            meta["follow_up_target"] = resolution.target
+            return ConversationResult(
+                text=result.text,
+                workflow_id=result.workflow_id,
+                task_id=result.task_id or task_id,
+                metadata=meta,
+            )
+        if action.decision == CONFIRM_BATCH_BITRIX_CREATE:
+            result = await self._confirm_batch_bitrix_create(request, action)
             self._record_latency(t0, follow_up_ms)
             meta = dict(result.metadata or {})
             meta["follow_up_kind"] = resolution.kind
