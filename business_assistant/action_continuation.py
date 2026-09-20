@@ -1312,12 +1312,22 @@ _BATCH_CHECK_ASK_STEMS = (
 # unrelated in-spreadsheet duplicate finder ("какие товары дублируются в
 # файле?" -- ``DataIntelligenceService.duplicates``/``FAMILY_PRODUCT``
 # catalog_assist), which must keep its own, unrelated behaviour.
+#
+# Deliberately "уже существ" (compound), NOT the bare root "существ":
+# a bare root also matches ORDINARY, unrelated phrasing like "розничную
+# цену, рассчитанную по существующим правилам Panda" (an EXISTING single-
+# product write-plan preview describing its OWN pricing RULES, nothing to
+# do with checking whether the PRODUCT already exists in Bitrix) --
+# production regression closure, see
+# ``tests/test_panda_managed_agent_governed_write_confirmation_defect_
+# closure.py``'s ``WRITE_PLAN_TEXT`` fixture. "уже" immediately before the
+# root is what actually carries the "already exists" business meaning.
 _BATCH_EXISTENCE_STATUS_STEMS = (
-    "существ",
+    "уже существ",
     "уже есть",
-    "созда",
-    "exist",
-    "new product",
+    "уже созда",
+    "will be created",
+    "already exist",
 )
 _BATCH_WHOLE_SCOPE_RE = re.compile(
     r"весь\s+прайс|весь\s+файл|всю\s+таблицу"
