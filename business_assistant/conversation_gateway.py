@@ -1449,6 +1449,90 @@ class WorkflowPandaConversationGateway:
             },
         )
 
+    async def _auto_prepare_site_ready_card_if_needed(self, request: ConversationRequest, task) -> None:
+        """PRODUCT-FIRST DEFECT CLOSURE: the user's business intent (any of
+        "подготовь этот товар для сайта" / "сделай карточку товара" /
+        "покажи, что будет записано на сайт" / "добавь этот товар в
+        Bitrix" / a bare "покажи план записи ... в Bitrix", or an explicit
+        write confirmation with no prior preview turn at all) must resolve
+        to the SAME end goal -- a complete, site-ready product card --
+        without the user ever uttering an internal workflow term
+        ("enrichment"/"обогащение"/"SEO"/"характеристики"/"галерея"). This
+        is the ONE seam both ``_explain_bitrix_write_plan`` (the read-only
+        preview) and ``_invoke_controlled_bitrix_write`` (the governed
+        write) call BEFORE building/reusing a ``SingleProductWriteRequest``
+        -- if the active FAMILY_EXCEL task already selected a single
+        product (``bitrix_product_fields['sku']``) but no card has been
+        prepared yet (``bitrix_enrichment_write_request`` absent), this
+        runs the EXISTING, unchanged ``product_enrichment_bridge.
+        prepare_complete_card`` pipeline exactly once and persists its
+        result onto the SAME task -- reusing the EXISTING
+        ``CALL_PRODUCT_ENRICHMENT`` machinery/state shape, never a new
+        pipeline. Already-prepared state is reused as-is (idempotent
+        no-op); this never re-runs enrichment twice for the same task.
+
+        Explicit user limits always win: ``has_explicit_price_list_only_
+        constraint`` skips this stage entirely (the card stays exactly the
+        bare spreadsheet row, same as before this defect closure);
+        ``has_explicit_no_media_constraint``/``has_explicit_no_description_
+        constraint`` still run the pipeline but omit images/descriptions
+        from the persisted card. A preparation failure (e.g. no research
+        backend configured) degrades silently to the pre-existing bare
+        fallback -- this auto-preparation must never break an otherwise
+        working preview/write turn."""
+        from business_assistant.action_continuation import (
+            FAMILY_EXCEL,
+            has_explicit_no_description_constraint,
+            has_explicit_no_media_constraint,
+            has_explicit_price_list_only_constraint,
+        )
+
+        if task is None or getattr(task, "family", None) != FAMILY_EXCEL:
+            return
+        if dict(task.parameters.get("bitrix_enrichment_write_request") or {}):
+            return
+        product_fields = dict(task.parameters.get("bitrix_product_fields") or {})
+        if not product_fields.get("sku"):
+            return
+
+        text = str(request.text or "")
+        if has_explicit_price_list_only_constraint(text):
+            return
+
+        import dataclasses
+
+        from business_assistant.product_enrichment_bridge import (
+            prepare_complete_card,
+            serialize_characteristic_status,
+            serialize_write_request,
+        )
+
+        retail_price = str(task.parameters.get("bitrix_retail_price_preview") or "")
+        skip_media = has_explicit_no_media_constraint(text)
+        try:
+            result = await prepare_complete_card(
+                tenant_id=str(request.tenant_id or task.tenant_id or ""),
+                product_fields=product_fields,
+                retail_price=retail_price,
+                bitrix_bridge=self._bitrix_bridge,
+                tool_gateway=self._tool_gateway,
+                media_fetcher=None if skip_media else self._media_fetcher,
+                cache=self._enrichment_cache,
+            )
+        except Exception:  # noqa: BLE001 -- auto-preparation must never fail an otherwise working preview/write turn
+            return
+
+        write_request = result["write_request"]
+        if has_explicit_no_description_constraint(text):
+            write_request = dataclasses.replace(write_request, short_description="", detailed_description="")
+
+        task.parameters["bitrix_enrichment_write_request"] = serialize_write_request(write_request)
+        task.parameters["bitrix_enrichment_characteristic_status"] = serialize_characteristic_status(
+            result["enrichment"]
+        )
+        task.parameters["bitrix_enrichment_preview"] = dict(result["enrichment_preview"])
+        self._action_store.put(task)
+
     async def _invoke_controlled_bitrix_write(
         self, request: ConversationRequest, action
     ) -> ConversationResult:
@@ -1493,6 +1577,16 @@ class WorkflowPandaConversationGateway:
                 task_id=getattr(task, "task_id", None),
                 metadata={"action_decision": CALL_CONTROLLED_BITRIX_WRITE, "artifacts": []},
             )
+
+        # Product-first defect closure: a governed write confirmation with
+        # no prior "show the plan" turn at all (e.g. straight from
+        # "Установи розничную цену..." to "Подтверждаю: создай этот товар
+        # в Bitrix.") must still write the SAME complete, site-ready card
+        # -- never a bare spreadsheet-only request -- so the auto-
+        # preparation seam runs here too, before ``bitrix_enrichment_
+        # write_request`` is read below. A no-op once already prepared.
+        if task is not None:
+            await self._auto_prepare_site_ready_card_if_needed(request, task)
 
         args = dict(action.arguments or {})
         retail_price = str(args.get("retail_price") or "")
@@ -1775,7 +1869,32 @@ class WorkflowPandaConversationGateway:
         )
 
         task = action.task
+        # Product-first defect closure: "покажи план записи этого товара в
+        # Bitrix"/"покажи, что будет записано на сайт" must show the SAME
+        # complete, site-ready card an explicit enrichment request would
+        # have produced -- never the bare spreadsheet-only fallback below
+        # -- unless the card was already prepared (no-op) or the user
+        # explicitly narrowed it this turn. Runs BEFORE reading ``action.
+        # arguments`` (built by the synchronous resolver from whatever
+        # state existed at classification time) so a freshly prepared card
+        # is used instead of the resolver's own bare fallback.
+        if task is not None:
+            await self._auto_prepare_site_ready_card_if_needed(request, task)
+
         args = dict(action.arguments or {})
+        if task is not None:
+            enriched = dict(task.parameters.get("bitrix_enrichment_write_request") or {})
+            if enriched:
+                args = {
+                    "write_request": enriched,
+                    "characteristic_status": dict(
+                        task.parameters.get("bitrix_enrichment_characteristic_status") or {}
+                    ),
+                    "enrichment_preview": dict(task.parameters.get("bitrix_enrichment_preview") or {}),
+                    "retail_price": str(
+                        args.get("retail_price") or task.parameters.get("bitrix_retail_price_preview") or ""
+                    ),
+                }
         write_request = deserialize_write_request(dict(args.get("write_request") or {}))
         if not write_request.retail_price and args.get("retail_price"):
             import dataclasses

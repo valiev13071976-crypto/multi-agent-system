@@ -292,7 +292,21 @@ class EnrichSameProductContinuationDefectClosureTests(unittest.IsolatedAsyncioTe
         active_after_turn2 = self.conversation_gateway._action_store.get(  # noqa: SLF001
             tenant_id="tenant-a", owner_id="user-a", conversation_id="conv-1"
         )
-        self.assertFalse(dict(active_after_turn2.parameters.get("bitrix_enrichment_write_request") or {}))
+        # PRODUCT-FIRST DEFECT CLOSURE: a bare "show the final write plan"
+        # ask -- with no "enrichment"/"обогащение" wording at all -- is now
+        # the SAME site-ready-card business intent as an explicit
+        # enrichment request (see ``WorkflowPandaConversationGateway.
+        # _auto_prepare_site_ready_card_if_needed``), so Turn 2 already
+        # auto-prepares and persists the complete card here. This used to
+        # assert the opposite (the exact production defect this later fix
+        # closes) -- Turn 3's own explicit "Выполни обогащение..." request
+        # below still reruns/re-persists enrichment regardless, so this
+        # updated expectation changes nothing about Turn 3's own assertions.
+        turn2_enrichment_write_request = dict(
+            active_after_turn2.parameters.get("bitrix_enrichment_write_request") or {}
+        )
+        self.assertTrue(turn2_enrichment_write_request)
+        self.assertEqual(turn2_enrichment_write_request.get("sku"), TARGET_SKU)
 
         # Turn 3: the EXACT reproduced defect -- explicit enrich/prepare
         # ACTION for the SAME product, no attachment.
