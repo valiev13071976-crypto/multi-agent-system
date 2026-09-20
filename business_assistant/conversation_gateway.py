@@ -2178,6 +2178,7 @@ class WorkflowPandaConversationGateway:
             EXPLAIN_BITRIX_WRITE_PLAN,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
+            is_batch_bitrix_existence_check_request,
             is_explicit_bitrix_write_confirmation,
             resolve_action_turn,
         )
@@ -2259,9 +2260,35 @@ class WorkflowPandaConversationGateway:
         # NOT a confirmation -- see ``is_explicit_bitrix_write_confirmation``'s
         # own docstring) is completely unaffected and keeps going through
         # the managed agent exactly as before.
+        #
+        # Production defect closure (batch Bitrix existence-check turn
+        # silently swallowed by the managed-agent boundary): the managed
+        # agent exposes only 3 read-only tools (analyze_spreadsheet/
+        # select_product/explain_bitrix_write_plan -- see this module's own
+        # docstring) and NO batch/whole-dataset Bitrix existence check, so
+        # whenever the managed agent is enabled AND this turn is eligible
+        # (state-based only -- an EARLIER turn's spreadsheet upload makes
+        # every LATER turn in the SAME conversation eligible, regardless of
+        # its own wording), a "Проверь весь прайс перед загрузкой на сайт.
+        # Покажи, какие товары уже есть в Bitrix..." turn reached the model
+        # with no matching tool, which then answered "I cannot check
+        # Bitrix / please provide an export" from general knowledge --
+        # exactly like the write-confirmation exclusion immediately above,
+        # but for PR #103's ``CHECK_BITRIX_EXISTENCE_BATCH`` seam instead
+        # of the governed write. Gated on the SAME EXISTING, purely textual
+        # ``is_batch_bitrix_existence_check_request`` predicate
+        # ``resolve_action_turn`` already uses to dispatch this action --
+        # never a second predicate/implementation, never a phrase-specific
+        # response hack. Every other managed-agent-eligible turn is
+        # completely unaffected and keeps going through the managed agent
+        # exactly as before.
         from managed_agent_poc.panda_bridge import managed_agent_enabled
 
-        if managed_agent_enabled() and not is_explicit_bitrix_write_confirmation(text):
+        if (
+            managed_agent_enabled()
+            and not is_explicit_bitrix_write_confirmation(text)
+            and not is_batch_bitrix_existence_check_request(text)
+        ):
             from managed_agent_poc.panda_bridge import maybe_respond_via_managed_agent
 
             # CANONICAL WORKSET (single business-data ownership): establish/
