@@ -60,8 +60,6 @@ _ALIAS: dict[str, str] = {
     "огрн": ROLE_OGRN,
     "company": ROLE_COMPANY_NAME,
     "company_name": ROLE_COMPANY_NAME,
-    "название": ROLE_COMPANY_NAME,
-    "наименование": ROLE_COMPANY_NAME,
     "организация": ROLE_COMPANY_NAME,
     "контрагент": ROLE_COUNTERPARTY,
     "counterparty": ROLE_COUNTERPARTY,
@@ -69,6 +67,20 @@ _ALIAS: dict[str, str] = {
     "sku": ROLE_SKU,
     "артикул": ROLE_ARTICLE,
     "article": ROLE_ARTICLE,
+    # Supplier price-list identity aliases (real TCL.xlsx-style headers):
+    # "модель"/"model" is the manufacturer model code -- for many supplier
+    # feeds (this real installation's own verified reference element 992,
+    # see integrations/bitrix/schema.py's CML2_ARTICLE binding) that model
+    # code IS the product's article/SKU identity, so it feeds the SAME
+    # ROLE_ARTICLE fallback ``canonical_identity_rows``/``_row_lookup_result``
+    # already use ("sku or article"). "код модели"/"код товара" ("model
+    # code"/"product code") are the same identity concept under a
+    # different label -- never a fabricated SKU, only an existing
+    # supplier-supplied identifier routed to the existing role.
+    "модель": ROLE_ARTICLE,
+    "model": ROLE_ARTICLE,
+    "код_модели": ROLE_ARTICLE,
+    "код_товара": ROLE_ARTICLE,
     "ean": ROLE_EAN,
     "gtin": ROLE_EAN,
     "barcode": ROLE_EAN,
@@ -78,6 +90,14 @@ _ALIAS: dict[str, str] = {
     "product_name": ROLE_PRODUCT_NAME,
     "товар": ROLE_PRODUCT_NAME,
     "номенклатура": ROLE_PRODUCT_NAME,
+    # "название"/"наименование" ("name"/"title") are generic supplier
+    # display-name headers for the product itself -- moved here from
+    # ROLE_COMPANY_NAME (which had no reader anywhere in the codebase; see
+    # this defect closure's trace) because a real supplier price list's
+    # "Наименование" column is virtually always the product's display
+    # name, not a counterparty/company name.
+    "название": ROLE_PRODUCT_NAME,
+    "наименование": ROLE_PRODUCT_NAME,
     "qty": ROLE_QUANTITY,
     "quantity": ROLE_QUANTITY,
     "количество": ROLE_QUANTITY,

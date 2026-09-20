@@ -320,7 +320,14 @@ def _role_value(row: dict, table, role: str) -> str:
     if col is None:
         return ""
     value = row.get(col.source_name)
-    return str(value) if value not in (None, "") else ""
+    if value in (None, ""):
+        return ""
+    # Strip incidental whitespace (common in pasted/exported supplier
+    # spreadsheet cells) -- a raw " 32LQ63806LC.ARUG " vs "32LQ63806LC.ARUG"
+    # is the SAME identity, but an exact-match duplicate lookup downstream
+    # (BitrixProductBridge.plan_sync / catalog article lookup) would treat
+    # them as different strings and silently miss a real duplicate.
+    return str(value).strip()
 
 
 def _compact_alnum(value: str) -> str:
@@ -1095,6 +1102,16 @@ class DataIntelligenceService:
         out: list[dict] = []
         for row in rows:
             purchase_price = _role_value(row, table, ROLE_PURCHASE_PRICE)
+            # Batch write closure (Step 5): the SAME file-only retail-price
+            # priority ``_row_lookup_result`` already uses for a single
+            # resolved row (an explicit selling-price column wins over a
+            # bare generic "price" column) -- reused here so a batch NEW
+            # row's card preparation gets the SAME retail price a
+            # single-row flow would show for that row, never a second
+            # pricing rule. There is no per-row user-supplied override in a
+            # batch turn (unlike the single-row conversational path), so
+            # only the file's own columns are consulted.
+            retail_price = _role_value(row, table, ROLE_SELLING_PRICE) or _role_value(row, table, ROLE_PRICE)
             out.append(
                 {
                     "title": _role_value(row, table, ROLE_PRODUCT_NAME),
@@ -1103,6 +1120,7 @@ class DataIntelligenceService:
                     "category": _role_value(row, table, ROLE_CATEGORY),
                     "brand": _role_value(row, table, ROLE_BRAND),
                     "purchase_price": purchase_price,
+                    "retail_price": retail_price,
                     "row_source_row": row.get("__source_row"),
                 }
             )
