@@ -84,6 +84,11 @@ class DataIntelToolAdapter:
                         business_keys=list(args.get("business_keys") or []),
                     )
                 }
+            if op == "canonical_identity_rows":
+                ds = str(args.get("dataset_id") or "")
+                if not ds:
+                    raise ToolArgumentInvalidError()
+                return {"rows": self._svc.canonical_identity_rows(ds, tenant_id=tenant)}
             if op == "merge":
                 left = list(args.get("left_rows") or [])
                 right = list(args.get("right_rows") or [])

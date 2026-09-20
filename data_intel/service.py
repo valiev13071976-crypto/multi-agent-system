@@ -1074,6 +1074,40 @@ class DataIntelligenceService:
         rows = self.store.get_rows(dataset_id, tenant_id=tenant_id)
         return find_duplicates(rows, business_keys=business_keys)
 
+    def canonical_identity_rows(self, dataset_id: str, *, tenant_id: str) -> list[dict]:
+        """Batch Bitrix existence-check defect closure: the per-row
+        ``product_fields`` shape ``_row_lookup_result`` already builds for a
+        SINGLE resolved row (title/sku/ean/category/brand/purchase_price),
+        exposed for EVERY row of the dataset in one deterministic pass --
+        reusing the SAME cached column-role schema (``table.columns``) and
+        the SAME ``_role_value`` extraction, never a second role-detection
+        pass. This is the smallest read surface a caller (the conversation
+        gateway) needs to run the EXISTING single-product Bitrix duplicate
+        check (``BitrixProductBridge.plan_sync``) once per row without
+        reimplementing column-role inference."""
+        desc = self.store.get_dataset(dataset_id, tenant_id=tenant_id)
+        if desc is None:
+            raise DataIntelError(DATASET_ACCESS_DENIED)
+        if not desc.tables:
+            raise DataIntelError(DATASET_PARSE_FAILED)
+        table = desc.tables[0]
+        rows = self.store.get_rows(dataset_id, tenant_id=tenant_id, table_id=table.table_id)
+        out: list[dict] = []
+        for row in rows:
+            purchase_price = _role_value(row, table, ROLE_PURCHASE_PRICE)
+            out.append(
+                {
+                    "title": _role_value(row, table, ROLE_PRODUCT_NAME),
+                    "sku": _role_value(row, table, ROLE_SKU) or _role_value(row, table, ROLE_ARTICLE),
+                    "ean": _role_value(row, table, ROLE_EAN),
+                    "category": _role_value(row, table, ROLE_CATEGORY),
+                    "brand": _role_value(row, table, ROLE_BRAND),
+                    "purchase_price": purchase_price,
+                    "row_source_row": row.get("__source_row"),
+                }
+            )
+        return out
+
     def merge(self, left_rows, right_rows, **kwargs) -> dict:
         total = len(left_rows) + len(right_rows)
         assert_sync_data_allowed(row_count=total, operations=("merge",))

@@ -1940,6 +1940,158 @@ class WorkflowPandaConversationGateway:
             },
         )
 
+    async def _check_bitrix_existence_batch(
+        self, request: ConversationRequest, action
+    ) -> ConversationResult:
+        """Batch Bitrix existence-check defect closure: a read-only "which
+        rows of the WHOLE uploaded price list already exist in Bitrix,
+        which are new, and which are ambiguous" classification -- e.g.
+        "Проверь весь прайс перед загрузкой на сайт. Покажи, какие товары
+        уже есть в Bitrix, каких нет и где есть неоднозначность." Reuses
+        the EXISTING single-product duplicate/read logic
+        (``BitrixProductBridge.plan_sync``) once per row -- the SAME
+        governed, read-only call the single-product write-plan preview
+        already makes (see ``_explain_bitrix_write_plan``/
+        ``prepare_single_product_write`` above) -- never a new Bitrix
+        client, never ``catalog.product.add``/``update``, never one
+        conversational turn per row. Rows are read through the EXISTING
+        ``data.excel_assistant`` tool's new ``canonical_identity_rows``
+        operation, which reuses the SAME cached column-role schema/
+        extraction the single-row ``ROW_FOUND`` lookup already uses -- no
+        second role-detection pass, no second dataset store."""
+        from business_assistant.action_continuation import CHECK_BITRIX_EXISTENCE_BATCH
+        from integrations.bitrix.product_bridge import (
+            SYNC_AMBIGUOUS,
+            SYNC_CREATE,
+            SYNC_UNCHANGED,
+            SYNC_UPDATE,
+        )
+        from tools.models import ToolRequest
+
+        task = action.task
+        dataset_id = str(dict(action.arguments or {}).get("dataset_id") or "")
+        tenant_id = str(request.tenant_id or "")
+
+        def _fail(message: str) -> ConversationResult:
+            return ConversationResult(
+                text=message,
+                task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CHECK_BITRIX_EXISTENCE_BATCH, "artifacts": [], "mutated": False},
+            )
+
+        if self._bitrix_bridge is None:
+            return _fail("Проверка по Bitrix сейчас недоступна — интеграция не настроена.")
+        if self._tool_gateway is None or not dataset_id:
+            return _fail(
+                "Не вижу загруженного прайс-листа для проверки по Bitrix. "
+                "Сначала приложите файл, затем попросите проверить товары по Bitrix."
+            )
+
+        from business_assistant.action_continuation import EXCEL_CONTRACT
+
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id="",
+            task_id=getattr(task, "task_id", None) or str(uuid.uuid4()),
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation="canonical_identity_rows",
+            arguments={"dataset_id": dataset_id},
+            requested_capabilities=tuple(EXCEL_CONTRACT.required_capabilities),
+            tenant_id=tenant_id,
+            user_id=str(request.user_id or ""),
+            actor_id=f"{tenant_id}:{request.user_id or ''}",
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:  # noqa: BLE001 -- a read-only batch check must never raise
+            result = None
+        if result is None or not getattr(result, "success", False):
+            return _fail("Не удалось прочитать загруженный прайс-лист для проверки по Bitrix.")
+        rows = list(dict(getattr(result, "data", None) or {}).get("rows") or [])
+
+        new_rows: list[dict] = []
+        existing_rows: list[dict] = []
+        ambiguous_rows: list[dict] = []
+        invalid_rows: list[dict] = []
+
+        for row in rows:
+            title = str(row.get("title") or "")
+            sku = str(row.get("sku") or "")
+            if not title or not sku:
+                invalid_rows.append({"sku": sku, "title": title, "reason": "missing_sku_or_title"})
+                continue
+            try:
+                # The EXISTING, read-only single-product duplicate check --
+                # never mutates Bitrix (see ``BitrixProductBridge.plan_sync``'s
+                # own docstring: a pure diff against the connected catalog).
+                plan = self._bitrix_bridge.plan_sync(
+                    tenant_id=tenant_id,
+                    canonical_product={"title": title, "sku": sku, "product_id": f"panda-batch:{sku}"},
+                )
+            except Exception:  # noqa: BLE001 -- one row's failure must never abort the whole batch
+                invalid_rows.append({"sku": sku, "title": title, "reason": "bitrix_check_failed"})
+                continue
+            action_kind = str(plan.get("action") or "")
+            if action_kind == SYNC_CREATE:
+                new_rows.append({"sku": sku, "title": title})
+            elif action_kind in (SYNC_UPDATE, SYNC_UNCHANGED):
+                target = dict(plan.get("target") or {})
+                existing_rows.append(
+                    {"sku": sku, "title": title, "bitrix_id": str(target.get("external_product_id") or "")}
+                )
+            elif action_kind == SYNC_AMBIGUOUS:
+                ambiguous_rows.append(
+                    {"sku": sku, "title": title, "candidates": list(plan.get("candidates") or [])}
+                )
+            else:
+                invalid_rows.append(
+                    {"sku": sku, "title": title, "reason": str(plan.get("reason") or action_kind or "invalid")}
+                )
+
+        total = len(rows)
+        lines = [
+            "ПРОВЕРКА ПРАЙСА ПО BITRIX (только предпросмотр, ничего не записано):",
+            f"ВСЕГО ТОВАРОВ: {total}",
+            "",
+            f"НОВЫЕ (не найдены в Bitrix): {len(new_rows)}",
+        ]
+        for r in new_rows:
+            lines.append(f"  - {r['sku']} — {r['title']}")
+        lines.append("")
+        lines.append(f"УЖЕ СУЩЕСТВУЮТ В BITRIX: {len(existing_rows)}")
+        for r in existing_rows:
+            bitrix_id_suffix = f" (Bitrix ID: {r['bitrix_id']})" if r.get("bitrix_id") else ""
+            lines.append(f"  - {r['sku']} — {r['title']}{bitrix_id_suffix}")
+        lines.append("")
+        lines.append(f"НЕОДНОЗНАЧНЫЕ (несколько возможных совпадений в Bitrix): {len(ambiguous_rows)}")
+        for r in ambiguous_rows:
+            lines.append(f"  - {r['sku']} — {r['title']}")
+        lines.append("")
+        lines.append(f"ТРЕБУЮТ УТОЧНЕНИЯ (нет артикула/SKU или другая причина): {len(invalid_rows)}")
+        for r in invalid_rows:
+            sku_label = r["sku"] or "(без артикула)"
+            title_label = r["title"] or "(без названия)"
+            lines.append(f"  - {sku_label} — {title_label} [{r['reason']}]")
+        lines.append("")
+        lines.append("Ничего в Bitrix не записано: это только предпросмотр.")
+
+        return ConversationResult(
+            text="\n".join(lines),
+            task_id=getattr(task, "task_id", None),
+            metadata={
+                "action_decision": CHECK_BITRIX_EXISTENCE_BATCH,
+                "artifacts": [],
+                "mutated": False,
+                "bitrix_existence_check": {
+                    "total": total,
+                    "new": new_rows,
+                    "existing": existing_rows,
+                    "ambiguous": ambiguous_rows,
+                    "invalid": invalid_rows,
+                },
+            },
+        )
+
     async def _respond_direct_image_edit(
         self, request: ConversationRequest, *, instruction: str
     ) -> ConversationResult:
@@ -2022,6 +2174,7 @@ class WorkflowPandaConversationGateway:
             CALL_CONTROLLED_BITRIX_WRITE,
             CALL_PRODUCT_ENRICHMENT,
             CALL_TOOL,
+            CHECK_BITRIX_EXISTENCE_BATCH,
             EXPLAIN_BITRIX_WRITE_PLAN,
             FAIL_UNAVAILABLE,
             REQUEST_APPROVAL,
@@ -2289,6 +2442,18 @@ class WorkflowPandaConversationGateway:
             )
         if action.decision == CALL_PRODUCT_ENRICHMENT:
             result = await self._invoke_product_enrichment(request, action)
+            self._record_latency(t0, follow_up_ms)
+            meta = dict(result.metadata or {})
+            meta["follow_up_kind"] = resolution.kind
+            meta["follow_up_target"] = resolution.target
+            return ConversationResult(
+                text=result.text,
+                workflow_id=result.workflow_id,
+                task_id=result.task_id or task_id,
+                metadata=meta,
+            )
+        if action.decision == CHECK_BITRIX_EXISTENCE_BATCH:
+            result = await self._check_bitrix_existence_batch(request, action)
             self._record_latency(t0, follow_up_ms)
             meta = dict(result.metadata or {})
             meta["follow_up_kind"] = resolution.kind
