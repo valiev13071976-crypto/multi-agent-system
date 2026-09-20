@@ -697,7 +697,11 @@ def data_excel_assistant_descriptor(*, enabled: bool = True) -> ToolDescriptor:
         category="data",
         adapter_id="data_intel",
         capabilities=(CAP_FILESYSTEM_WRITE,),
-        operations=("assist",),
+        # "canonical_identity_rows" (batch Bitrix existence-check defect
+        # closure): a purely read-only per-row projection of the SAME
+        # cached column-role schema "assist" already resolves rows
+        # through -- never a write, never a second ingestion path.
+        operations=("assist", "canonical_identity_rows"),
         enabled=enabled,
         timeout=120.0,
     )

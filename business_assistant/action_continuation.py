@@ -111,6 +111,15 @@ CALL_PRODUCT_ENRICHMENT = "CALL_PRODUCT_ENRICHMENT"
 # marker -- see ``is_bitrix_write_plan_question``) and never a re-run of the
 # enrichment pipeline.
 EXPLAIN_BITRIX_WRITE_PLAN = "EXPLAIN_BITRIX_WRITE_PLAN"
+# Batch Bitrix existence-check defect closure: a read-only "which rows of
+# the WHOLE uploaded price list already exist in Bitrix, which are new, and
+# which are ambiguous" classification over the active FAMILY_EXCEL task's
+# dataset -- e.g. "Проверь весь прайс перед загрузкой на сайт. Покажи,
+# какие товары уже есть в Bitrix". Reuses the EXISTING single-product
+# duplicate/read logic (``BitrixProductBridge.plan_sync``) once per row --
+# never a new Bitrix client, never a write (``plan_sync`` never mutates),
+# never one conversational turn per row.
+CHECK_BITRIX_EXISTENCE_BATCH = "CHECK_BITRIX_EXISTENCE_BATCH"
 
 STATUS_DRAFT = "DRAFT"
 STATUS_WAITING_FOR_INPUT = "WAITING_FOR_INPUT"
@@ -1272,6 +1281,74 @@ def is_read_only_write_preview_ask(text: str) -> bool:
     return _has_stem(blob, _WRITE_PREVIEW_UPLOAD_STEMS) and _has_stem(blob, _WRITE_PREVIEW_SITE_TARGET_STEMS)
 
 
+# Batch Bitrix existence-check defect closure: ordinary business phrasing
+# for "check the WHOLE uploaded price list against Bitrix -- which rows
+# already exist, which are new, which are ambiguous" (e.g. "проверь весь
+# прайс перед загрузкой на сайт", "какие из этих товаров уже существуют на
+# сайте", "покажи, что будет создано, а что уже есть") -- deliberately a
+# SEPARATE predicate from ``is_read_only_write_preview_ask`` (that one is
+# scoped to a SINGLE already-selected product; this one is scoped to the
+# WHOLE dataset and never requires one to be selected at all). Composable
+# semantic stems, not a growing phrase list: an ask/query verb, plus EITHER
+# an explicit "already exists/will be created" outcome phrase OR a
+# "whole dataset" scope phrase combined with a Bitrix/site/upload target.
+_BATCH_CHECK_ASK_STEMS = (
+    "проверь",
+    "проверить",
+    "узнай",
+    "узнать",
+    "покаж",
+    "показать",
+    "определи",
+    "определить",
+    "убедись",
+    "какие",
+    "что",
+    "check",
+    "show",
+    "which",
+)
+# Deliberately NOT "дубл"/"duplicate": that root belongs to the EXISTING,
+# unrelated in-spreadsheet duplicate finder ("какие товары дублируются в
+# файле?" -- ``DataIntelligenceService.duplicates``/``FAMILY_PRODUCT``
+# catalog_assist), which must keep its own, unrelated behaviour.
+_BATCH_EXISTENCE_STATUS_STEMS = (
+    "существ",
+    "уже есть",
+    "созда",
+    "exist",
+    "new product",
+)
+_BATCH_WHOLE_SCOPE_RE = re.compile(
+    r"весь\s+прайс|весь\s+файл|всю\s+таблицу"
+    r"|все\s+(?:\d+\s+)?товар|все\s+(?:\d+\s+)?позици"
+    r"|каждый\s+товар|каждую\s+позицию"
+    r"|whole\s+price\s+list|all\s+products|every\s+row|entire\s+file",
+    re.I,
+)
+
+
+def is_batch_bitrix_existence_check_request(text: str) -> bool:
+    """True for a read-only ask about which rows of the WHOLE uploaded
+    price list already exist in Bitrix, which are new, and which are
+    ambiguous -- e.g. "Проверь весь прайс перед загрузкой на сайт. Покажи,
+    какие товары уже есть в Bitrix". Never a write confirmation (the
+    caller checks ``is_explicit_bitrix_write_confirmation`` first and this
+    predicate additionally refuses any message that satisfies it)."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if is_explicit_bitrix_write_confirmation(blob):
+        return False
+    if not _has_stem(blob, _BATCH_CHECK_ASK_STEMS):
+        return False
+    if _has_stem(blob, _BATCH_EXISTENCE_STATUS_STEMS):
+        return True
+    if not _BATCH_WHOLE_SCOPE_RE.search(blob):
+        return False
+    return _has_stem(blob, _WRITE_PREVIEW_SITE_TARGET_STEMS) or _has_stem(blob, _WRITE_PREVIEW_UPLOAD_STEMS)
+
+
 # Production defect closure (business-process ownership: a retail-price
 # FORMULA instruction, e.g. "установи розничную цену как закупочная + 7%",
 # misread as an immediate write/publish command): ``business_assistant.
@@ -1794,6 +1871,20 @@ def _bitrix_missing_context_decision(active: ActiveTask | None) -> ActionDecisio
     )
 
 
+def _batch_bitrix_missing_dataset_decision(active: ActiveTask | None) -> ActionDecision:
+    return ActionDecision(
+        decision=ANSWER_TEXT,
+        readiness=NOT_EXECUTABLE,
+        continuation=NEW_TASK,
+        task=active,
+        user_message=(
+            "Не вижу загруженного прайс-листа для проверки по Bitrix. "
+            "Сначала приложите файл, затем попросите проверить товары по Bitrix."
+        ),
+        extra_llm=False,
+    )
+
+
 def _enrichment_missing_context_decision(active: ActiveTask | None) -> ActionDecision:
     return ActionDecision(
         decision=ANSWER_TEXT,
@@ -2044,6 +2135,43 @@ def resolve_bitrix_write_plan_question(
     )
 
 
+def resolve_batch_bitrix_existence_check(
+    text: str,
+    *,
+    active: ActiveTask | None,
+    store: ActiveTaskStore,
+    request_id: str = "",
+) -> ActionDecision:
+    """Deterministic routing for the read-only "check the WHOLE uploaded
+    price list against Bitrix" ask (batch existence-check defect closure).
+    Requires only that a spreadsheet dataset already exists on the active
+    FAMILY_EXCEL task -- never a single already-selected product (unlike
+    ``resolve_bitrix_write_plan_question``). The actual per-row
+    ``BitrixProductBridge.plan_sync`` classification runs in
+    ``WorkflowPandaConversationGateway._check_bitrix_existence_batch``,
+    which alone holds both the ``ToolGateway`` (to read dataset rows) and
+    the ``BitrixProductBridge`` (to check them) -- this resolver only
+    decides that the turn IS this batch check and carries the dataset id
+    forward; it never touches Bitrix or the dataset itself."""
+    if active is None or active.family != FAMILY_EXCEL:
+        return _batch_bitrix_missing_dataset_decision(active)
+    dataset_id = str(active.parameters.get("dataset_id") or "")
+    if not dataset_id:
+        return _batch_bitrix_missing_dataset_decision(active)
+    args = {"dataset_id": dataset_id}
+    return ActionDecision(
+        decision=CHECK_BITRIX_EXISTENCE_BATCH,
+        readiness=READY_TO_EXECUTE,
+        continuation=CONTINUE_ACTIVE_TASK,
+        task=active,
+        arguments=args,
+        operation="check_bitrix_existence_batch",
+        extra_llm=False,
+        capability_status=CAPABILITY_AVAILABLE_AND_AUTHORIZED,
+        idempotency_key=_idempotency_key(request_id, "bitrix.existence_check_batch", args),
+    )
+
+
 def resolve_product_pricing_category_refinement_request(
     text: str,
     *,
@@ -2215,6 +2343,23 @@ def resolve_action_turn(
     # instruction back instead of answering from the prepared state.
     if is_bitrix_write_plan_question(current):
         return resolve_bitrix_write_plan_question(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
+
+    # Batch Bitrix existence-check defect closure: "Проверь весь прайс
+    # перед загрузкой на сайт. Покажи, какие товары уже есть в Bitrix,
+    # каких нет и где есть неоднозначность." names no single product at
+    # all (unlike every branch above), so it must be checked before any
+    # single-product-scoped predicate would otherwise swallow it or the
+    # generic follow-up/continuation heuristics below hand it to the
+    # model, which has no batch Bitrix tool and invents "no access to
+    # Bitrix / need an export" instead of using the EXISTING
+    # ``BitrixProductBridge.plan_sync`` read path this dispatches to.
+    if is_batch_bitrix_existence_check_request(current):
+        return resolve_batch_bitrix_existence_check(
             current,
             active=active,
             store=store,
