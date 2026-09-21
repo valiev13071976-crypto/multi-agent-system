@@ -19,7 +19,7 @@ complete real flow --
         -> read-back
         -> rerun without duplicates
 
-Two real production defects motivated this closure:
+Three real production defects motivated this closure:
 
   1. All 34 rows of the real TCL.xlsx were classified INVALID
      (``missing_sku_or_title``) because its headers ("Модель"/
@@ -38,6 +38,23 @@ Two real production defects motivated this closure:
      ``WorkflowPandaConversationGateway._invoke_controlled_bitrix_write``
      plus the new ``BitrixProductBridge.check_live_existence`` guard,
      now consulted before EVERY create (single-product AND batch).
+  3. AFTER (1) and (2) were closed, the real TCL.xlsx STILL classified
+     all 34 rows INVALID: identity extraction now correctly resolved a
+     ``sku`` (e.g. "55C6K") for every row, but the batch existence
+     check's own validation additionally required a non-empty
+     ``title`` ("if not title or not sku: missing_sku_or_title") --
+     and the real TCL.xlsx rows have no usable title column at all.
+     Product identity contract fix: a reliable canonical SKU/article/
+     model identity is SUFFICIENT on its own for a Bitrix existence/
+     duplicate lookup; ``title`` is descriptive metadata, never a
+     mandatory uniqueness key. A row is INVALID only when there is
+     genuinely no usable identity (no sku AND no title-derived
+     fallback) -- never because title alone is absent. Closed in
+     ``WorkflowPandaConversationGateway._check_bitrix_existence_batch``
+     (validation now checks ``sku`` only) -- the single-product path
+     already only keyed its own duplicate guard
+     (``BitrixProductBridge.check_live_existence``) by ``sku``, so no
+     change was needed there for the two paths to agree.
 
 FIXTURE Bitrix adapter only -- zero live Bitrix mutations anywhere in
 this module.
@@ -266,6 +283,123 @@ class TclStyleBatchPreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         # #8 the preview performs ZERO writes.
         self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
         self.assertEqual(result.metadata.get("mutated"), False)
+
+
+# Real TCL.xlsx-shaped headers with NO usable title/name column at all --
+# the exact production shape ("55C6K", "65RM7L", "75RM7L", ...) that
+# still classified every row INVALID after defect (1)/(2) above were
+# closed, because the batch check additionally required a non-empty
+# ``title``.
+TITLE_ABSENT_NEW_SKU = "55C6K"
+TITLE_ABSENT_EXISTING_INACTIVE_SKU = EXISTING_INACTIVE_SKU
+TITLE_ABSENT_AMBIGUOUS_SKU = AMBIGUOUS_SKU
+
+
+def _tcl_xlsx_bytes_no_title_column() -> bytes:
+    """Real production shape: only a "Модель" identity column and a bare
+    "Цена" column -- deliberately NO "Название"/"Наименование" column at
+    all, so every row's projected ``title`` is genuinely empty. A strong
+    canonical article/model identity (``sku``) must still be sufficient
+    on its own for the Bitrix existence/duplicate lookup."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Модель", "Цена"])
+    ws.append([TITLE_ABSENT_NEW_SKU, "54990"])
+    ws.append([TITLE_ABSENT_EXISTING_INACTIVE_SKU, "990"])
+    ws.append([TITLE_ABSENT_AMBIGUOUS_SKU, "1500"])
+    # Genuinely identity-less row: no model code at all (and, as in this
+    # fixture, no title column either) -- must stay INVALID, never a
+    # fabricated identity.
+    ws.append(["", "1000"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class TitleOptionalProductIdentityAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    """Product identity contract fix (production defect closure after
+    #105): a reliable canonical SKU/article/model identity is SUFFICIENT
+    on its own for a Bitrix existence/duplicate lookup -- ``title`` is
+    descriptive metadata only, never a mandatory uniqueness key. A row is
+    INVALID only when there is genuinely no usable identity at all
+    (neither sku/article/model). Reproduces the real TCL.xlsx shape (no
+    title/name column whatsoever) and proves NEW/EXISTING/AMBIGUOUS
+    classification -- never ``missing_sku_or_title`` -- for every row
+    that carries a strong model identity, with zero writes."""
+
+    async def _upload_no_title_column(self, panda, artifact_service):
+        ref = await _register_upload(artifact_service, content=_tcl_xlsx_bytes_no_title_column())
+        await panda.respond(
+            ConversationRequest(
+                text="Вот прайс-лист TCL, посмотри, что там есть.",
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="r1",
+                conversation_id=CONV,
+                attachment_refs=(ref,),
+            )
+        )
+        await panda.respond(
+            ConversationRequest(
+                text="Проанализируй этот прайс.",
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="r2",
+                conversation_id=CONV,
+            )
+        )
+
+    async def test_sku_present_title_absent_is_never_invalid(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        await self._upload_no_title_column(panda, artifact_service)
+        before_catalog_size = len(store.catalog(TENANT))
+
+        result = await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="r3",
+                conversation_id=CONV,
+            )
+        )
+
+        self.assertEqual(result.metadata.get("action_decision"), CHECK_BITRIX_EXISTENCE_BATCH)
+        check = result.metadata.get("bitrix_existence_check") or {}
+        self.assertEqual(check.get("total"), 4)
+
+        new_skus = {row["sku"] for row in check.get("new") or []}
+        existing_skus = {row["sku"] for row in check.get("existing") or []}
+        ambiguous_skus = {row["sku"] for row in check.get("ambiguous") or []}
+        invalid_rows = check.get("invalid") or []
+
+        # A brand-new sku with NO title at all -> NEW/READY_TO_CREATE,
+        # never INVALID: a strong model identity is sufficient on its
+        # own, and no title was ever invented to pass validation.
+        self.assertEqual(new_skus, {TITLE_ABSENT_NEW_SKU})
+        new_row = next(row for row in check.get("new") or [] if row["sku"] == TITLE_ABSENT_NEW_SKU)
+        self.assertEqual(new_row.get("title"), "")
+        self.assertEqual(new_row.get("planned_action"), "READY_TO_CREATE")
+
+        # An exact INACTIVE existing SKU with no title -> EXISTING (the
+        # live duplicate guard is keyed by sku only, matching the batch
+        # check).
+        self.assertEqual(existing_skus, {TITLE_ABSENT_EXISTING_INACTIVE_SKU})
+
+        # Multiple exact Bitrix matches for the same sku -> AMBIGUOUS.
+        self.assertEqual(ambiguous_skus, {TITLE_ABSENT_AMBIGUOUS_SKU})
+
+        # Only the genuinely identity-less row (no sku AND no title) is
+        # INVALID -- exactly one row, never all four.
+        self.assertEqual(len(invalid_rows), 1)
+        self.assertEqual(invalid_rows[0].get("sku"), "")
+        self.assertIn("missing_sku_or_title", [row["reason"] for row in invalid_rows])
+
+        # Zero writes during this read-only preview.
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertEqual(result.metadata.get("mutated"), False)
+        self.assertFalse(result.metadata.get("mutated"))
 
 
 class TclStyleBatchWriteAndRerunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
