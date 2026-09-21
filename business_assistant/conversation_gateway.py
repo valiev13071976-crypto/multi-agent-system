@@ -2087,7 +2087,16 @@ class WorkflowPandaConversationGateway:
             title = str(row.get("title") or "")
             sku = str(row.get("sku") or "")
             source_row = row.get("row_source_row")
-            if not title or not sku:
+            # Product identity contract (TCL.xlsx defect closure): a
+            # reliable canonical SKU/article/model identity (``sku`` here
+            # is ALREADY SKU-or-article-or-model, see
+            # ``canonical_identity_rows``) is sufficient on its own for a
+            # Bitrix existence/duplicate lookup. ``title`` is descriptive
+            # metadata only -- never a mandatory uniqueness key -- so a
+            # row is invalid ONLY when there is genuinely no usable
+            # identity at all (no sku/article/model). Never invent a
+            # title to satisfy this check.
+            if not sku:
                 invalid_rows.append(
                     {
                         "source_row": source_row,
@@ -2167,20 +2176,27 @@ class WorkflowPandaConversationGateway:
             "",
             f"НОВЫЕ / ГОТОВЫ К СОЗДАНИЮ (READY_TO_CREATE): {len(new_rows)}",
         ]
+        # Display-only fallback label when ``title`` is absent -- purely
+        # cosmetic (never written back into the row/write-request data,
+        # never treated as a real title): a strong sku/article/model
+        # identity is enough to list/lookup a row even with no title.
+        def _display_title(value: str) -> str:
+            return value or "(без названия, есть артикул/SKU)"
+
         for r in new_rows:
             row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
-            lines.append(f"  - {row_prefix}{r['sku']} — {r['title']}")
+            lines.append(f"  - {row_prefix}{r['sku']} — {_display_title(r['title'])}")
         lines.append("")
         lines.append(f"УЖЕ СУЩЕСТВУЮТ В BITRIX: {len(existing_rows)}")
         for r in existing_rows:
             row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
             bitrix_id_suffix = f" (Bitrix ID: {r['bitrix_id']})" if r.get("bitrix_id") else ""
-            lines.append(f"  - {row_prefix}{r['sku']} — {r['title']}{bitrix_id_suffix}")
+            lines.append(f"  - {row_prefix}{r['sku']} — {_display_title(r['title'])}{bitrix_id_suffix}")
         lines.append("")
         lines.append(f"НЕОДНОЗНАЧНЫЕ (несколько возможных совпадений в Bitrix): {len(ambiguous_rows)}")
         for r in ambiguous_rows:
             row_prefix = f"[стр. {r['source_row']}] " if r.get("source_row") is not None else ""
-            lines.append(f"  - {row_prefix}{r['sku']} — {r['title']}")
+            lines.append(f"  - {row_prefix}{r['sku']} — {_display_title(r['title'])}")
         lines.append("")
         lines.append(f"ТРЕБУЮТ УТОЧНЕНИЯ (нет артикула/SKU или другая причина): {len(invalid_rows)}")
         for r in invalid_rows:
