@@ -121,6 +121,19 @@ EXPLAIN_BITRIX_WRITE_PLAN = "EXPLAIN_BITRIX_WRITE_PLAN"
 # never one conversational turn per row.
 CHECK_BITRIX_EXISTENCE_BATCH = "CHECK_BITRIX_EXISTENCE_BATCH"
 
+# TCL.xlsx end-to-end defect closure: one explicit confirmation to create
+# the previously-previewed batch of NEW/READY_TO_CREATE rows
+# (``CHECK_BITRIX_EXISTENCE_BATCH``'s own frozen list, never a fresh
+# re-scan) -- e.g. "Подтверждаю: создай эти новые товары в Bitrix.".
+# Distinct from ``CALL_CONTROLLED_BITRIX_WRITE`` (that one targets a
+# SINGLE already-selected product); the actual per-row governed create
+# loop runs in
+# ``WorkflowPandaConversationGateway._confirm_batch_bitrix_create``,
+# which reuses the EXISTING, proven single-product
+# ``execute_single_product_write`` primitive once per approved row --
+# never a second/parallel batch-write mechanism.
+CONFIRM_BATCH_BITRIX_CREATE = "CONFIRM_BATCH_BITRIX_CREATE"
+
 STATUS_DRAFT = "DRAFT"
 STATUS_WAITING_FOR_INPUT = "WAITING_FOR_INPUT"
 STATUS_READY = "READY"
@@ -1078,6 +1091,19 @@ def is_explicit_bitrix_write_confirmation(text: str) -> bool:
         return False
     if _is_write_plan_ask(blob):
         return False
+    # TCL.xlsx end-to-end defect closure: an explicit BATCH create
+    # confirmation ("Подтверждаю: создай эти новые товары в Bitrix.")
+    # otherwise satisfies every signal this predicate checks too (approval
+    # marker + Bitrix target + create verb) -- it just names a PLURAL
+    # "these/all new products" target rather than a single already-
+    # selected one. Refused here so it is never misrouted to the
+    # single-product write confirmation path (which has no product
+    # context to resolve for a plural target and would fail closed with a
+    # confusing "no prepared card" message); ``is_batch_bitrix_create_
+    # confirmation`` is checked separately, earlier in ``resolve_action_
+    # turn``.
+    if is_batch_bitrix_create_confirmation(blob):
+        return False
     if not _has_stem(blob, _BITRIX_APPROVAL_MARKER_STEMS):
         return False
     if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS) and not _has_stem(blob, _BITRIX_SHOWN_PLAN_TARGET_STEMS):
@@ -1344,11 +1370,15 @@ def is_batch_bitrix_existence_check_request(text: str) -> bool:
     ambiguous -- e.g. "Проверь весь прайс перед загрузкой на сайт. Покажи,
     какие товары уже есть в Bitrix". Never a write confirmation (the
     caller checks ``is_explicit_bitrix_write_confirmation`` first and this
-    predicate additionally refuses any message that satisfies it)."""
+    predicate additionally refuses any message that satisfies it, and --
+    TCL.xlsx end-to-end defect closure -- also refuses an explicit BATCH
+    create confirmation, which is a write, not a read-only check)."""
     blob = _norm(text)
     if not blob:
         return False
     if is_explicit_bitrix_write_confirmation(blob):
+        return False
+    if is_batch_bitrix_create_confirmation(blob):
         return False
     if not _has_stem(blob, _BATCH_CHECK_ASK_STEMS):
         return False
@@ -1357,6 +1387,44 @@ def is_batch_bitrix_existence_check_request(text: str) -> bool:
     if not _BATCH_WHOLE_SCOPE_RE.search(blob):
         return False
     return _has_stem(blob, _WRITE_PREVIEW_SITE_TARGET_STEMS) or _has_stem(blob, _WRITE_PREVIEW_UPLOAD_STEMS)
+
+
+# TCL.xlsx end-to-end defect closure: "эти новые товары"/"все новые
+# товары"/"новые товары" ("these/all/the new products") -- the PLURAL
+# batch target this confirmation needs, distinct from
+# ``is_explicit_bitrix_write_confirmation``'s SINGULAR "этот товар"/
+# already-shown-plan targets.
+_BATCH_CREATE_TARGET_STEMS = (
+    "эти новые товар",
+    "все новые товар",
+    "новые товары",
+    "these new product",
+    "all new product",
+    "new products",
+)
+
+
+def is_batch_bitrix_create_confirmation(text: str) -> bool:
+    """True only for an explicit, unambiguous confirmation to create the
+    PREVIEWED batch of NEW/READY_TO_CREATE rows in Bitrix -- e.g.
+    'Подтверждаю: создай эти новые товары в Bitrix.'. Distinct from
+    ``is_explicit_bitrix_write_confirmation`` (that one targets a SINGLE
+    already-selected product, never a plural "these/all new products"
+    batch) -- requires an approval marker + a Bitrix/Aspro target + this
+    plural batch target + a create verb, all in the SAME message. An
+    explicit "do not write" always wins."""
+    blob = _norm(text)
+    if not blob:
+        return False
+    if _BITRIX_NO_WRITE_RE.search(blob):
+        return False
+    if not _has_stem(blob, _BITRIX_APPROVAL_MARKER_STEMS):
+        return False
+    if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
+        return False
+    if not _has_stem(blob, _BATCH_CREATE_TARGET_STEMS):
+        return False
+    return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS) or bool(_BITRIX_WRITE_ACTION_RE.search(blob))
 
 
 # Production defect closure (business-process ownership: a retail-price
@@ -2182,6 +2250,61 @@ def resolve_batch_bitrix_existence_check(
     )
 
 
+def _batch_bitrix_create_missing_ready_rows_decision(active: ActiveTask | None) -> ActionDecision:
+    return ActionDecision(
+        decision=ANSWER_TEXT,
+        readiness=NOT_EXECUTABLE,
+        continuation=NEW_TASK,
+        task=active,
+        user_message=(
+            "Не вижу подготовленного списка новых товаров для создания в Bitrix. "
+            "Сначала попросите проверить прайс-лист по Bitrix (батч-проверку), "
+            "а затем подтвердите создание новых товаров."
+        ),
+        extra_llm=False,
+    )
+
+
+def resolve_batch_bitrix_create_confirmation(
+    text: str,
+    *,
+    active: ActiveTask | None,
+    store: ActiveTaskStore,
+    request_id: str = "",
+) -> ActionDecision:
+    """Deterministic routing for the explicit batch-create confirmation
+    (Step 5 of the TCL.xlsx end-to-end defect closure): "Подтверждаю:
+    создай эти новые товары в Bitrix.". Only READY when the active
+    FAMILY_EXCEL task already carries a FROZEN ``bitrix_batch_ready_rows``
+    list from a prior ``CHECK_BITRIX_EXISTENCE_BATCH`` preview on the SAME
+    dataset (``bitrix_batch_dataset_id`` == the task's current
+    ``dataset_id``) -- never a fresh re-scan, and never invents a ready
+    list of its own. The actual per-row governed create loop runs in
+    ``WorkflowPandaConversationGateway._confirm_batch_bitrix_create``, which
+    alone holds the ``BitrixProductBridge`` needed to re-check and write
+    each row; this resolver only decides that the turn IS this
+    confirmation and carries the frozen rows forward untouched."""
+    if active is None or active.family != FAMILY_EXCEL:
+        return _batch_bitrix_create_missing_ready_rows_decision(active)
+    dataset_id = str(active.parameters.get("dataset_id") or "")
+    ready_dataset_id = str(active.parameters.get("bitrix_batch_dataset_id") or "")
+    ready_rows = list(active.parameters.get("bitrix_batch_ready_rows") or [])
+    if not dataset_id or not ready_dataset_id or dataset_id != ready_dataset_id or not ready_rows:
+        return _batch_bitrix_create_missing_ready_rows_decision(active)
+    args = {"dataset_id": dataset_id, "ready_rows": ready_rows}
+    return ActionDecision(
+        decision=CONFIRM_BATCH_BITRIX_CREATE,
+        readiness=READY_TO_EXECUTE,
+        continuation=CONTINUE_ACTIVE_TASK,
+        task=active,
+        arguments=args,
+        operation="confirm_batch_bitrix_create",
+        extra_llm=False,
+        capability_status=CAPABILITY_AVAILABLE_AND_AUTHORIZED,
+        idempotency_key=_idempotency_key(request_id, "bitrix.batch_create_confirm", args),
+    )
+
+
 def resolve_product_pricing_category_refinement_request(
     text: str,
     *,
@@ -2279,6 +2402,23 @@ def resolve_action_turn(
     # bare "да"/"ок"/"давай"/"продолжай"/"делай дальше".
     if is_explicit_bitrix_write_confirmation(current):
         return resolve_bitrix_write_confirmation(
+            current,
+            active=active,
+            store=store,
+            request_id=request_id,
+        )
+
+    # TCL.xlsx end-to-end defect closure (Step 5): the explicit BATCH
+    # create confirmation ("Подтверждаю: создай эти новые товары в
+    # Bitrix.") is checked immediately after the single-product write
+    # confirmation above, for the exact same reason -- an explicit,
+    # self-confirming write instruction must never be reclassified by a
+    # follow-up/continuation guess. ``is_batch_bitrix_create_confirmation``
+    # requires the PLURAL "эти/все новые товары" target, so it can never
+    # also satisfy ``is_explicit_bitrix_write_confirmation`` (singular "этот
+    # товар") -- the two are mutually exclusive by construction.
+    if is_batch_bitrix_create_confirmation(current):
+        return resolve_batch_bitrix_create_confirmation(
             current,
             active=active,
             store=store,

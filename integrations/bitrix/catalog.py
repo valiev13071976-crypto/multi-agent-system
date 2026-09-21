@@ -144,15 +144,19 @@ class BitrixCatalogStore:
             if mapped and mapped in cat:
                 return normalize_product(cat[mapped])
 
+        article_norm = article.strip() if article else ""
         matches = []
         for prod in cat.values():
             if bitrix_id and prod.get("external_product_id") == bitrix_id:
                 matches.append(prod)
             elif xml_id and prod.get("xml_id") == xml_id:
                 matches.append(prod)
-            elif article and (
-                prod.get("article") == article
-                or any(o.get("article") == article for o in (prod.get("offers") or {}).values())
+            elif article_norm and (
+                str(prod.get("article") or "").strip() == article_norm
+                or any(
+                    str(o.get("article") or "").strip() == article_norm
+                    for o in (prod.get("offers") or {}).values()
+                )
             ):
                 matches.append(prod)
             elif name and prod.get("name", "").casefold() == name.casefold():
@@ -181,7 +185,7 @@ class BitrixCatalogStore:
     def create_product(self, *, tenant_id: str, payload: dict, panda_product_id: str = "") -> dict:
         cat = self.catalog(tenant_id)
         bid = f"bitrix-prod-{uuid.uuid4().hex[:8]}"
-        article = str(payload.get("article") or payload.get("sku") or payload.get("PROPERTY_ARTNUMBER") or "")
+        article = str(payload.get("article") or payload.get("sku") or payload.get("PROPERTY_ARTNUMBER") or "").strip()
         prod = {
             "external_product_id": bid,
             "xml_id": str(payload.get("xml_id") or payload.get("XML_ID") or f"PANDA-{bid}"),

@@ -6,7 +6,7 @@ import uuid
 from dataclasses import dataclass, field
 
 from integrations.activation.adapters import FixtureAdapterState, FixtureProviderAdapter
-from integrations.bitrix.catalog import GLOBAL_BITRIX_CATALOG, BitrixCatalogStore
+from integrations.bitrix.catalog import GLOBAL_BITRIX_CATALOG, BitrixCatalogStore, normalize_product
 from integrations.bitrix.errors import (
     BitrixAmbiguousTargetError,
     BitrixNotFoundError,
@@ -64,6 +64,8 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
 
         if operation == "product_lookup":
             return self._read_product_lookup(tenant, params)
+        if operation == "product_lookup_by_article":
+            return self._read_product_lookup_by_article(tenant, params)
         if operation == "price_read":
             article = str(params.get("article") or params.get("sku") or "")
             out = self._store.read_price(tenant_id=tenant, article=article)
@@ -110,6 +112,26 @@ class BitrixFixtureAdapter(FixtureProviderAdapter):
         except BitrixNotFoundError:
             raise
         return {"product": product, "mode": "FIXTURE", "live": False}
+
+    def _read_product_lookup_by_article(self, tenant: str, params: dict) -> dict:
+        """Non-raising existence lookup by article/SKU -- unlike
+        ``_read_product_lookup`` (single-target, raises on ambiguous/not
+        found), this always returns a bounded ``items`` list so a caller
+        (``BitrixProductBridge``'s pre-create duplicate re-check) can
+        distinguish zero/one/many matches itself. Reuses the SAME
+        ``BitrixCatalogStore.lookup`` this adapter's other product reads
+        already rely on -- never a second lookup mechanism."""
+        article = str(params.get("article") or params.get("sku") or "").strip()
+        if not article:
+            return {"items": [], "mode": "FIXTURE", "live": False}
+        result = self._store.lookup(tenant_id=tenant, article=article)
+        if not result:
+            items: list[dict] = []
+        elif isinstance(result, list):
+            items = [normalize_product(p) for p in result]
+        else:
+            items = [result]
+        return {"items": items, "mode": "FIXTURE", "live": False}
 
     def write(
         self,

@@ -408,6 +408,35 @@ class BitrixProductBridge:
 
     # --- Governed create/update (spec sections 15/16) -------------------
 
+    def check_live_existence(
+        self, *, tenant_id: str, sku: str, connection_id: str | None = None
+    ) -> list[dict]:
+        """Genuine, governed existence check against the CONNECTED catalog
+        (LIVE or FIXTURE) by article/SKU -- unlike ``plan_sync``, which only
+        ever consults this bridge's local ``self._store`` mapping cache
+        (correct for FIXTURE, but never populated by a real LIVE create, so
+        it can never see what already exists remotely). Reuses the SAME
+        governed read boundary every other read here already uses
+        (``execute_via_gateway`` -> the connected adapter's own
+        ``product_lookup_by_article`` operation) -- never a second lookup
+        system. Used by the batch existence-check preview (real "check
+        existing products in LIVE Bitrix" requirement) and by a caller that
+        wants one more up-front existence gate before writing; returns the
+        deduplicated list of matching remote products (zero/one/many is the
+        caller's decision, never made here)."""
+        article = str(sku or "").strip()
+        if not article:
+            return []
+        out = self._activation.execute_via_gateway(
+            tenant_id=tenant_id,
+            capability=READ_CAPABILITY,
+            environment=self._environment,
+            operation_class=OP_READ,
+            payload={"operation": "product_lookup_by_article", "article": article},
+            connection_id=connection_id,
+        )
+        return list(out["result"].get("items") or [])
+
     def sync_product(
         self,
         *,

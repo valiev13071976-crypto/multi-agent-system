@@ -205,6 +205,70 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             result = data.get("result")
             return self._envelope(result.get("products", []) if isinstance(result, dict) else (result or []))
 
+        if operation == "product_lookup_by_article":
+            # Pre-create LIVE duplicate guard (real production defect: SKU
+            # 32LQ63806LC.ARUG was created twice -- Bitrix IDs 994/995 --
+            # because the ONLY existing duplicate check, plan_sync's
+            # ``self._store.lookup``, consults this bridge's local
+            # in-memory mapping cache, which a real LIVE create never
+            # populates). Filters the REAL remote catalog directly by
+            # article, covering BOTH verified article locations on this
+            # installation (schema.py module docstring items H/I):
+            # SIMPLE_PRODUCT base-product CML2_ARTICLE/241 (IBLOCK 14) and
+            # offer-level ARTICLE/283 (IBLOCK 15, resolved back to its
+            # parent product id via ``parentId``). Non-raising and always
+            # returns a bounded ``items`` list -- zero/one/many is decided
+            # by the caller (``BitrixProductBridge``), never here.
+            article = str(params.get("article") or params.get("sku") or "").strip()
+            if not article:
+                raise BitrixValidationError("article_required")
+            iblock_id = self._require_catalog_iblock_id()
+            found: dict[str, dict] = {}
+
+            if _SIMPLE_ARTICLE_PROPERTY:
+                simple_data = self.client.call(
+                    "catalog.product.list",
+                    credential_ref=credential_ref,
+                    params={
+                        "filter": {"iblockId": iblock_id, _SIMPLE_ARTICLE_PROPERTY.select_key: article},
+                        "select": ["id", "name", "active", _SIMPLE_ARTICLE_PROPERTY.select_key],
+                    },
+                )
+                simple_result = simple_data.get("result")
+                for item in (
+                    simple_result.get("products", []) if isinstance(simple_result, dict) else (simple_result or [])
+                ):
+                    pid = str(item.get("id") or "")
+                    if pid:
+                        found[pid] = item
+
+            offers_iblock_raw = str(self._config.offers_iblock_id or "").strip()
+            if _ARTICLE_PROPERTY and offers_iblock_raw.lstrip("-").isdigit():
+                offer_data = self.client.call(
+                    "catalog.product.offer.list",
+                    credential_ref=credential_ref,
+                    params={
+                        "filter": {"iblockId": int(offers_iblock_raw), _ARTICLE_PROPERTY.select_key: article},
+                        "select": ["id", "name", "active", schema.CML2_LINK_REST_FIELD, _ARTICLE_PROPERTY.select_key],
+                    },
+                )
+                offer_result = offer_data.get("result")
+                for offer in (
+                    offer_result.get("offers", []) if isinstance(offer_result, dict) else (offer_result or [])
+                ):
+                    parent_id = schema.unwrap_property_value(offer.get(schema.CML2_LINK_REST_FIELD))
+                    pid = str(parent_id or offer.get("id") or "")
+                    if pid and pid not in found:
+                        found[pid] = {"id": parent_id or offer.get("id"), "name": offer.get("name"), "active": offer.get("active")}
+
+            items = []
+            for item in found.values():
+                normalized = dict(item)
+                if "active" in normalized:
+                    normalized["active"] = normalized["active"] in (True, "Y", "y", 1, "1")
+                items.append(normalized)
+            return self._envelope(items)
+
         if operation in ("section_read", "category_read"):
             # Sections belong to a specific IBLOCK too (products by default;
             # callers reading the offers-IBLOCK's own sections may pass
