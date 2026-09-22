@@ -16,8 +16,7 @@ from product_enrichment.models import (
     SOURCE_UNKNOWN,
 )
 from product_enrichment.observability import EnrichmentObserver
-from product_enrichment.research import classify_source_type, extract_image_candidate_urls, research_product
-from tools.search.fake_provider import FakeSearchProvider, fake_result
+from product_enrichment.research import (\n    classify_source_type,\n    extract_image_candidate_urls,\n    research_product,\n    resolve_brand_from_model,\n)\nfrom tools.search.fake_provider import FakeSearchProvider, fake_result
 
 
 def _run(coro):
@@ -51,6 +50,40 @@ class ClassifySourceTypeTests(unittest.TestCase):
 
     def test_brand_with_no_manufacturer_table_entry_never_gets_manufacturer_tier(self):
         self.assertNotEqual(classify_source_type("https://obscurebrand.com/x", brand="ObscureBrand"), SOURCE_MANUFACTURER)
+
+
+class ResolveBrandFromModelTests(unittest.TestCase):
+    def test_unique_manufacturer_domain_resolves_missing_brand(self):
+        search = FakeSearchProvider(
+            {
+                "55C6K": [
+                    fake_result("https://www.tcl.com/global/en/tvs/55c6k", title="55C6K QD-Mini LED TV")
+                ]
+            }
+        )
+        self.assertEqual(_run(resolve_brand_from_model("55C6K", search_port=search)), "TCL")
+
+    def test_two_exact_model_retail_results_corroborate_same_brand(self):
+        search = FakeSearchProvider(
+            {
+                "55C6K": [
+                    fake_result("https://shop-one.example/55c6k", title="TCL 55C6K television"),
+                    fake_result("https://shop-two.example/p/55c6k", title="TCL 55C6K specs"),
+                ]
+            }
+        )
+        self.assertEqual(_run(resolve_brand_from_model("55C6K", search_port=search)), "TCL")
+
+    def test_conflicting_manufacturer_domains_fail_closed(self):
+        search = FakeSearchProvider(
+            {
+                "MODEL-X": [
+                    fake_result("https://www.tcl.com/model-x", title="MODEL-X"),
+                    fake_result("https://www.hisense.com/model-x", title="MODEL-X"),
+                ]
+            }
+        )
+        self.assertEqual(_run(resolve_brand_from_model("MODEL-X", search_port=search)), "")
 
 
 class ExtractImageCandidateUrlsTests(unittest.TestCase):
