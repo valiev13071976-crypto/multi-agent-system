@@ -63,6 +63,7 @@ this module.
 from __future__ import annotations
 
 import io
+import os
 import unittest
 
 from openpyxl import Workbook
@@ -461,6 +462,52 @@ def _tcl_subset_two_new_no_title_bytes() -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    """Fresh attachment + two exact SKUs in the same site-preview request
+    must stay multi-product and never collapse into Managed Agent's
+    legitimate single-product selection semantics.
+    """
+
+    async def test_fresh_attachment_two_named_skus_previews_both_before_managed_agent(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        ref = await _register_upload(artifact_service, content=_tcl_subset_two_new_no_title_bytes())
+        before_catalog_size = len(store.catalog(TENANT))
+
+        old_flag = os.environ.get("PANDA_MANAGED_AGENT_ENABLED")
+        os.environ["PANDA_MANAGED_AGENT_ENABLED"] = "true"
+        try:
+            result = await panda.respond(
+                ConversationRequest(
+                    text=(
+                        f"Подготовь для сайта только товары {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                        "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                        "Пока ничего не записывай."
+                    ),
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="direct-multi-r1",
+                    conversation_id=CONV,
+                    attachment_refs=(ref,),
+                )
+            )
+        finally:
+            if old_flag is None:
+                os.environ.pop("PANDA_MANAGED_AGENT_ENABLED", None)
+            else:
+                os.environ["PANDA_MANAGED_AGENT_ENABLED"] = old_flag
+
+        self.assertEqual(result.metadata.get("action_decision"), "PREVIEW_BATCH_BITRIX_SUBSET")
+        preview = result.metadata.get("bitrix_batch_subset_preview") or {}
+        self.assertEqual(preview.get("count"), 2)
+        self.assertEqual(set(preview.get("selected_skus") or []), {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
+        self.assertIn(SUBSET_NEW_SKU_1, result.text)
+        self.assertIn(SUBSET_NEW_SKU_2, result.text)
+        self.assertNotIn("Строк было:", result.text)
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertFalse(result.metadata.get("mutated"))
 
 
 class BitrixBatchSubsetPreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
