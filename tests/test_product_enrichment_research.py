@@ -74,6 +74,48 @@ class ResolveBrandFromModelTests(unittest.TestCase):
         )
         self.assertEqual(_run(resolve_brand_from_model("55C6K", search_port=search)), "TCL")
 
+    def test_unresolved_first_search_uses_one_official_fallback(self):
+        class QueryAwareSearch:
+            def __init__(self):
+                self.queries = []
+
+            async def search(self, query, max_results=5):
+                self.queries.append(query)
+                if "manufacturer official" in query:
+                    return [
+                        fake_result(
+                            "https://www.tcl.com/eu/en/tvs/65rm7l",
+                            title="TCL RM7L RGB-Mini LED TV 65RM7L",
+                        )
+                    ]
+                return [
+                    fake_result(
+                        "https://generic-shop.example/item",
+                        title="65RM7L television",
+                    )
+                ]
+
+        search = QueryAwareSearch()
+        self.assertEqual(_run(resolve_brand_from_model("65RM7L", search_port=search)), "TCL")
+        self.assertEqual(search.queries, ["65RM7L", "65RM7L manufacturer official"])
+
+    def test_successful_first_search_does_not_pay_for_fallback(self):
+        class QueryAwareSearch:
+            def __init__(self):
+                self.queries = []
+
+            async def search(self, query, max_results=5):
+                self.queries.append(query)
+                return [
+                    fake_result(
+                        "https://www.tcl.com/global/en/tvs/55c6k",
+                        title="TCL 55C6K television",
+                    )
+                ]
+
+        search = QueryAwareSearch()
+        self.assertEqual(_run(resolve_brand_from_model("55C6K", search_port=search)), "TCL")
+        self.assertEqual(search.queries, ["55C6K"])
     def test_conflicting_manufacturer_domains_fail_closed(self):
         search = FakeSearchProvider(
             {
