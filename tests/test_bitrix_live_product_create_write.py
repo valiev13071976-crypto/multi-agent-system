@@ -296,6 +296,28 @@ def _request(**overrides) -> SingleProductWriteRequest:
     return SingleProductWriteRequest(**base)
 
 
+class ProductLookupByArticleRequiredSelectTests(unittest.TestCase):
+    """Regression for the production TCL batch lookup failure: Bitrix
+    requires both ``id`` and ``iblockId`` in list-method ``select``.
+    The new article/SKU lookup must honor that contract for products and
+    offers before the batch classifier can return NEW/EXISTING."""
+
+    def test_live_article_lookup_includes_required_id_and_iblock_id_selects(self):
+        transport = _RecordingTransport()
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            bridge.ensure_live_connection_ready(tenant_id=TARGET_TENANT)
+            matches = bridge.check_live_existence(tenant_id=TARGET_TENANT, sku=TARGET_SKU)
+
+        self.assertEqual(matches, [])
+        article_lookup_calls = [call for call in transport.calls if call[0] in {"catalog.product.list", "catalog.product.offer.list"}]
+        self.assertEqual(len(article_lookup_calls), 2)
+        for method, body in article_lookup_calls:
+            selected = set(body.get("select") or [])
+            self.assertIn("id", selected, method)
+            self.assertIn("iblockId", selected, method)
+
+
 class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
     def test_full_success_sends_exactly_the_verified_fields_and_performs_read_back(self):
         transport = _RecordingTransport()
