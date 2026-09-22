@@ -465,6 +465,22 @@ def _tcl_subset_two_new_no_title_bytes() -> bytes:
 
 
 class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    def test_workset_uses_current_dataset_id_contract(self):
+        """Guard the exact production regression: Workset has
+        ``current_dataset_id``; reading a nonexistent ``dataset_id``
+        silently disables the entire direct multi-SKU seam."""
+        from business_assistant import workset as workset_lib
+
+        ws = workset_lib.start_new_source(
+            None,
+            tenant_id=TENANT,
+            owner_id=OWNER,
+            conversation_id=CONV,
+            dataset_id="dataset-contract-check",
+        )
+        self.assertEqual(ws.current_dataset_id, "dataset-contract-check")
+        self.assertFalse(hasattr(ws, "dataset_id"))
+
     """Fresh attachment + two exact SKUs in the same site-preview request
     must stay multi-product and never collapse into Managed Agent's
     legitimate single-product selection semantics.
