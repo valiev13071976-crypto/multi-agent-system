@@ -143,57 +143,76 @@ def _display_brand_name(key: str) -> str:
 async def resolve_brand_from_model(
     model: str, *, search_port: SearchPort, max_results: int = 5
 ) -> str:
-    """Conservatively infer a missing brand from an exact model/SKU search.
+    """Conservatively infer a missing brand from exact-model search evidence.
 
-    This is only an identity bootstrap for supplier feeds that provide a
-    strong model/article but omit a separate brand column. It never guesses:
-    a unique known manufacturer domain is accepted immediately; otherwise
-    the same known brand must be corroborated by at least two exact-model
-    search results. Conflicting or weak evidence returns an empty string.
+    First try the cheapest exact-model query. Only when that is unresolved,
+    run one bounded discovery fallback ("<model> manufacturer official")
+    through the SAME governed search port. The evidence rules stay identical:
+    the exact model/article must appear in the result, and the brand is
+    accepted only from one unique known manufacturer domain or two
+    corroborating exact-model results. Conflicts still fail closed.
     """
     model = str(model or "").strip()
     if not model:
         return ""
-    try:
-        results = list(await search_port.search(model, max_results=max_results) or [])
-    except Exception:
+
+    async def _search(query: str):
+        try:
+            return list(await search_port.search(query, max_results=max_results) or [])
+        except Exception:
+            return []
+
+    def _evaluate(results) -> str:
+        domain_candidates: set[str] = set()
+        corroboration: dict[str, int] = {}
+        model_folded = model.casefold()
+
+        for result in results:
+            url = str(getattr(result, "url", "") or "")
+            title = str(getattr(result, "title", "") or "")
+            snippet = str(getattr(result, "snippet", "") or "")
+            domain = source_domain(url)
+            text = f"{title} {snippet} {url}".casefold()
+
+            if model_folded not in text:
+                continue
+
+            for brand_key, domains in _MANUFACTURER_DOMAINS.items():
+                if domain and any(domain == d or domain.endswith(f".{d}") for d in domains):
+                    domain_candidates.add(brand_key)
+
+            for brand_key in _MANUFACTURER_DOMAINS:
+                if re.search(rf"(?<![0-9a-z]){re.escape(brand_key)}(?![0-9a-z])", text, flags=re.I):
+                    corroboration[brand_key] = corroboration.get(brand_key, 0) + 1
+
+        if len(domain_candidates) == 1:
+            return _display_brand_name(next(iter(domain_candidates)))
+        if len(domain_candidates) > 1:
+            return ""
+
+        strong = [brand for brand, count in corroboration.items() if count >= 2]
+        if len(strong) == 1:
+            return _display_brand_name(strong[0])
         return ""
 
-    domain_candidates: set[str] = set()
-    corroboration: dict[str, int] = {}
-    model_folded = model.casefold()
+    first_results = await _search(model)
+    first = _evaluate(first_results)
+    if first:
+        return first
 
-    for result in results:
-        url = str(getattr(result, "url", "") or "")
-        title = str(getattr(result, "title", "") or "")
-        snippet = str(getattr(result, "snippet", "") or "")
-        domain = source_domain(url)
-        text = f"{title} {snippet} {url}".casefold()
-
-        if model_folded not in text:
+    fallback_results = await _search(f"{model} manufacturer official")
+    # Deduplicate by URL so one result returned by both searches never
+    # counts twice toward the two-source corroboration threshold.
+    combined = []
+    seen_urls: set[str] = set()
+    for result in [*first_results, *fallback_results]:
+        key = str(getattr(result, "url", "") or "")
+        if key and key in seen_urls:
             continue
-
-        # Even a manufacturer domain is only identity evidence when this
-        # exact model/article is present in that result. A generic brand
-        # homepage returned by search must never assign the brand.
-        for brand_key, domains in _MANUFACTURER_DOMAINS.items():
-            if domain and any(domain == d or domain.endswith(f".{d}") for d in domains):
-                domain_candidates.add(brand_key)
-
-        for brand_key in _MANUFACTURER_DOMAINS:
-            if re.search(rf"(?<![0-9a-z]){re.escape(brand_key)}(?![0-9a-z])", text, flags=re.I):
-                corroboration[brand_key] = corroboration.get(brand_key, 0) + 1
-
-    if len(domain_candidates) == 1:
-        return _display_brand_name(next(iter(domain_candidates)))
-    if len(domain_candidates) > 1:
-        return ""
-
-    strong = [brand for brand, count in corroboration.items() if count >= 2]
-    if len(strong) == 1:
-        return _display_brand_name(strong[0])
-    return ""
-
+        if key:
+            seen_urls.add(key)
+        combined.append(result)
+    return _evaluate(combined)
 
 def _attr_value(tag: str, attribute: str) -> str:
     pattern = _ATTR_VALUE_RE_CACHE.get(attribute)
