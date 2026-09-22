@@ -41,7 +41,7 @@ from product_enrichment.models import EnrichmentResult, MediaCandidateInput, Pro
 from product_enrichment.observability import EnrichmentObserver
 from product_enrichment.orchestrator import enrich_product
 from product_enrichment.preview import enrichment_preview_dict, format_enrichment_preview_text
-from product_enrichment.research import ToolGatewayResearchAdapter
+from product_enrichment.research import ToolGatewayResearchAdapter, resolve_brand_from_model
 
 
 def build_identity_query_from_fields(fields: Mapping[str, str]) -> ProductIdentityQuery:
@@ -79,6 +79,16 @@ async def run_enrichment(
         adapter = ToolGatewayResearchAdapter(tool_gateway, tenant_id=tenant_id)
         search_port = adapter
         fetch_port = adapter
+        # Supplier feeds may carry a strong exact model/article but no
+        # separate brand column. Resolve ONLY the missing brand from
+        # conservative search evidence before identity validation; never
+        # override an explicit supplier brand and never guess on conflict.
+        if not query.brand and (query.model or query.article):
+            discovered_brand = await resolve_brand_from_model(
+                query.model or query.article, search_port=adapter
+            )
+            if discovered_brand:
+                query = dataclasses.replace(query, brand=discovered_brand)
     return await enrich_product(
         tenant_id=tenant_id,
         query=query,
@@ -126,8 +136,12 @@ def build_enriched_write_request(
     # through here exactly like preview/detail above.
     gallery_assets = [a for a in enrichment.media.assets if a.role == "gallery"]
 
+    resolved_title = base.title or f"{enrichment.identity.brand} {enrichment.identity.model}".strip()
+
     return dataclasses.replace(
         base,
+        title=resolved_title,
+        brand=base.brand or enrichment.identity.brand,
         subcategory=base.subcategory or enrichment.identity.subcategory,
         category_source=base.category_source or enrichment.identity.category,
         short_description=base.short_description or enrichment.content.short_description,
