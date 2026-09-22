@@ -2045,7 +2045,8 @@ class WorkflowPandaConversationGateway:
         if task is None or getattr(task, "family", None) != FAMILY_EXCEL:
             return None
 
-        ready_rows = [dict(r) for r in list(task.parameters.get("bitrix_batch_ready_rows") or []) if isinstance(r, Mapping)]
+        source_rows = task.parameters.get("bitrix_batch_all_ready_rows") or task.parameters.get("bitrix_batch_ready_rows") or []
+        ready_rows = [dict(r) for r in list(source_rows) if isinstance(r, Mapping)]
         if not ready_rows:
             return None
 
@@ -2416,6 +2417,7 @@ class WorkflowPandaConversationGateway:
         # that could pick up rows the user never actually saw/approved.
         if task is not None:
             task.parameters["bitrix_batch_dataset_id"] = dataset_id
+            task.parameters["bitrix_batch_all_ready_rows"] = list(new_rows)
             task.parameters["bitrix_batch_ready_rows"] = list(new_rows)
             self._action_store.put(task)
 
