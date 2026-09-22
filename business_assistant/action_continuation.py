@@ -2110,10 +2110,7 @@ def resolve_bitrix_write_confirmation(
         return _bitrix_missing_context_decision(active)
 
     fields = dict(active.parameters.get("bitrix_product_fields") or {})
-    # A strong SKU/article/model is sufficient context for preparation.
-    # Title may be absent in supplier feeds and is filled later by the
-    # existing enrichment identity pipeline from verified brand + model.
-    if not fields.get("sku"):
+    if not fields.get("title") or not fields.get("sku"):
         return _bitrix_missing_context_decision(active)
 
     retail_price = _extract_confirmed_retail_price(text) or str(
