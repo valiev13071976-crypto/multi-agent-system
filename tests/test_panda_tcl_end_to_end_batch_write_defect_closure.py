@@ -451,6 +451,19 @@ class BatchLiveConnectionBootstrapAcceptanceTests(unittest.IsolatedAsyncioTestCa
         self.assertFalse(result.metadata.get("mutated"))
 
 
+def _generic_three_new_no_title_bytes() -> bytes:
+    """Synthetic 3-product supplier shape proving multi-product logic and
+    search-budget isolation are not tied to exactly two concrete SKUs."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Модель", "Цена"])
+    ws.append(["MODEL-A1", "100"])
+    ws.append(["MODEL-B2", "200"])
+    ws.append(["MODEL-C3", "300"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
 def _tcl_subset_two_new_no_title_bytes() -> bytes:
     """Two brand-new supplier rows with strong model identity and no title.
     Reproduces the production shape that previously got interpreted as two
@@ -571,6 +584,37 @@ class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase)
         self.assertIn(SUBSET_NEW_SKU_1, result.text)
         self.assertIn(SUBSET_NEW_SKU_2, result.text)
         self.assertIn("НЕ включён в список на создание", result.text)
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertFalse(result.metadata.get("mutated"))
+    async def test_search_budget_is_reset_per_selected_product_not_per_request(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        ref = await _register_upload(artifact_service, content=_generic_three_new_no_title_bytes())
+        before_catalog_size = len(store.catalog(TENANT))
+
+        gateway = panda._tool_gateway  # noqa: SLF001
+        original_reset = gateway.reset_budget
+        with mock.patch.object(gateway, "reset_budget", wraps=original_reset) as reset_spy:
+            result = await panda.respond(
+                ConversationRequest(
+                    text=(
+                        "Подготовь для сайта товары MODEL-A1, MODEL-B2 и MODEL-C3. "
+                        "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                        "Пока ничего не записывай."
+                    ),
+                    tenant_id=TENANT, user_id=OWNER,
+                    request_id="direct-multi-budget-3", conversation_id=CONV,
+                    attachment_refs=(ref,),
+                )
+            )
+
+        preview = result.metadata.get("bitrix_batch_subset_preview") or {}
+        self.assertEqual(preview.get("count"), 3)
+        self.assertEqual(
+            set(preview.get("selected_skus") or []),
+            {"MODEL-A1", "MODEL-B2", "MODEL-C3"},
+        )
+        self.assertEqual(reset_spy.call_count, 3)
         self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
         self.assertFalse(result.metadata.get("mutated"))
     async def test_fresh_attachment_clears_stale_frozen_batch_state(self):
