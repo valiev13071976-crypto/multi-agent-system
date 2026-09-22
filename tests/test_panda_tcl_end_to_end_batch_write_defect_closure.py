@@ -402,6 +402,51 @@ class TitleOptionalProductIdentityAcceptanceTests(unittest.IsolatedAsyncioTestCa
         self.assertFalse(result.metadata.get("mutated"))
 
 
+class BatchLiveConnectionBootstrapAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    """Regression for the production-only failure where every valid TCL row
+    became ``bitrix_check_failed`` because the batch read path did not
+    bootstrap the per-tenant LIVE Bitrix connection before lookups."""
+
+    async def test_batch_preview_bootstraps_connection_once_before_row_lookups(self):
+        bridge, store = _bitrix_bridge_and_store()
+        calls: list[str] = []
+        original_bootstrap = bridge.ensure_live_connection_ready
+        original_lookup = bridge.check_live_existence
+
+        def _bootstrap(*, tenant_id: str) -> None:
+            calls.append(f"bootstrap:{tenant_id}")
+            original_bootstrap(tenant_id=tenant_id)
+
+        def _lookup(*, tenant_id: str, sku: str, connection_id=None):
+            calls.append(f"lookup:{sku}")
+            return original_lookup(tenant_id=tenant_id, sku=sku, connection_id=connection_id)
+
+        bridge.ensure_live_connection_ready = _bootstrap
+        bridge.check_live_existence = _lookup
+
+        panda, artifact_service = _panda(bridge)
+        await _upload_and_analyze(panda, artifact_service)
+        before_catalog_size = len(store.catalog(TENANT))
+
+        result = await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="r3-bootstrap",
+                conversation_id=CONV,
+            )
+        )
+
+        check = result.metadata.get("bitrix_existence_check") or {}
+        self.assertEqual(calls.count(f"bootstrap:{TENANT}"), 1)
+        first_lookup_index = next(i for i, value in enumerate(calls) if value.startswith("lookup:"))
+        self.assertLess(calls.index(f"bootstrap:{TENANT}"), first_lookup_index)
+        self.assertNotIn("bitrix_check_failed", [row.get("reason") for row in check.get("invalid") or []])
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertFalse(result.metadata.get("mutated"))
+
+
 class TclStyleBatchWriteAndRerunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
     """Mandatory acceptance #7, #9, #10, #11: the explicit batch
     confirmation creates ONLY the frozen READY_TO_CREATE rows, inactive,
