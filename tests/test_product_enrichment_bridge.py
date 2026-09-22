@@ -121,6 +121,38 @@ class RunEnrichmentTests(unittest.TestCase):
         self.assertIn("screen_diagonal_cm", result.characteristics)
 
 
+class MissingBrandEnrichmentTests(unittest.TestCase):
+    def test_exact_model_search_bootstraps_brand_and_fills_title(self):
+        fields = {"title": "", "sku": "55C6K", "ean": "", "category": "", "brand": "", "purchase_price": "50000"}
+        url = "https://www.tcl.com/global/en/tvs/55c6k"
+        gateway = _FakeToolGateway(
+            search_results=[_search_result(url, "TCL 55C6K specifications")],
+            page_text_by_url={url: "Цвет: черный\nЧастота обновления: 120 Гц"},
+        )
+        outcome = _run(
+            prepare_complete_card(
+                tenant_id="t1", product_fields=fields, retail_price="60000", tool_gateway=gateway
+            )
+        )
+        self.assertEqual(outcome["enrichment"].identity.brand, "TCL")
+        self.assertEqual(outcome["enrichment"].identity.model, "55C6K")
+        self.assertEqual(outcome["write_request"].brand, "TCL")
+        self.assertEqual(outcome["write_request"].title, "TCL 55C6K")
+        self.assertIn("color", outcome["enrichment"].characteristics)
+
+    def test_explicit_supplier_brand_is_never_overridden(self):
+        fields = dict(LG_FIELDS)
+        url = "https://www.tcl.com/global/en/tvs/55c6k"
+        gateway = _FakeToolGateway(
+            search_results=[_search_result(url, "TCL 55C6K specifications")],
+            page_text_by_url={url: "Цвет: черный"},
+        )
+        outcome = _run(
+            run_enrichment(tenant_id="t1", product_fields=fields, tool_gateway=gateway)
+        )
+        self.assertEqual(outcome.identity.brand, "LG")
+
+
 class BuildEnrichedWriteRequestTests(unittest.TestCase):
     def test_enrichment_fills_gaps_never_overrides_explicit_source_fields(self):
         fields = dict(LG_FIELDS, subcategory="", short_description="")

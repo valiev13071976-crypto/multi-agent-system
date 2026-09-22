@@ -2103,7 +2103,7 @@ class WorkflowPandaConversationGateway:
             title = str(row.get("title") or "").strip()
             safe_title = title or " ".join(part for part in (brand, sku) if part).strip() or sku
             fields = {
-                "title": safe_title,
+                "title": title,
                 "sku": sku,
                 "ean": str(row.get("ean") or ""),
                 "category": str(row.get("category") or ""),
@@ -2112,30 +2112,36 @@ class WorkflowPandaConversationGateway:
             }
             retail_price = str(row.get("retail_price") or "")
 
+            # Keep a truthful SKU-only fallback for preview continuity, but
+            # hand the ORIGINAL supplier fields (including an empty brand/
+            # title) to prepare_complete_card: its enrichment bridge can
+            # now resolve a missing brand from exact-model evidence and
+            # fill the title as "<verified brand> <exact model>".
+            fallback_fields = dict(fields)
+            fallback_fields["title"] = safe_title
             write_request = build_write_request_from_fields(
-                fields, tenant_id=tenant_id, retail_price=retail_price
+                fallback_fields, tenant_id=tenant_id, retail_price=retail_price
             )
             write_preview: dict = {}
             characteristic_status: dict = {}
             enrichment_preview: dict = {}
 
-            if brand:
-                try:
-                    card = await prepare_complete_card(
-                        tenant_id=tenant_id,
-                        product_fields=fields,
-                        retail_price=retail_price,
-                        bitrix_bridge=self._bitrix_bridge,
-                        tool_gateway=self._tool_gateway,
-                        media_fetcher=self._media_fetcher,
-                        cache=self._enrichment_cache,
-                    )
-                    write_request = card["write_request"]
-                    write_preview = dict(card.get("write_preview") or {})
-                    characteristic_status = serialize_characteristic_status(card["enrichment"])
-                    enrichment_preview = dict(card.get("enrichment_preview") or {})
-                except Exception:
-                    pass
+            try:
+                card = await prepare_complete_card(
+                    tenant_id=tenant_id,
+                    product_fields=fields,
+                    retail_price=retail_price,
+                    bitrix_bridge=self._bitrix_bridge,
+                    tool_gateway=self._tool_gateway,
+                    media_fetcher=self._media_fetcher,
+                    cache=self._enrichment_cache,
+                )
+                write_request = card["write_request"]
+                write_preview = dict(card.get("write_preview") or {})
+                characteristic_status = serialize_characteristic_status(card["enrichment"])
+                enrichment_preview = dict(card.get("enrichment_preview") or {})
+            except Exception:
+                pass
 
             if not write_preview and self._bitrix_bridge is not None:
                 try:
