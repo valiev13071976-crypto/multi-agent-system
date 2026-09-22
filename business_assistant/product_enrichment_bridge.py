@@ -79,16 +79,32 @@ async def run_enrichment(
         adapter = ToolGatewayResearchAdapter(tool_gateway, tenant_id=tenant_id)
         search_port = adapter
         fetch_port = adapter
+
+        # Search budgets are owned by ONE product-enrichment run, not by
+        # the surrounding chat/request. A previous product or unrelated
+        # search must never starve this product.
+        if hasattr(tool_gateway, "reset_budget"):
+            tool_gateway.reset_budget()
+
         # Supplier feeds may carry a strong exact model/article but no
         # separate brand column. Resolve ONLY the missing brand from
         # conservative search evidence before identity validation; never
         # override an explicit supplier brand and never guess on conflict.
+        brand_discovery_attempted = False
         if not query.brand and (query.model or query.article):
+            brand_discovery_attempted = True
             discovered_brand = await resolve_brand_from_model(
                 query.model or query.article, search_port=adapter
             )
             if discovered_brand:
                 query = dataclasses.replace(query, brand=discovered_brand)
+
+        # Brand discovery and specification/media research are separate
+        # bounded phases. A hard-to-identify model may legitimately consume
+        # the full discovery allowance (first query + one fallback); that
+        # must not leave zero budget for the actual product research.
+        if brand_discovery_attempted and query.brand and hasattr(tool_gateway, "reset_budget"):
+            tool_gateway.reset_budget()
     return await enrich_product(
         tenant_id=tenant_id,
         query=query,
