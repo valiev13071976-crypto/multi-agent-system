@@ -170,12 +170,16 @@ async def resolve_brand_from_model(
         domain = source_domain(url)
         text = f"{title} {snippet} {url}".casefold()
 
+        if model_folded not in text:
+            continue
+
+        # Even a manufacturer domain is only identity evidence when this
+        # exact model/article is present in that result. A generic brand
+        # homepage returned by search must never assign the brand.
         for brand_key, domains in _MANUFACTURER_DOMAINS.items():
             if domain and any(domain == d or domain.endswith(f".{d}") for d in domains):
                 domain_candidates.add(brand_key)
 
-        if model_folded not in text:
-            continue
         for brand_key in _MANUFACTURER_DOMAINS:
             if re.search(rf"(?<![0-9a-z]){re.escape(brand_key)}(?![0-9a-z])", text, flags=re.I):
                 corroboration[brand_key] = corroboration.get(brand_key, 0) + 1
