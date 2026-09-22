@@ -2007,6 +2007,194 @@ class WorkflowPandaConversationGateway:
         )
 
 
+
+    async def _maybe_prepare_direct_multi_sku_site_preview(
+        self, request: ConversationRequest
+    ) -> ConversationResult | None:
+        """Handle a fresh/direct request that names several exact SKUs and
+        asks to prepare them for the site before the single-product Managed
+        Agent can collapse the turn onto just one selected row.
+
+        The canonical spreadsheet Workset is the source of truth. The
+        request is treated as a multi-product Bitrix preview only when at
+        least TWO exact SKU/article/model identities from that dataset are
+        explicitly present in the user text. Only those selected rows are
+        checked against LIVE Bitrix. Excel is never filtered/mutated.
+        """
+        from business_assistant import workset as workset_lib
+        from business_assistant.action_continuation import EXCEL_CONTRACT, FAMILY_EXCEL
+        from tools.models import ToolRequest
+
+        conversation_id = str(request.conversation_id or "")
+        if not conversation_id or self._tool_gateway is None or self._bitrix_bridge is None:
+            return None
+
+        task = self._action_store.get(
+            tenant_id=str(request.tenant_id or ""),
+            owner_id=str(request.user_id or ""),
+            conversation_id=conversation_id,
+        )
+        if task is None or getattr(task, "family", None) != FAMILY_EXCEL:
+            return None
+
+        workset = workset_lib.get_workset(task)
+        dataset_id = str(getattr(workset, "dataset_id", "") or "")
+        if not dataset_id:
+            return None
+
+        text = str(request.text or "").strip()
+        if not text:
+            return None
+        blob = text.casefold()
+        has_target = any(token in blob for token in ("bitrix", "битрикс", "aspro", "аспро", "сайт", "site"))
+        has_preview_intent = any(
+            token in blob
+            for token in (
+                "подготов", "предпросмотр", "preview", "покаж", "show", "план запис", "write plan"
+            )
+        )
+        if not (has_target and has_preview_intent):
+            return None
+
+        tenant_id = str(request.tenant_id or '')
+        owner_id = str(request.user_id or '')
+        tool_request = ToolRequest(
+            request_id=str(uuid.uuid4()),
+            workflow_id='',
+            task_id=getattr(task, 'task_id', None) or str(uuid.uuid4()),
+            tool_id=EXCEL_CONTRACT.tool_id,
+            operation='canonical_identity_rows',
+            arguments={'dataset_id': dataset_id},
+            requested_capabilities=tuple(EXCEL_CONTRACT.required_capabilities),
+            tenant_id=tenant_id,
+            user_id=owner_id,
+            actor_id=f'{tenant_id}:{owner_id}',
+        )
+        try:
+            result = await self._tool_gateway.invoke(tool_request, capabilities=self._tool_capabilities)
+        except Exception:
+            return None
+        if not getattr(result, 'success', False):
+            return None
+        rows = list(dict(getattr(result, 'data', None) or {}).get('rows') or [])
+
+        selected: list[dict] = []
+        seen_skus: set[str] = set()
+        for row in rows:
+            sku = str(row.get('sku') or '').strip()
+            if not sku:
+                continue
+            pattern = rf'(?<![0-9a-zа-я]){re.escape(sku.casefold())}(?![0-9a-zа-я])'
+            if re.search(pattern, blob, flags=re.I) and sku.casefold() not in seen_skus:
+                selected.append(dict(row))
+                seen_skus.add(sku.casefold())
+
+        # Single-product requests remain owned by the existing managed/
+        # conversational path. This seam is only for an explicit multi-SKU
+        # selection so no semantic competition is introduced.
+        if len(selected) < 2:
+            return None
+
+        try:
+            self._bitrix_bridge.ensure_live_connection_ready(tenant_id=tenant_id)
+        except Exception:
+            return ConversationResult(
+                text='Не удалось подключиться к Bitrix для проверки выбранных товаров. Ничего не записано.',
+                task_id=getattr(task, 'task_id', None),
+                metadata={'action_decision': 'PREVIEW_DIRECT_MULTI_SKU', 'artifacts': [], 'mutated': False},
+            )
+
+        new_rows: list[dict] = []
+        existing_rows: list[dict] = []
+        ambiguous_rows: list[dict] = []
+        failed_rows: list[dict] = []
+        for row in selected:
+            sku = str(row.get('sku') or '').strip()
+            try:
+                matches = self._bitrix_bridge.check_live_existence(tenant_id=tenant_id, sku=sku)
+            except Exception:
+                failed_rows.append({'sku': sku, 'reason': 'bitrix_check_failed'})
+                continue
+
+            frozen = {
+                'source_row': row.get('row_source_row'),
+                'sku': sku,
+                'title': str(row.get('title') or ''),
+                'ean': str(row.get('ean') or ''),
+                'category': str(row.get('category') or ''),
+                'brand': str(row.get('brand') or ''),
+                'purchase_price': str(row.get('purchase_price') or ''),
+                'retail_price': str(row.get('retail_price') or ''),
+            }
+            if not matches:
+                frozen['planned_action'] = 'READY_TO_CREATE'
+                new_rows.append(frozen)
+            elif len(matches) == 1:
+                frozen['planned_action'] = 'SKIP_EXISTS'
+                frozen['bitrix_id'] = str(matches[0].get('id') or matches[0].get('external_product_id') or '')
+                existing_rows.append(frozen)
+            else:
+                frozen['planned_action'] = 'SKIP_AMBIGUOUS'
+                frozen['candidates'] = [str(m.get('id') or m.get('external_product_id') or '') for m in matches]
+                ambiguous_rows.append(frozen)
+
+        if not new_rows:
+            lines = ['ПРЕДПРОСМОТР ВЫБРАННЫХ ТОВАРОВ ДЛЯ BITRIX/ASPRO (ничего не записано):']
+            if existing_rows:
+                lines.append(f'Уже существуют в Bitrix: {len(existing_rows)}')
+                lines.extend(f"  - {r['sku']}" for r in existing_rows)
+            if ambiguous_rows:
+                lines.append(f'Неоднозначные совпадения: {len(ambiguous_rows)}')
+                lines.extend(f"  - {r['sku']}" for r in ambiguous_rows)
+            if failed_rows:
+                lines.append(f'Не удалось проверить: {len(failed_rows)}')
+                lines.extend(f"  - {r['sku']} [{r['reason']}]" for r in failed_rows)
+            lines.append('Ничего в Bitrix не записано.')
+            return ConversationResult(
+                text='\n'.join(lines),
+                task_id=getattr(task, 'task_id', None),
+                metadata={
+                    'action_decision': 'PREVIEW_DIRECT_MULTI_SKU',
+                    'artifacts': [],
+                    'mutated': False,
+                    'bitrix_direct_multi_check': {
+                        'new': new_rows, 'existing': existing_rows,
+                        'ambiguous': ambiguous_rows, 'failed': failed_rows,
+                    },
+                },
+            )
+
+        # Seed ONLY the explicitly named NEW rows into the existing frozen
+        # batch-preview contract, then reuse its already-governed complete
+        # card preparation/rendering path. This is a state handoff, not a
+        # second preview implementation.
+        task.parameters['bitrix_batch_dataset_id'] = dataset_id
+        task.parameters['bitrix_batch_all_ready_rows'] = list(new_rows)
+        task.parameters['bitrix_batch_ready_rows'] = list(new_rows)
+        self._action_store.put(task)
+
+        preview = await self._maybe_preview_batch_bitrix_subset(request)
+        if preview is None:
+            return None
+
+        if existing_rows or ambiguous_rows or failed_rows:
+            prefix: list[str] = []
+            if existing_rows:
+                prefix.append('Уже существуют в Bitrix и не будут подготовлены к созданию: ' + ', '.join(r['sku'] for r in existing_rows))
+            if ambiguous_rows:
+                prefix.append('Неоднозначные совпадения и не будут подготовлены к созданию: ' + ', '.join(r['sku'] for r in ambiguous_rows))
+            if failed_rows:
+                prefix.append('Не удалось проверить в Bitrix: ' + ', '.join(r['sku'] for r in failed_rows))
+            preview = ConversationResult(
+                text='\n'.join(prefix + ['', preview.text]),
+                task_id=preview.task_id,
+                metadata={**dict(preview.metadata or {}), 'bitrix_direct_multi_check': {
+                    'new': new_rows, 'existing': existing_rows,
+                    'ambiguous': ambiguous_rows, 'failed': failed_rows,
+                }},
+            )
+        return preview
+
     async def _maybe_preview_batch_bitrix_subset(
         self, request: ConversationRequest
     ) -> ConversationResult | None:
@@ -2870,6 +3058,25 @@ class WorkflowPandaConversationGateway:
                 )
                 if not canonical_established:
                     skip_managed_agent_this_turn = True
+
+            # Direct multi-product site preparation (e.g. a fresh price list
+            # plus two exact SKUs in the same message) must be resolved from
+            # the canonical Workset before the single-product Managed Agent.
+            # Otherwise the managed runtime legitimately selects only one row
+            # and silently drops the second requested product.
+            direct_multi_preview = None
+            if not skip_managed_agent_this_turn:
+                direct_multi_preview = await self._maybe_prepare_direct_multi_sku_site_preview(request)
+            if direct_multi_preview is not None:
+                self._record_latency(t0, follow_up_ms)
+                meta = dict(direct_multi_preview.metadata or {})
+                meta['follow_up_kind'] = resolution.kind
+                meta['follow_up_target'] = resolution.target
+                return ConversationResult(
+                    text=direct_multi_preview.text,
+                    task_id=direct_multi_preview.task_id or task_id,
+                    metadata=meta,
+                )
 
             canonical_table_result = None
             if not skip_managed_agent_this_turn:
