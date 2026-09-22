@@ -16,7 +16,13 @@ from product_enrichment.models import (
     SOURCE_UNKNOWN,
 )
 from product_enrichment.observability import EnrichmentObserver
-from product_enrichment.research import (\n    classify_source_type,\n    extract_image_candidate_urls,\n    research_product,\n    resolve_brand_from_model,\n)\nfrom tools.search.fake_provider import FakeSearchProvider, fake_result
+from product_enrichment.research import (
+    classify_source_type,
+    extract_image_candidate_urls,
+    research_product,
+    resolve_brand_from_model,
+)
+from tools.search.fake_provider import FakeSearchProvider, fake_result
 
 
 def _run(coro):
