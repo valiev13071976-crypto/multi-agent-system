@@ -462,8 +462,8 @@ async def _delegate_to_existing_product_preparation(
     card`` dict on success and ``reason`` is ``""``. On failure ``result``
     is ``None`` (never raises) and ``reason`` is one of a small, static,
     non-secret set of codes a caller/operator can act on:
-    - ``"missing_title_or_sku"``: the resolved fields lack a title/sku the
-      existing pipeline requires (upstream data problem, not a bug here);
+    - ``"missing_sku"``: the resolved fields lack a canonical SKU/article/model identity;
+      title is optional because the existing enrichment pipeline can fill it from verified identity;
     - ``"timeout"``: the existing pipeline did not finish within
       ``timeout_s`` (real research/media-fetch network I/O can be slow in
       a real deployment; see ``DEFAULT_DELEGATION_TIMEOUT_S``);
@@ -477,8 +477,8 @@ async def _delegate_to_existing_product_preparation(
     from business_assistant.product_enrichment_bridge import prepare_complete_card
 
     product_fields, retail_price = _canonical_fields_and_retail_price(raw_fields)
-    if not product_fields.get("title") or not product_fields.get("sku"):
-        return None, "missing_title_or_sku"
+    if not product_fields.get("sku"):
+        return None, "missing_sku"
     coro = prepare_complete_card(
         tenant_id=tenant_id,
         product_fields=product_fields,
@@ -585,8 +585,8 @@ async def _delegate_to_existing_write_plan(
     from product_enrichment.preview import enrichment_preview_dict
 
     product_fields, retail_price = _canonical_fields_and_retail_price(raw_fields)
-    if not product_fields.get("title") or not product_fields.get("sku"):
-        return None, "missing_title_or_sku"
+    if not product_fields.get("sku"):
+        return None, "missing_sku"
 
     async def _build_and_render() -> dict:
         enrichment = await run_enrichment(
