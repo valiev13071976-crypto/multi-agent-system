@@ -2053,7 +2053,7 @@ class WorkflowPandaConversationGateway:
             return None
 
         workset = workset_lib.get_workset(task)
-        dataset_id = str(getattr(workset, "dataset_id", "") or "")
+        dataset_id = str(getattr(workset, "current_dataset_id", "") or "")
         if not dataset_id:
             return None
 
