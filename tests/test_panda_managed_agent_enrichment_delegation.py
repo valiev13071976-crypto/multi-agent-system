@@ -905,13 +905,73 @@ class PandaBridgeDelegationUnitTests(unittest.IsolatedAsyncioTestCase):
         _fields, retail_price = _canonical_fields_and_retail_price({"name": "LG TV", "sku": "S1", "purchase_price": "100"})
         self.assertEqual(retail_price, "")
 
-    async def test_delegate_returns_none_without_title_or_sku(self):
+    async def test_delegate_returns_none_without_sku_identity(self):
         from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
 
         result, reason = await _delegate_to_existing_product_preparation({"category": "TV"}, tenant_id="tenant-a")
         self.assertIsNone(result)
-        self.assertEqual(reason, "missing_title_or_sku")
+        self.assertEqual(reason, "missing_sku")
 
+    async def test_delegate_allows_missing_title_when_strong_sku_exists(self):
+        from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
+
+        received = {}
+
+        async def _fake_prepare_complete_card(*, tenant_id, product_fields, **kwargs):
+            received["tenant_id"] = tenant_id
+            received["product_fields"] = dict(product_fields)
+            return {"text": "PREPARED", "write_preview": {}}
+
+        with mock.patch(
+            "business_assistant.product_enrichment_bridge.prepare_complete_card",
+            new=_fake_prepare_complete_card,
+        ):
+            result, reason = await _delegate_to_existing_product_preparation(
+                {"name": "", "sku": "65RM7L", "category": "TV", "brand": ""},
+                tenant_id="tenant-a",
+            )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(result.get("text"), "PREPARED")
+        self.assertEqual(received["product_fields"]["sku"], "65RM7L")
+        self.assertEqual(received["product_fields"]["title"], "")
+
+    async def test_write_plan_delegate_allows_missing_title_when_strong_sku_exists(self):
+        from managed_agent_poc.panda_bridge import _delegate_to_existing_write_plan
+
+        fake_enrichment = mock.Mock()
+        fake_enrichment.identity = mock.Mock()
+        fake_enrichment.identity.brand = "TCL"
+        fake_enrichment.identity.model = "65RM7L"
+        fake_enrichment.identity.subcategory = ""
+        fake_enrichment.characteristics = {}
+        fake_enrichment.media = ()
+        fake_enrichment.content = mock.Mock(short_description="", detailed_description="")
+
+        with mock.patch(
+            "business_assistant.product_enrichment_bridge.run_enrichment",
+            new=mock.AsyncMock(return_value=fake_enrichment),
+        ), mock.patch(
+            "business_assistant.product_enrichment_bridge.build_enriched_write_request",
+            return_value=mock.Mock(title="TCL 65RM7L", sku="65RM7L", retail_price="", brand="TCL"),
+        ), mock.patch(
+            "business_assistant.product_enrichment_bridge.serialize_characteristic_status",
+            return_value={},
+        ), mock.patch(
+            "product_enrichment.preview.enrichment_preview_dict",
+            return_value={},
+        ), mock.patch(
+            "business_assistant.product_enrichment_bridge.format_write_plan_text",
+            return_value="PLAN",
+        ):
+            result, reason = await _delegate_to_existing_write_plan(
+                {"name": "", "sku": "65RM7L", "category": "TV", "brand": ""},
+                tenant_id="tenant-a",
+                bitrix_bridge=None,
+            )
+
+        self.assertEqual(reason, "")
+        self.assertEqual(result.get("text"), "PLAN")
     async def test_delegate_calls_existing_prepare_complete_card_exactly_once(self):
         from managed_agent_poc.panda_bridge import _delegate_to_existing_product_preparation
 
