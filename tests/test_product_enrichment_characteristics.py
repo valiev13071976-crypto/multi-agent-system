@@ -76,6 +76,59 @@ class NormalizeCharacteristicValueTests(unittest.TestCase):
         self.assertEqual(unit, "")
 
 
+class GenericCharacteristicValueQualityGateTests(unittest.TestCase):
+    def test_enum_like_fields_reject_marketing_prose(self):
+        garbage_values = (
+            "Premium display technology brings incredible brightness and vivid cinematic colors for every scene.",
+            "Experience next generation Mini LED performance with stunning contrast and exceptional brightness",
+            "This smart platform gives you access to thousands of apps and entertainment services",
+        )
+        for key in ("panel_technology", "backlight_technology", "operating_system"):
+            for value in garbage_values:
+                with self.subTest(key=key, value=value):
+                    normalized, _unit = normalize_characteristic_value(key, value)
+                    self.assertEqual(normalized, "")
+
+    def test_compact_real_spec_tokens_survive(self):
+        expected = {
+            "panel_technology": "QD-Mini LED",
+            "backlight_technology": "Mini LED",
+            "operating_system": "Google TV",
+            "hdr_formats": "HDR10+, Dolby Vision, HLG",
+            "country_of_origin": "Turkey",
+        }
+        for key, value in expected.items():
+            with self.subTest(key=key):
+                normalized, _unit = normalize_characteristic_value(key, value)
+                self.assertEqual(normalized, value)
+
+    def test_dimensions_require_numeric_triplet_not_neighbor_label_text(self):
+        self.assertEqual(
+            normalize_characteristic_value(
+                "dimensions_without_stand", "Carton Dimensions (LxWxH mm) 1360 x 128 x 875"
+            )[0],
+            "",
+        )
+        self.assertEqual(
+            normalize_characteristic_value("dimensions_without_stand", "1224 x 711 x 69 mm")[0],
+            "1224 x 711 x 69 mm",
+        )
+
+    def test_package_dimension_label_variants_are_recognized_structurally(self):
+        html = (
+            "<div>Dimensions without stand</div><div>1224 x 711 x 69 mm</div>"
+            "<div>Carton Dimensions</div><div>1360 x 128 x 875 mm</div>"
+        )
+        pairs = list(extract_spec_lines(html))
+        self.assertIn(("Dimensions without stand", "1224 x 711 x 69 mm"), pairs)
+        self.assertIn(("Carton Dimensions", "1360 x 128 x 875 mm"), pairs)
+
+    def test_resolution_and_vesa_reject_prose_but_keep_valid_shapes(self):
+        self.assertEqual(normalize_characteristic_value("screen_resolution", "3840x2160")[0], "3840x2160")
+        self.assertEqual(normalize_characteristic_value("screen_resolution", "Ultra detailed picture for movies")[0], "")
+        self.assertEqual(normalize_characteristic_value("vesa_mount", "300 x 300")[0], "300 x 300")
+        self.assertEqual(normalize_characteristic_value("vesa_mount", "Mounting compatible with most wall brackets")[0], "")
+
 class BridgeCharacteristicsToBitrixTests(unittest.TestCase):
     def test_verified_key_gets_bitrix_property_id(self):
         chars = {
