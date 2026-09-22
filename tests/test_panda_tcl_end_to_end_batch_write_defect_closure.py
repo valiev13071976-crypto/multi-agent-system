@@ -104,6 +104,8 @@ EXISTING_INACTIVE_SKU = "SKU-X200"
 AMBIGUOUS_SKU = "SKU-AMBIG"
 NEW_SKU = "TCL-77Q10K.ARUG"
 NEW_TITLE = "TCL 77Q10K QLED телевизор"
+SUBSET_NEW_SKU_1 = "55C6K"
+SUBSET_NEW_SKU_2 = "65RM7L"
 
 BATCH_CHECK_TEXT = (
     "Проверь весь прайс перед загрузкой на сайт. Покажи, какие товары уже есть в Bitrix, "
@@ -445,6 +447,122 @@ class BatchLiveConnectionBootstrapAcceptanceTests(unittest.IsolatedAsyncioTestCa
         self.assertNotIn("bitrix_check_failed", [row.get("reason") for row in check.get("invalid") or []])
         self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
         self.assertFalse(result.metadata.get("mutated"))
+
+
+def _tcl_subset_two_new_no_title_bytes() -> bytes:
+    """Two brand-new supplier rows with strong model identity and no title.
+    Reproduces the production shape that previously got interpreted as two
+    sequential Excel text filters (AND), yielding zero rows."""
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Модель", "Цена"])
+    ws.append([SUBSET_NEW_SKU_1, "54990"])
+    ws.append([SUBSET_NEW_SKU_2, "64990"])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+class BitrixBatchSubsetPreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
+    """34 NEW -> choose a named subset -> preview -> confirm only subset.
+    The subset handoff must never mutate/filter the canonical Excel data.
+    """
+
+    async def _upload_two_new(self, panda, artifact_service):
+        ref = await _register_upload(artifact_service, content=_tcl_subset_two_new_no_title_bytes())
+        await panda.respond(
+            ConversationRequest(
+                text="Вот прайс-лист, проанализируй.",
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="subset-r1",
+                conversation_id=CONV,
+                attachment_refs=(ref,),
+            )
+        )
+        await panda.respond(
+            ConversationRequest(
+                text="Проанализируй весь прайс.",
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="subset-r2",
+                conversation_id=CONV,
+            )
+        )
+
+    async def test_named_subset_is_previewed_without_excel_filter_and_only_subset_is_created(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        await self._upload_two_new(panda, artifact_service)
+
+        batch = await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="subset-r3",
+                conversation_id=CONV,
+            )
+        )
+        check = batch.metadata.get("bitrix_existence_check") or {}
+        self.assertEqual({r["sku"] for r in check.get("new") or []}, {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
+        before_catalog_size = len(store.catalog(TENANT))
+
+        subset = await panda.respond(
+            ConversationRequest(
+                text=(
+                    f"Подготовь для сайта только товары {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                    "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                    "Пока ничего не записывай."
+                ),
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="subset-r4",
+                conversation_id=CONV,
+            )
+        )
+
+        self.assertEqual(subset.metadata.get("action_decision"), "PREVIEW_BATCH_BITRIX_SUBSET")
+        self.assertFalse(subset.metadata.get("mutated"))
+        self.assertNotIn("Строк было:", subset.text)
+        preview = subset.metadata.get("bitrix_batch_subset_preview") or {}
+        self.assertEqual(set(preview.get("selected_skus") or []), {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
+        self.assertEqual(preview.get("count"), 2)
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+
+        task = panda._action_store.get(tenant_id=TENANT, owner_id=OWNER, conversation_id=CONV)  # noqa: SLF001
+        frozen = list(task.parameters.get("bitrix_batch_ready_rows") or [])
+        self.assertEqual(len(frozen), 2)
+        self.assertEqual({r.get("sku") for r in frozen}, {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
+        self.assertTrue(all(r.get("title") for r in frozen))
+        self.assertTrue(all(r.get("prepared_write_request") for r in frozen))
+
+        confirm = await panda.respond(
+            ConversationRequest(
+                text=BATCH_CONFIRM_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="subset-r5",
+                conversation_id=CONV,
+            )
+        )
+        result = confirm.metadata.get("bitrix_batch_create_result") or {}
+        self.assertEqual(result.get("total"), 2)
+        self.assertEqual(result.get("created"), 2)
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size + 2)
+
+        rerun = await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="subset-r6",
+                conversation_id=CONV,
+            )
+        )
+        rerun_check = rerun.metadata.get("bitrix_existence_check") or {}
+        self.assertEqual({r["sku"] for r in rerun_check.get("existing") or []}, {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
+        self.assertEqual(rerun_check.get("new") or [], [])
 
 
 class TclStyleBatchWriteAndRerunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
