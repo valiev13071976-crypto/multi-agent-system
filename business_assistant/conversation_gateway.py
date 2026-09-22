@@ -982,6 +982,21 @@ class WorkflowPandaConversationGateway:
                 dataset_id=new_dataset_id,
             ),
         )
+        # A fresh source invalidates every product/batch artifact derived
+        # from the previous spreadsheet. Keep one authoritative Workset
+        # and never allow a new attachment to inherit stale single-product
+        # selection, enrichment, or frozen Bitrix approval rows.
+        for key in (
+            "bitrix_product_fields",
+            "bitrix_enrichment_write_request",
+            "product_enrichment_result",
+            "bitrix_retail_price_preview",
+            "bitrix_batch_dataset_id",
+            "bitrix_batch_all_ready_rows",
+            "bitrix_batch_ready_rows",
+            "bitrix_batch_selected_skus",
+        ):
+            task.parameters.pop(key, None)
         self._action_store.put(task)
         return True
 
@@ -2931,9 +2946,38 @@ class WorkflowPandaConversationGateway:
             ]
             spreadsheet_attachment_count = len(spreadsheet_refs_this_turn)
 
-        # After a whole-price-list Bitrix preview, a request naming a subset
-        # of the frozen READY rows is a Bitrix batch selection, not an Excel
-        # table filter. Handle it before canonical table execution.
+        # PRODUCT-FIRST orchestration boundary: canonical spreadsheet
+        # ownership is established for every fresh attachment BEFORE any
+        # managed/legacy product router competes for the turn. This is
+        # intentionally independent of PANDA_MANAGED_AGENT_ENABLED.
+        canonical_established_this_turn = not bool(spreadsheet_refs_this_turn)
+        if spreadsheet_refs_this_turn:
+            canonical_established_this_turn = await self._establish_canonical_workset_from_attachment(
+                request, spreadsheet_refs_this_turn[0]
+            )
+
+        # A request that explicitly names 2+ exact products is a multi-
+        # product business task regardless of which conversational engine
+        # happens to be enabled. Resolve it once from the canonical Workset
+        # before either the single-product Managed Agent or the legacy
+        # single-product continuation path can collapse the scope.
+        if canonical_established_this_turn:
+            direct_multi_preview = await self._maybe_prepare_direct_multi_sku_site_preview(request)
+            if direct_multi_preview is not None:
+                self._record_latency(t0, follow_up_ms)
+                meta = dict(direct_multi_preview.metadata or {})
+                meta["follow_up_kind"] = resolution.kind
+                meta["follow_up_target"] = resolution.target
+                return ConversationResult(
+                    text=direct_multi_preview.text,
+                    task_id=direct_multi_preview.task_id or task_id,
+                    metadata=meta,
+                )
+
+        # Follow-up after a prior whole-price-list Bitrix check: select a
+        # named subset from the already-frozen READY rows. A fresh upload
+        # has already cleared stale frozen rows above, so this can never
+        # leak approval state across source files.
         batch_subset_preview = await self._maybe_preview_batch_bitrix_subset(request)
         if batch_subset_preview is not None:
             self._record_latency(t0, follow_up_ms)
@@ -3051,32 +3095,13 @@ class WorkflowPandaConversationGateway:
             # is introduced. A turn with NO spreadsheet attached this turn
             # is completely unaffected (``skip_managed_agent_this_turn``
             # stays ``False``).
-            skip_managed_agent_this_turn = False
-            if spreadsheet_refs_this_turn:
-                canonical_established = await self._establish_canonical_workset_from_attachment(
-                    request, spreadsheet_refs_this_turn[0]
-                )
-                if not canonical_established:
-                    skip_managed_agent_this_turn = True
-
-            # Direct multi-product site preparation (e.g. a fresh price list
-            # plus two exact SKUs in the same message) must be resolved from
-            # the canonical Workset before the single-product Managed Agent.
-            # Otherwise the managed runtime legitimately selects only one row
-            # and silently drops the second requested product.
-            direct_multi_preview = None
-            if not skip_managed_agent_this_turn:
-                direct_multi_preview = await self._maybe_prepare_direct_multi_sku_site_preview(request)
-            if direct_multi_preview is not None:
-                self._record_latency(t0, follow_up_ms)
-                meta = dict(direct_multi_preview.metadata or {})
-                meta['follow_up_kind'] = resolution.kind
-                meta['follow_up_target'] = resolution.target
-                return ConversationResult(
-                    text=direct_multi_preview.text,
-                    task_id=direct_multi_preview.task_id or task_id,
-                    metadata=meta,
-                )
+            # Fresh-attachment canonical ingest was already attempted once
+            # above, outside this feature flag. If it failed, fail safe and
+            # skip the managed agent for this turn; never ingest twice and
+            # never create split ownership.
+            skip_managed_agent_this_turn = bool(
+                spreadsheet_refs_this_turn and not canonical_established_this_turn
+            )
 
             canonical_table_result = None
             if not skip_managed_agent_this_turn:
