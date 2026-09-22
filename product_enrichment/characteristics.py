@@ -54,7 +54,7 @@ CANONICAL_CHARACTERISTIC_ALIASES: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "color": ("", ("цвет", "color", "colour")),
     "dimensions_with_stand": ("mm", ("габариты с подставкой", "dimensions with stand")),
     "dimensions_without_stand": ("mm", ("габариты без подставки", "dimensions without stand")),
-    "package_dimensions": ("mm", ("габариты упаковки", "package dimensions")),
+    "package_dimensions": ("mm", ("габариты упаковки", "package dimensions", "carton dimensions", "shipping dimensions")),
     "weight_with_stand_kg": ("kg", ("вес с подставкой", "weight with stand")),
     "weight_without_stand_kg": ("kg", ("вес без подставки", "weight without stand")),
     "package_weight_kg": ("kg", ("вес в упаковке", "package weight")),
@@ -284,6 +284,81 @@ def match_canonical_key(raw_label: str) -> str | None:
     return None
 
 
+_SHORT_ENUM_KEYS = frozenset(
+    {
+        "panel_technology",
+        "backlight_technology",
+        "operating_system",
+        "hdr_formats",
+        "tuners",
+        "smart_tv_support",
+        "wifi_support",
+        "bluetooth_support",
+        "ethernet_support",
+        "country_of_origin",
+    }
+)
+_MAX_SHORT_ENUM_CHARS = 72
+_MAX_SHORT_ENUM_WORDS = 10
+_SENTENCE_PUNCT_RE = re.compile(r"[.!?;]")
+_DIMENSION_VALUE_RE = re.compile(
+    r"^\s*\d+(?:[.,]\d+)?\s*(?:x|×|х)\s*\d+(?:[.,]\d+)?\s*(?:x|×|х)\s*\d+(?:[.,]\d+)?(?:\s*(?:mm|мм|cm|см))?\s*$",
+    re.I,
+)
+_VESA_VALUE_RE = re.compile(
+    r"^\s*\d{2,4}\s*(?:x|×|х)\s*\d{2,4}(?:\s*(?:mm|мм))?\s*$",
+    re.I,
+)
+_RESOLUTION_VALUE_RE = re.compile(
+    r"^\s*(?:\d{3,5}\s*(?:x|×|х)\s*\d{3,5}|(?:hd|full\s*hd|fhd|uhd|4k|8k)(?:\s+uhd)?)\s*$",
+    re.I,
+)
+
+
+def _is_short_spec_value(text: str) -> bool:
+    """Generic guard for enum-like catalog values.
+
+    Real values such as ``OLED``, ``Mini LED``, ``Google TV`` or
+    ``HDR10+, Dolby Vision, HLG`` are compact tokens/phrases. A long
+    prose sentence beside a recognized label is usually marketing copy
+    accidentally paired by structural HTML extraction and must not become
+    a product characteristic.
+    """
+    value = _WHITESPACE_RE.sub(" ", str(text or "")).strip()
+    if not value or len(value) > _MAX_SHORT_ENUM_CHARS:
+        return False
+    if len(value.split()) > _MAX_SHORT_ENUM_WORDS:
+        return False
+    if _SENTENCE_PUNCT_RE.search(value):
+        return False
+    return True
+
+
+def _passes_characteristic_value_shape(key: str, text: str) -> bool:
+    """Fail-closed shape validation before a sourced value becomes a fact.
+
+    This is category/model/brand agnostic. It validates the semantic SHAPE
+    of canonical fields, never guesses a replacement value.
+    """
+    value = _WHITESPACE_RE.sub(" ", str(text or "")).strip()
+    if not value:
+        return False
+    if key in _SHORT_ENUM_KEYS:
+        if not _is_short_spec_value(value):
+            return False
+        if key == "country_of_origin" and any(ch.isdigit() for ch in value):
+            return False
+    if key in {"dimensions_with_stand", "dimensions_without_stand", "package_dimensions"}:
+        return bool(_DIMENSION_VALUE_RE.match(value))
+    if key == "vesa_mount":
+        return bool(_VESA_VALUE_RE.match(value))
+    if key == "screen_resolution":
+        return bool(_RESOLUTION_VALUE_RE.match(value))
+    if key == "model_year":
+        match = re.fullmatch(r"20\d{2}", value)
+        return bool(match) and 2000 <= int(value) <= 2100
+    return True
+
 def normalize_characteristic_value(key: str, raw_value: str) -> tuple[str, str]:
     """Deterministic unit normalization ONLY where a conversion is
     unambiguous (inches -> cm for screen diagonal); everything else is
@@ -291,6 +366,8 @@ def normalize_characteristic_value(key: str, raw_value: str) -> tuple[str, str]:
     silent, unverifiable conversion (module docstring requirement)."""
     unit = CANONICAL_CHARACTERISTIC_ALIASES.get(key, ("", ()))[0]
     text = str(raw_value or "").strip()
+    if not _passes_characteristic_value_shape(key, text):
+        return "", unit
     if key == "screen_diagonal_cm":
         cm_match = _CM_RE.search(text)
         if cm_match:
