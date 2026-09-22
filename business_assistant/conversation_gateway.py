@@ -2306,16 +2306,6 @@ class WorkflowPandaConversationGateway:
         ]
 
         for index, row in enumerate(selected_rows, 1):
-            # Product enrichment search budget is a PER-PRODUCT bound.
-            # ToolGateway keeps a cumulative result counter; without
-            # resetting it here, the first selected product can consume
-            # the full MAX_TOTAL_SEARCH_RESULTS budget and every later
-            # product silently receives zero search results. This reset
-            # uses the existing governed budget API and does not relax the
-            # per-product cap: each product remains bounded by the same
-            # ToolGateway maximum.
-            if self._tool_gateway is not None and hasattr(self._tool_gateway, "reset_budget"):
-                self._tool_gateway.reset_budget()
             sku = str(row.get("sku") or "").strip()
             brand = str(row.get("brand") or "").strip()
             title = str(row.get("title") or "").strip()
