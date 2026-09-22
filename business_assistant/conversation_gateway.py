@@ -2056,6 +2056,22 @@ class WorkflowPandaConversationGateway:
                 "Сначала приложите файл, затем попросите проверить товары по Bitrix."
             )
 
+        # LIVE Bitrix uses the same per-tenant IntegrationActivationService
+        # connection lifecycle as the governed single-product write path.
+        # Bootstrap it ONCE before the batch loop; without this, every
+        # check_live_existence() call reaches resolve_connection() with no
+        # ACTIVE connection for the current tenant and is collapsed below
+        # into one ``bitrix_check_failed`` row after another. FIXTURE/
+        # SANDBOX keep their existing behavior because this helper is a
+        # documented no-op outside LIVE.
+        try:
+            self._bitrix_bridge.ensure_live_connection_ready(tenant_id=tenant_id)
+        except Exception:  # noqa: BLE001 -- read-only preview fails closed
+            return _fail(
+                "Не удалось подключиться к Bitrix для проверки прайс-листа. "
+                "Ничего не записано."
+            )
+
         from business_assistant.action_continuation import EXCEL_CONTRACT
 
         tool_request = ToolRequest(
