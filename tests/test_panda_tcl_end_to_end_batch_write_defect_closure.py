@@ -470,14 +470,14 @@ class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase)
     legitimate single-product selection semantics.
     """
 
-    async def test_fresh_attachment_two_named_skus_previews_both_before_managed_agent(self):
+    async def _assert_direct_multi_preview(self, *, managed_enabled: bool, request_suffix: str):
         bridge, store = _bitrix_bridge_and_store()
         panda, artifact_service = _panda(bridge)
         ref = await _register_upload(artifact_service, content=_tcl_subset_two_new_no_title_bytes())
         before_catalog_size = len(store.catalog(TENANT))
 
         old_flag = os.environ.get("PANDA_MANAGED_AGENT_ENABLED")
-        os.environ["PANDA_MANAGED_AGENT_ENABLED"] = "true"
+        os.environ["PANDA_MANAGED_AGENT_ENABLED"] = "true" if managed_enabled else "false"
         try:
             result = await panda.respond(
                 ConversationRequest(
@@ -488,7 +488,7 @@ class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase)
                     ),
                     tenant_id=TENANT,
                     user_id=OWNER,
-                    request_id="direct-multi-r1",
+                    request_id=f"direct-multi-{request_suffix}",
                     conversation_id=CONV,
                     attachment_refs=(ref,),
                 )
@@ -508,6 +508,44 @@ class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase)
         self.assertNotIn("Строк было:", result.text)
         self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
         self.assertFalse(result.metadata.get("mutated"))
+
+    async def test_fresh_attachment_two_named_skus_previews_both_with_managed_agent_enabled(self):
+        await self._assert_direct_multi_preview(managed_enabled=True, request_suffix="managed-on")
+
+    async def test_fresh_attachment_two_named_skus_previews_both_with_managed_agent_disabled(self):
+        await self._assert_direct_multi_preview(managed_enabled=False, request_suffix="managed-off")
+
+    async def test_fresh_attachment_clears_stale_frozen_batch_state(self):
+        bridge, _store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+
+        # First source establishes stale batch approval state.
+        await _upload_and_analyze(panda, artifact_service)
+        await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT, tenant_id=TENANT, user_id=OWNER,
+                request_id="stale-r1", conversation_id=CONV,
+            )
+        )
+        task = panda._action_store.get(tenant_id=TENANT, owner_id=OWNER, conversation_id=CONV)  # noqa: SLF001
+        self.assertTrue(task.parameters.get("bitrix_batch_ready_rows"))
+
+        # A new source must atomically reset all source-derived approval/
+        # enrichment state before any selection is evaluated.
+        ref = await _register_upload(artifact_service, content=_tcl_subset_two_new_no_title_bytes())
+        await panda.respond(
+            ConversationRequest(
+                text="Вот новый прайс, проанализируй.",
+                tenant_id=TENANT, user_id=OWNER, request_id='stale-r2',
+                conversation_id=CONV, attachment_refs=(ref,),
+            )
+        )
+        task = panda._action_store.get(tenant_id=TENANT, owner_id=OWNER, conversation_id=CONV)  # noqa: SLF001
+        self.assertFalse(task.parameters.get("bitrix_batch_ready_rows"))
+        self.assertFalse(task.parameters.get("bitrix_batch_all_ready_rows"))
+        self.assertFalse(task.parameters.get("bitrix_batch_selected_skus"))
+        self.assertFalse(task.parameters.get("bitrix_enrichment_write_request"))
+        self.assertFalse(task.parameters.get("bitrix_product_fields"))
 
 
 class BitrixBatchSubsetPreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
