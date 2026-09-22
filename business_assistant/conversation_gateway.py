@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import logging
 import re
 import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
+
+
+logger = logging.getLogger(__name__)
 
 
 class ConversationUnavailableError(Exception):
@@ -2295,6 +2299,7 @@ class WorkflowPandaConversationGateway:
                 pass
 
         prepared_rows: list[dict] = []
+        preparation_failures: list[dict] = []
         rendered: list[str] = [
             "ПРЕДПРОСМОТР ВЫБРАННЫХ ТОВАРОВ ДЛЯ BITRIX/ASPRO (ничего не записано):",
             f"Выбрано товаров: {len(selected_rows)}",
@@ -2305,76 +2310,93 @@ class WorkflowPandaConversationGateway:
             brand = str(row.get("brand") or "").strip()
             title = str(row.get("title") or "").strip()
             safe_title = title or " ".join(part for part in (brand, sku) if part).strip() or sku
-            fields = {
-                "title": title,
-                "sku": sku,
-                "ean": str(row.get("ean") or ""),
-                "category": str(row.get("category") or ""),
-                "brand": brand,
-                "purchase_price": str(row.get("purchase_price") or ""),
-            }
-            retail_price = str(row.get("retail_price") or "")
-
-            # Keep a truthful SKU-only fallback for preview continuity, but
-            # hand the ORIGINAL supplier fields (including an empty brand/
-            # title) to prepare_complete_card: its enrichment bridge can
-            # now resolve a missing brand from exact-model evidence and
-            # fill the title as "<verified brand> <exact model>".
-            fallback_fields = dict(fields)
-            fallback_fields["title"] = safe_title
-            write_request = build_write_request_from_fields(
-                fallback_fields, tenant_id=tenant_id, retail_price=retail_price
-            )
-            write_preview: dict = {}
-            characteristic_status: dict = {}
-            enrichment_preview: dict = {}
-
             try:
-                card = await prepare_complete_card(
-                    tenant_id=tenant_id,
-                    product_fields=fields,
-                    retail_price=retail_price,
-                    bitrix_bridge=self._bitrix_bridge,
-                    tool_gateway=self._tool_gateway,
-                    media_fetcher=self._media_fetcher,
-                    cache=self._enrichment_cache,
+                fields = {
+                    "title": title,
+                    "sku": sku,
+                    "ean": str(row.get("ean") or ""),
+                    "category": str(row.get("category") or ""),
+                    "brand": brand,
+                    "purchase_price": str(row.get("purchase_price") or ""),
+                }
+                retail_price = str(row.get("retail_price") or "")
+
+                fallback_fields = dict(fields)
+                fallback_fields["title"] = safe_title
+                write_request = build_write_request_from_fields(
+                    fallback_fields, tenant_id=tenant_id, retail_price=retail_price
                 )
-                write_request = card["write_request"]
-                write_preview = dict(card.get("write_preview") or {})
-                characteristic_status = serialize_characteristic_status(card["enrichment"])
-                enrichment_preview = dict(card.get("enrichment_preview") or {})
-            except Exception:
-                pass
+                write_preview: dict = {}
+                characteristic_status: dict = {}
+                enrichment_preview: dict = {}
 
-            if not write_preview and self._bitrix_bridge is not None:
                 try:
-                    write_preview = prepare_single_product_write(
-                        self._bitrix_bridge, tenant_id=tenant_id, request=write_request
+                    card = await prepare_complete_card(
+                        tenant_id=tenant_id,
+                        product_fields=fields,
+                        retail_price=retail_price,
+                        bitrix_bridge=self._bitrix_bridge,
+                        tool_gateway=self._tool_gateway,
+                        media_fetcher=self._media_fetcher,
+                        cache=self._enrichment_cache,
                     )
+                    write_request = card["write_request"]
+                    write_preview = dict(card.get("write_preview") or {})
+                    characteristic_status = serialize_characteristic_status(card["enrichment"])
+                    enrichment_preview = dict(card.get("enrichment_preview") or {})
                 except Exception:
-                    write_preview = {}
+                    logger.exception("batch_bitrix_subset_enrichment_failed sku=%s", sku)
 
-            frozen = dict(row)
-            frozen["title"] = str(write_request.title or safe_title)
-            frozen["prepared_write_request"] = serialize_write_request(write_request)
-            prepared_rows.append(frozen)
+                if not write_preview and self._bitrix_bridge is not None:
+                    try:
+                        write_preview = prepare_single_product_write(
+                            self._bitrix_bridge, tenant_id=tenant_id, request=write_request
+                        )
+                    except Exception:
+                        logger.exception("batch_bitrix_subset_write_preview_failed sku=%s", sku)
+                        write_preview = {}
 
+                serialized = serialize_write_request(write_request)
+                rendered_plan = format_write_plan_text(
+                    write_request=write_request,
+                    write_preview=write_preview,
+                    characteristic_status=characteristic_status,
+                    enrichment_preview=enrichment_preview,
+                )
+
+                frozen = dict(row)
+                frozen["title"] = str(write_request.title or safe_title)
+                frozen["prepared_write_request"] = serialized
+                prepared_rows.append(frozen)
+                rendered.extend(["", f"=== {index}. {sku} ===", rendered_plan])
+            except Exception as exc:
+                logger.exception("batch_bitrix_subset_row_failed sku=%s", sku)
+                preparation_failures.append({
+                    "sku": sku,
+                    "reason": type(exc).__name__,
+                })
+                rendered.extend(
+                    [
+                        "",
+                        f"=== {index}. {sku or '(без артикула)'} ===",
+                        "Карточку этого товара не удалось подготовить. Товар НЕ включён в список на создание.",
+                    ]
+                )
+
+        try:
+            task.parameters["bitrix_batch_ready_rows"] = prepared_rows
+            task.parameters["bitrix_batch_selected_skus"] = [str(r.get("sku") or "") for r in prepared_rows]
+            self._action_store.put(task)
+        except Exception as exc:
+            logger.exception("batch_bitrix_subset_state_persist_failed")
+            prepared_rows = []
+            preparation_failures.append({"sku": "", "reason": type(exc).__name__})
             rendered.extend(
                 [
                     "",
-                    f"=== {index}. {sku} ===",
-                    format_write_plan_text(
-                        write_request=write_request,
-                        write_preview=write_preview,
-                        characteristic_status=characteristic_status,
-                        enrichment_preview=enrichment_preview,
-                    ),
+                    "Не удалось сохранить подготовленный предпросмотр для последующего подтверждения. Ничего не записано.",
                 ]
             )
-
-        task.parameters["bitrix_batch_ready_rows"] = prepared_rows
-        task.parameters["bitrix_batch_selected_skus"] = [str(r.get("sku") or "") for r in prepared_rows]
-        self._action_store.put(task)
 
         rendered.extend(
             [
@@ -2393,6 +2415,7 @@ class WorkflowPandaConversationGateway:
                 "bitrix_batch_subset_preview": {
                     "selected_skus": [str(r.get("sku") or "") for r in prepared_rows],
                     "count": len(prepared_rows),
+                    "failed": preparation_failures,
                 },
             },
         )

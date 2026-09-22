@@ -65,6 +65,7 @@ from __future__ import annotations
 import io
 import os
 import unittest
+from unittest import mock
 
 from openpyxl import Workbook
 
@@ -531,6 +532,47 @@ class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase)
     async def test_fresh_attachment_two_named_skus_previews_both_with_managed_agent_disabled(self):
         await self._assert_direct_multi_preview(managed_enabled=False, request_suffix="managed-off")
 
+    async def test_one_product_postprocessing_failure_does_not_abort_other_selected_product(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        ref = await _register_upload(artifact_service, content=_tcl_subset_two_new_no_title_bytes())
+        before_catalog_size = len(store.catalog(TENANT))
+
+        import business_assistant.product_enrichment_bridge as enrichment_bridge
+        original_serialize = enrichment_bridge.serialize_write_request
+        calls = {"n": 0}
+
+        def _flaky_serialize(request):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("synthetic_first_row_postprocess_failure")
+            return original_serialize(request)
+
+        with mock.patch.object(enrichment_bridge, "serialize_write_request", side_effect=_flaky_serialize):
+            result = await panda.respond(
+                ConversationRequest(
+                    text=(
+                        f"Подготовь для сайта только товары {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                        "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                        "Пока ничего не записывай."
+                    ),
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="direct-multi-row-isolation",
+                    conversation_id=CONV,
+                    attachment_refs=(ref,),
+                )
+            )
+
+        self.assertEqual(result.metadata.get("action_decision"), "PREVIEW_BATCH_BITRIX_SUBSET")
+        preview = result.metadata.get("bitrix_batch_subset_preview") or {}
+        self.assertEqual(preview.get("count"), 1)
+        self.assertEqual(len(preview.get("failed") or []), 1)
+        self.assertIn(SUBSET_NEW_SKU_1, result.text)
+        self.assertIn(SUBSET_NEW_SKU_2, result.text)
+        self.assertIn("НЕ включён в список на создание", result.text)
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertFalse(result.metadata.get("mutated"))
     async def test_fresh_attachment_clears_stale_frozen_batch_state(self):
         bridge, _store = _bitrix_bridge_and_store()
         panda, artifact_service = _panda(bridge)
