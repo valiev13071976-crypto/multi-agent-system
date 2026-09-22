@@ -136,6 +136,17 @@ MAX_IMAGE_CANDIDATES_PER_PAGE = 3
 MAX_MEDIA_CANDIDATES_PER_RUN = 8
 
 
+def _manufacturer_discovery_query(model: str) -> str:
+    """Build one generic exact-model search constrained to all manufacturer
+    domains already known to the enrichment trust registry.
+
+    This is data-driven by ``_MANUFACTURER_DOMAINS``: adding/removing a brand
+    changes discovery automatically without any SKU/model-specific code.
+    """
+    domains = sorted({domain for values in _MANUFACTURER_DOMAINS.values() for domain in values})
+    site_clause = " OR ".join(f"site:{domain}" for domain in domains)
+    return f'"{str(model or "").strip()}" ({site_clause})'
+
 def _display_brand_name(key: str) -> str:
     """Stable presentation for known manufacturer keys without a second
     brand registry. Short acronym-like names stay uppercase; ordinary
@@ -204,7 +215,14 @@ async def resolve_brand_from_model(
     if first:
         return first
 
-    fallback_results = await _search(f'"{model}" official')
+    # Search engines do not consistently rank the official manufacturer page
+    # for a generic word like "official". Constrain the ONE fallback request
+    # to the manufacturer domains already present in the trust registry.
+    # This remains generic and bounded: no SKU-specific branch and no N
+    # searches per manufacturer.
+    fallback_results = await _search(
+        _manufacturer_discovery_query(model),
+    )
     # Deduplicate by URL so one result returned by both searches never
     # counts twice toward the two-source corroboration threshold.
     combined = []

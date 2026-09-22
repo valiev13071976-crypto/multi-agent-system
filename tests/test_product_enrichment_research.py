@@ -80,14 +80,14 @@ class ResolveBrandFromModelTests(unittest.TestCase):
         )
         self.assertEqual(_run(resolve_brand_from_model("55C6K", search_port=search)), "TCL")
 
-    def test_unresolved_first_search_uses_one_official_fallback(self):
+    def test_unresolved_first_search_uses_one_generic_manufacturer_domain_fallback(self):
         class QueryAwareSearch:
             def __init__(self):
                 self.queries = []
 
             async def search(self, query, max_results=5):
                 self.queries.append(query)
-                if "manufacturer official" in query:
+                if "site:tcl.com" in query:
                     return [
                         fake_result(
                             "https://www.tcl.com/eu/en/tvs/65rm7l",
@@ -103,7 +103,34 @@ class ResolveBrandFromModelTests(unittest.TestCase):
 
         search = QueryAwareSearch()
         self.assertEqual(_run(resolve_brand_from_model("65RM7L", search_port=search)), "TCL")
-        self.assertEqual(search.queries, ["65RM7L", '"65RM7L" official'])
+        self.assertEqual(search.queries[0], "65RM7L")
+        self.assertEqual(len(search.queries), 2)
+        fallback = search.queries[1]
+        self.assertIn('"65RM7L"', fallback)
+        self.assertIn("site:tcl.com", fallback)
+        self.assertIn("site:lg.com", fallback)
+        self.assertIn("site:hisense.com", fallback)
+
+    def test_manufacturer_fallback_is_registry_driven_not_model_specific(self):
+        class QueryAwareSearch:
+            def __init__(self):
+                self.queries = []
+
+            async def search(self, query, max_results=5):
+                self.queries.append(query)
+                if "site:hisense.com" in query:
+                    return [
+                        fake_result(
+                            "https://www.hisense.com/tv/TESTMODEL77",
+                            title="Hisense TESTMODEL77 television",
+                        )
+                    ]
+                return []
+
+        search = QueryAwareSearch()
+        self.assertEqual(_run(resolve_brand_from_model("TESTMODEL77", search_port=search)), "Hisense")
+        self.assertEqual(len(search.queries), 2)
+        self.assertIn('"TESTMODEL77"', search.queries[1])
 
     def test_successful_first_search_does_not_pay_for_fallback(self):
         class QueryAwareSearch:
