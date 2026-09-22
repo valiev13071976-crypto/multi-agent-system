@@ -231,7 +231,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     credential_ref=credential_ref,
                     params={
                         "filter": {"iblockId": iblock_id, _SIMPLE_ARTICLE_PROPERTY.select_key: article},
-                        "select": ["id", "name", "active", _SIMPLE_ARTICLE_PROPERTY.select_key],
+                        "select": ["id", "iblockId", "name", "active", _SIMPLE_ARTICLE_PROPERTY.select_key],
                     },
                 )
                 simple_result = simple_data.get("result")
@@ -249,7 +249,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                     credential_ref=credential_ref,
                     params={
                         "filter": {"iblockId": int(offers_iblock_raw), _ARTICLE_PROPERTY.select_key: article},
-                        "select": ["id", "name", "active", schema.CML2_LINK_REST_FIELD, _ARTICLE_PROPERTY.select_key],
+                        "select": ["id", "iblockId", "name", "active", schema.CML2_LINK_REST_FIELD, _ARTICLE_PROPERTY.select_key],
                     },
                 )
                 offer_result = offer_data.get("result")
