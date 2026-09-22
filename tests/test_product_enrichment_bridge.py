@@ -121,6 +121,74 @@ class RunEnrichmentTests(unittest.TestCase):
         self.assertIn("screen_diagonal_cm", result.characteristics)
 
 
+class _BudgetedQueryAwareGateway:
+    """Minimal ToolGateway-shaped double that reproduces the real cumulative
+    search-result budget. It proves a model can spend its whole identity
+    budget and still receive a fresh bounded research budget afterward.
+    """
+
+    def __init__(self):
+        self.remaining = 10
+        self.reset_calls = 0
+        self.queries = []
+        self._pages = {
+            "https://www.tcl.com/eu/en/tvs/65rm7l": "Диагональ экрана: 165 см\nОперационная система: Google TV",
+        }
+
+    def reset_budget(self):
+        self.remaining = 10
+        self.reset_calls += 1
+
+    async def search(self, query, max_results=5):
+        from datetime import datetime, timezone
+        from tools.models import SearchResult
+
+        self.queries.append(query)
+        if self.remaining <= 0:
+            return []
+        take = min(max_results, self.remaining)
+        self.remaining -= take
+
+        if query == '65RM7L':
+            # Consume the first half of the identity budget without
+            # identifying the manufacturer.
+            return [
+                SearchResult(
+                    title=f"Generic 65RM7L result {i}",
+                    url=f"https://shop{i}.example/65rm7l",
+                    snippet="65RM7L television", source_domain=f"shop{i}.example",
+                    published_at=None, retrieved_at=datetime.now(timezone.utc), trust_level="low",
+                )
+                for i in range(take)
+            ]
+        if 'site:tcl.com' in query:
+            rows = [
+                SearchResult(
+                    title="TCL 65RM7L official",
+                    url="https://www.tcl.com/eu/en/tvs/65rm7l",
+                    snippet="TCL 65RM7L", source_domain="tcl.com",
+                    published_at=None, retrieved_at=datetime.now(timezone.utc), trust_level="high",
+                )
+            ]
+            # Still charge the full requested identity allowance, matching
+            # the real gateway's result-budget semantics.
+            return rows[:take]
+        if query.startswith('TCL 65RM7L'):
+            return [
+                SearchResult(
+                    title="TCL 65RM7L specifications",
+                    url="https://www.tcl.com/eu/en/tvs/65rm7l",
+                    snippet="65RM7L specifications", source_domain="tcl.com",
+                    published_at=None, retrieved_at=datetime.now(timezone.utc), trust_level="high",
+                )
+            ][:take]
+        return []
+
+    async def invoke(self, request, **_kwargs):
+        from types import SimpleNamespace
+        url = str(request.arguments.get('url') or '')
+        return SimpleNamespace(success=True, data={'body_text': self._pages.get(url, '')})
+
 class MissingBrandEnrichmentTests(unittest.TestCase):
     def test_exact_model_search_bootstraps_brand_and_fills_title(self):
         fields = {"title": "", "sku": "55C6K", "ean": "", "category": "", "brand": "", "purchase_price": "50000"}
@@ -140,6 +208,21 @@ class MissingBrandEnrichmentTests(unittest.TestCase):
         self.assertEqual(outcome["write_request"].title, "TCL 55C6K")
         self.assertIn("color", outcome["enrichment"].characteristics)
 
+    def test_full_identity_budget_does_not_starve_spec_research(self):
+        fields = {"title": "", "sku": "65RM7L", "ean": "", "category": "", "brand": "", "purchase_price": "80000"}
+        gateway = _BudgetedQueryAwareGateway()
+        outcome = _run(
+            prepare_complete_card(
+                tenant_id="t1", product_fields=fields, retail_price="88500", tool_gateway=gateway
+            )
+        )
+        self.assertEqual(outcome["enrichment"].identity.brand, "TCL")
+        self.assertEqual(outcome["write_request"].title, "TCL 65RM7L")
+        self.assertIn("screen_diagonal_cm", outcome["enrichment"].characteristics)
+        # One reset starts the product identity phase; one reset starts
+        # specification/media research after missing-brand discovery.
+        self.assertGreaterEqual(gateway.reset_calls, 2)
+        self.assertTrue(any(q.startswith('TCL 65RM7L') for q in gateway.queries))
     def test_explicit_supplier_brand_is_never_overridden(self):
         fields = dict(LG_FIELDS)
         url = "https://www.tcl.com/global/en/tvs/55c6k"
