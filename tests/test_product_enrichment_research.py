@@ -97,7 +97,7 @@ class ResolveBrandFromModelTests(unittest.TestCase):
 
         search = QueryAwareSearch()
         self.assertEqual(_run(resolve_brand_from_model("65RM7L", search_port=search)), "TCL")
-        self.assertEqual(search.queries, ["65RM7L", "65RM7L manufacturer official"])
+        self.assertEqual(search.queries, ["65RM7L", '"65RM7L" official'])
 
     def test_successful_first_search_does_not_pay_for_fallback(self):
         class QueryAwareSearch:
@@ -243,6 +243,38 @@ class ResearchProductTests(unittest.TestCase):
         facts = _run(research_product(_identity(), search_port=search, fetch_port=_FakeFetchPort({url: ""})))
         self.assertEqual(facts, ())
 
+    def test_wrong_size_family_page_is_rejected_entirely(self):
+        identity = resolve_identity(ProductIdentityQuery(brand="TCL", model="55C6K"))
+        url = "https://www.tcl.com/global/en/tvs/55c6k"
+        search = FakeSearchProvider(
+            {"TCL 55C6K": [fake_result(url, title="TCL C6K 55C6K family page")]}
+        )
+        # This page names the requested model but exposes the spec table of
+        # a 98-inch selected variant. None of its dimensions/weight/media
+        # may contaminate the 55C6K card.
+        page = (
+            '<html><head><meta property="og:image" content="https://www.tcl.com/98-family.jpg"></head>'
+            "<body>Screen Size: 98 inch\nWeight with stand: 12.4 kg\nOperating System: Google TV</body></html>"
+        )
+        fetch = _FakeFetchPort({url: page})
+        media_sink = []
+        facts = _run(
+            research_product(
+                identity, search_port=search, fetch_port=fetch, media_sink=media_sink
+            )
+        )
+        self.assertEqual(facts, ())
+        self.assertEqual(media_sink, [])
+
+    def test_matching_rounded_screen_size_page_is_accepted(self):
+        identity = resolve_identity(ProductIdentityQuery(brand="TCL", model="55C6K"))
+        url = "https://manufacturer.example/55c6k"
+        search = FakeSearchProvider(
+            {"TCL 55C6K": [fake_result(url, title="TCL 55C6K specifications")]}
+        )
+        fetch = _FakeFetchPort({url: "Screen Size: 139.7 cm\nOperating System: Google TV"})
+        facts = _run(research_product(identity, search_port=search, fetch_port=fetch))
+        self.assertTrue(any(f.characteristic_key == "screen_diagonal_cm" for f in facts))
     def test_media_sink_is_populated_from_og_image_on_accepted_page(self):
         url = "https://www.lg.com/ru/55MRGB86B6A.ARUG-review"
         image_url = "https://www.lg.com/ru/photos/55mrgb86b6a-hero.jpg"

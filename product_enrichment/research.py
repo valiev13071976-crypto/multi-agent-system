@@ -23,8 +23,7 @@ from product_enrichment.characteristics import (
     match_canonical_key,
     normalize_characteristic_value,
 )
-from product_enrichment.identity import detect_variant_conflict, evidence_matches_identity
-from product_enrichment.models import (
+from product_enrichment.identity import (\n    detect_variant_conflict,\n    evidence_matches_identity,\n    inferred_model_screen_size_inches,\n)\nfrom product_enrichment.models import (
     CONFIDENCE_PROBABLE,
     MediaCandidateInput,
     ResolvedIdentity,
@@ -200,7 +199,7 @@ async def resolve_brand_from_model(
     if first:
         return first
 
-    fallback_results = await _search(f"{model} manufacturer official")
+    fallback_results = await _search(f'"{model}" official')
     # Deduplicate by URL so one result returned by both searches never
     # counts twice toward the two-source corroboration threshold.
     combined = []
@@ -364,6 +363,33 @@ class ToolGatewayResearchAdapter:
         return str((getattr(result, "data", None) or {}).get("body_text") or "")
 
 
+def _source_conflicts_with_model_screen_size(identity: ResolvedIdentity, page_text: str) -> bool:
+    """Reject a whole source when its extracted screen diagonal belongs to
+    a different size variant than the exact model code.
+
+    Family pages often contain the requested model string but expose the
+    specification table for another selected size. Accepting the rest of
+    that page would then contaminate dimensions, weight, images, etc.
+    """
+    expected_inches = inferred_model_screen_size_inches(identity.model)
+    if expected_inches is None:
+        return False
+    expected_cm = expected_inches * 2.54
+    for label, raw_value in extract_spec_lines(page_text):
+        if match_canonical_key(label) != "screen_diagonal_cm":
+            continue
+        normalized_value, _unit = normalize_characteristic_value("screen_diagonal_cm", raw_value)
+        try:
+            observed_cm = float(normalized_value)
+        except (TypeError, ValueError):
+            continue
+        # Allow ordinary manufacturer rounding, but reject a clearly
+        # different panel-size variant.
+        if abs(observed_cm - expected_cm) > max(5.0, expected_cm * 0.08):
+            return True
+    return False
+
+
 async def research_product(
     identity: ResolvedIdentity,
     *,
@@ -414,6 +440,9 @@ async def research_product(
             continue
         if not page_text:
             observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="empty_page")
+            continue
+        if _source_conflicts_with_model_screen_size(identity, page_text):
+            observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="screen_size_variant_mismatch")
             continue
 
         if media_sink is not None and len(discovered_media) < MAX_MEDIA_CANDIDATES_PER_RUN:

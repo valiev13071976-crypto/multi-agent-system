@@ -6,12 +6,24 @@ from __future__ import annotations
 import unittest
 
 from product_enrichment.identity import (
+    inferred_model_screen_size_inches,
     detect_variant_conflict,
     evidence_matches_identity,
     extract_variant_tokens,
     resolve_identity,
 )
 from product_enrichment.models import IdentityConflictError, ProductIdentityQuery, compute_identity_key
+
+
+class ModelScreenSizeHintTests(unittest.TestCase):
+    def test_leading_tv_size_is_inferred_only_as_validation_hint(self):
+        self.assertEqual(inferred_model_screen_size_inches("55C6K"), 55)
+        self.assertEqual(inferred_model_screen_size_inches("65RM7L"), 65)
+
+    def test_non_tv_like_or_implausible_prefix_is_not_inferred(self):
+        self.assertIsNone(inferred_model_screen_size_inches("C6K55"))
+        self.assertIsNone(inferred_model_screen_size_inches("14PRO"))
+        self.assertIsNone(inferred_model_screen_size_inches("150XYZ"))
 
 
 class ResolveIdentityTests(unittest.TestCase):

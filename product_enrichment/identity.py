@@ -25,6 +25,21 @@ _EAN_RE = re.compile(r"^\d{8}$|^\d{12}$|^\d{13}$|^\d{14}$")
 # (screen-size variant, region/market suffix, or model year), never merged.
 _SIZE_TOKEN_RE = re.compile(r"(\d{2,3})\s*(?:-|\s)?(?:inch|inches|\"|дюйм)", re.I)
 _MODEL_YEAR_RE = re.compile(r"\b(20[12]\d)\b")
+_MODEL_LEADING_SIZE_RE = re.compile(r"^(\d{2,3})(?=[A-Za-z])")
+
+
+def inferred_model_screen_size_inches(model: str) -> int | None:
+    """Conservative TV-size hint from model codes such as ``55C6K``.
+
+    This is used only to reject a sourced *screen diagonal* that clearly
+    contradicts the exact model code. It never creates a characteristic
+    on its own and is intentionally bounded to plausible TV sizes.
+    """
+    match = _MODEL_LEADING_SIZE_RE.match(str(model or "").strip())
+    if not match:
+        return None
+    value = int(match.group(1))
+    return value if 20 <= value <= 120 else None
 
 
 def _clean(value: str) -> str:
