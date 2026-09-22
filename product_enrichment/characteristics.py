@@ -322,6 +322,10 @@ _OS_TOKENS = (
     "google tv", "android tv", "webos", "tizen", "vidaa", "roku",
     "fire tv", "saphi",
 )
+_TUNER_TOKEN_RE = re.compile(r"\b(?:dvb[- ]?(?:t2?|c|s2?)|atsc(?:\s*3\.0)?|isdb[- ]?t|dtmb)\b", re.I)
+_REFRESH_RATE_RE = re.compile(r"\b(\d{2,3}(?:[.,]\d+)?)\s*(?:hz|гц)\b", re.I)
+_AUDIO_POWER_RE = re.compile(r"\b(\d{1,3}(?:[.,]\d+)?)\s*(?:w|вт)\b", re.I)
+_WEIGHT_RE = re.compile(r"^\s*\d{1,3}(?:[.,]\d+)?\s*(?:kg|кг)?\s*$", re.I)
 
 
 def _contains_any_token(text: str, tokens: tuple[str, ...]) -> bool:
@@ -349,6 +353,8 @@ def _passes_semantic_enum_gate(key: str, text: str) -> bool:
         return _contains_any_token(value, _BACKLIGHT_TECH_TOKENS)
     if key == "operating_system":
         return _contains_any_token(value, _OS_TOKENS)
+    if key == "tuners":
+        return bool(_TUNER_TOKEN_RE.search(value))
     return True
 
 _SENTENCE_PUNCT_RE = re.compile(r"[.!?;]")
@@ -410,6 +416,12 @@ def _passes_characteristic_value_shape(key: str, text: str) -> bool:
     if key == "model_year":
         match = re.fullmatch(r"20\d{2}", value)
         return bool(match) and 2000 <= int(value) <= 2100
+    if key == "refresh_rate_hz":
+        return bool(_REFRESH_RATE_RE.search(value))
+    if key == "audio_power_w":
+        return bool(_AUDIO_POWER_RE.search(value))
+    if key in {"weight_with_stand_kg", "weight_without_stand_kg", "package_weight_kg"}:
+        return bool(_WEIGHT_RE.match(value))
     return True
 
 def normalize_characteristic_value(key: str, raw_value: str) -> tuple[str, str]:
@@ -446,6 +458,77 @@ def normalize_characteristic_value(key: str, raw_value: str) -> tuple[str, str]:
             return match.group(1).replace(",", "."), unit
     return text, unit
 
+
+
+def extract_compact_feature_facts(text: str) -> tuple[tuple[str, str], ...]:
+    """Extract only high-precision canonical facts from compact feature text.
+
+    This supplements label/value tables for modern manufacturer pages where
+    specifications are presented as bullets/headlines (for example
+    ``HVA Pro Panel`` or ``144Hz Native Refresh Rate``) instead of rows.
+    Values are never invented: returned values are literal substrings or
+    compact tokens present in the supplied text and must still pass the
+    normal characteristic value gate downstream.
+    """
+    blob = _WHITESPACE_RE.sub(" ", html_module.unescape(str(text or ""))).strip()
+    if not blob:
+        return ()
+    lowered = blob.casefold()
+    found: list[tuple[str, str]] = []
+
+    # Operating system/platform tokens.
+    for token in _OS_TOKENS:
+        idx = lowered.find(token)
+        if idx >= 0:
+            found.append(("operating_system", blob[idx : idx + len(token)]))
+            break
+
+    # Display/panel technology. Prefer more specific tokens first.
+    panel_tokens = ("qd-mini led", "mini led", "qd-oled", "oled", "qled", "hva pro", "hva", "ips", "va", "tn", "lcd", "led")
+    for token in panel_tokens:
+        idx = lowered.find(token)
+        if idx >= 0:
+            display = blob[idx : idx + len(token)]
+            found.append(("panel_technology", display))
+            break
+
+    # Refresh rate only when a refresh/native/VRR cue is nearby.
+    for match in _REFRESH_RATE_RE.finditer(blob):
+        left = lowered[max(0, match.start() - 32) : match.start()]
+        right = lowered[match.end() : match.end() + 32]
+        if any(cue in left + right for cue in ("refresh", "native", "vrr", "memc", "частот")):
+            found.append(("refresh_rate_hz", match.group(0)))
+            break
+
+    # Actual HDR format tokens only; generic brightness marketing like
+    # "HDR 2000 nits" is intentionally not promoted to hdr_formats.
+    hdr_values: list[str] = []
+    for token in ("dolby vision iq", "dolby vision", "hdr10+", "hdr10", "hlg", "technicolor"):
+        idx = lowered.find(token)
+        if idx >= 0:
+            hdr_values.append(blob[idx : idx + len(token)])
+    if hdr_values:
+        found.append(("hdr_formats", ", ".join(dict.fromkeys(hdr_values))))
+
+    # Connectivity/support facts only when explicitly stated.
+    for key, tokens in (
+        ("wifi_support", ("wi-fi", "wifi")),
+        ("bluetooth_support", ("bluetooth",)),
+        ("ethernet_support", ("ethernet", "lan port")),
+    ):
+        if any(token in lowered for token in tokens):
+            found.append((key, "Yes"))
+
+    tuner_matches = [m.group(0) for m in _TUNER_TOKEN_RE.finditer(blob)]
+    if tuner_matches:
+        found.append(("tuners", ", ".join(dict.fromkeys(tuner_matches))))
+
+    # Resolution shorthand is kept literally (e.g. 4K UHD), never expanded.
+    res_match = re.search(r"\b(?:8k|4k|uhd|full\s*hd|fhd|\d{3,5}\s*[x×х]\s*\d{3,5})\b", blob, re.I)
+    if res_match:
+        found.append(("screen_resolution", res_match.group(0)))
+
+    return tuple(found)
 
 def bridge_characteristics_to_bitrix(
     characteristics: Mapping[str, NormalizedCharacteristic],

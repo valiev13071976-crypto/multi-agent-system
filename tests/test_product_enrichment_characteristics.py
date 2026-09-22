@@ -9,6 +9,7 @@ import unittest
 from product_enrichment.characteristics import (
     CANONICAL_CHARACTERISTIC_ALIASES,
     bridge_characteristics_to_bitrix,
+    extract_compact_feature_facts,
     extract_spec_lines,
     match_canonical_key,
     merge_facts_into_characteristics,
@@ -168,6 +169,45 @@ class CharacteristicSemanticEnumGateTests(unittest.TestCase):
                 value, _unit = normalize_characteristic_value("operating_system", raw)
                 self.assertEqual(value, raw)
         self.assertEqual(normalize_characteristic_value("operating_system", "Entertainment for everyone")[0], "")
+
+class FinalGenericEvidenceQualityTests(unittest.TestCase):
+    def test_exact_short_garbage_seen_in_production_is_rejected(self):
+        cases = {
+            "ethernet_support": "Type",
+            "hdr_formats": "Ignite your sense with brightness",
+            "panel_technology": "TCL Pioneer in",
+            "tuners": "F L LAN Subwoofer",
+        }
+        for key, raw in cases.items():
+            with self.subTest(key=key):
+                self.assertEqual(normalize_characteristic_value(key, raw)[0], "")
+
+    def test_compact_feature_extractor_recovers_literal_specs_without_label_value_rows(self):
+        text = (
+            "HVA Pro Panel | 144Hz Native Refresh Rate | Google TV | "
+            "Dolby Vision IQ HDR10+ | Wi-Fi | Bluetooth | DVB-T2/C/S2 | 4K UHD"
+        )
+        facts = dict(extract_compact_feature_facts(text))
+        self.assertIn("HVA", facts["panel_technology"])
+        self.assertIn("144", facts["refresh_rate_hz"])
+        self.assertEqual(facts["operating_system"].casefold(), "google tv")
+        self.assertIn("Dolby Vision", facts["hdr_formats"])
+        self.assertEqual(facts["wifi_support"], "Yes")
+        self.assertEqual(facts["bluetooth_support"], "Yes")
+        self.assertIn("DVB", facts["tuners"].upper())
+        self.assertEqual(facts["screen_resolution"].upper(), "4K")
+
+    def test_compact_feature_extractor_does_not_promote_hdr_brightness_marketing(self):
+        facts = dict(extract_compact_feature_facts("Up to HDR 2000nits Brightness | Ignite your sense with brightness"))
+        self.assertNotIn("hdr_formats", facts)
+
+    def test_numeric_semantic_shapes_reject_neighbor_text(self):
+        self.assertEqual(normalize_characteristic_value("audio_power_w", "ONKYO 2.1 Hi-Fi System")[0], "")
+        self.assertEqual(normalize_characteristic_value("package_weight_kg", "Carton dimensions")[0], "")
+        self.assertEqual(normalize_characteristic_value("tuners", "LAN Subwoofer")[0], "")
+        self.assertEqual(normalize_characteristic_value("audio_power_w", "20 W")[0], "20")
+        self.assertEqual(normalize_characteristic_value("package_weight_kg", "12.4 kg")[0], "12.4")
+        self.assertEqual(normalize_characteristic_value("tuners", "DVB-T2/C/S2")[0], "DVB-T2/C/S2")
 
 class BridgeCharacteristicsToBitrixTests(unittest.TestCase):
     def test_verified_key_gets_bitrix_property_id(self):

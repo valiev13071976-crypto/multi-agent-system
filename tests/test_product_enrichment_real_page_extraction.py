@@ -201,6 +201,46 @@ class RealPageImageCandidateTests(unittest.TestCase):
             self.assertNotIn(junk, joined)
 
 
+class CompactManufacturerFeaturePageTests(unittest.TestCase):
+    def test_headline_only_page_yields_validated_characteristics(self):
+        brand = "ACME"
+        model = "MODEL-65X"
+        url = "https://manufacturer.example/model-65x"
+        search = FakeSearchProvider(
+            {
+                f"{brand} {model} характеристики specifications": [
+                    fake_result(
+                        url,
+                        title=f"{brand} {model} 4K UHD Google TV",
+                        snippet="HVA Pro Panel · 144Hz Native Refresh Rate · Dolby Vision IQ",
+                    )
+                ]
+            }
+        )
+        fetch = _FixtureFetchPort(
+            {
+                url: (
+                    f"<html><body><h1>{brand} {model}</h1>"
+                    "<h2>HVA Pro Panel</h2>"
+                    "<h2>144Hz Native Refresh Rate</h2>"
+                    "<h2>Google TV</h2>"
+                    "<p>Ignite your sense with brightness</p>"
+                    "</body></html>"
+                )
+            }
+        )
+        result = _run(
+            enrich_product(
+                tenant_id="tenant-1",
+                query=ProductIdentityQuery(brand=brand, model=model, article=model),
+                search_port=search, fetch_port=fetch, media_fetcher=None,
+            )
+        )
+        self.assertIn("panel_technology", result.characteristics)
+        self.assertIn("refresh_rate_hz", result.characteristics)
+        self.assertIn("operating_system", result.characteristics)
+        self.assertNotEqual(result.characteristics["panel_technology"].value, "Pioneer in")
+
 class RealPageEnrichmentPipelineTests(unittest.TestCase):
     """End-to-end: realistic search results + realistic page HTML must
     produce verified characteristics, real media through the existing safe
