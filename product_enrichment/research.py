@@ -19,7 +19,9 @@ from typing import Protocol
 from urllib.parse import urljoin
 
 from product_enrichment.characteristics import (
+    extract_compact_feature_facts,
     extract_spec_lines,
+    html_text_nodes,
     match_canonical_key,
     normalize_characteristic_value,
 )
@@ -440,6 +442,31 @@ async def research_product(
         return ()
 
     facts: list[SourceFact] = []
+
+    def _append_compact_facts(
+        compact_text: str, *, url: str, source_type: str, domain: str, retrieved_at: str, seen_keys: set[str]
+    ) -> None:
+        for key, raw_value in extract_compact_feature_facts(compact_text):
+            if key in seen_keys:
+                continue
+            normalized_value, unit = normalize_characteristic_value(key, raw_value)
+            if not normalized_value:
+                continue
+            seen_keys.add(key)
+            facts.append(
+                SourceFact(
+                    characteristic_key=key,
+                    raw_label="feature",
+                    raw_value=raw_value,
+                    normalized_value=normalized_value,
+                    unit=unit,
+                    source_url=url,
+                    source_type=source_type,
+                    source_domain=domain,
+                    confidence=CONFIDENCE_PROBABLE,
+                    retrieved_at=retrieved_at,
+                )
+            )
     discovered_media: list[MediaCandidateInput] = []
     seen_media_urls: set[str] = set()
     retrieved_at = datetime.now(timezone.utc).isoformat()
@@ -477,6 +504,40 @@ async def research_product(
 
         domain = source_domain(url)
         accepted_any = False
+        # ONE fact per characteristic per source across BOTH structured
+        # label/value specs and compact feature bullets/headings.
+        keys_from_this_source: set[str] = set()
+
+        # Search-result title/snippet can contain high-precision compact
+        # features even when the product page hides its spec table behind
+        # client-side rendering. Identity was already verified above.
+        _append_compact_facts(
+            f"{title} {snippet}",
+            url=url,
+            source_type=source_type,
+            domain=domain,
+            retrieved_at=retrieved_at,
+            seen_keys=keys_from_this_source,
+        )
+
+        # Modern manufacturer pages often render features as standalone
+        # headings/bullets rather than label/value rows. Scan individual
+        # text nodes so only compact literal feature phrases are considered.
+        for node_text, in_anchor in html_text_nodes(page_text):
+            if in_anchor or len(node_text) > 160:
+                continue
+            _append_compact_facts(
+                node_text,
+                url=url,
+                source_type=source_type,
+                domain=domain,
+                retrieved_at=retrieved_at,
+                seen_keys=keys_from_this_source,
+            )
+
+        if keys_from_this_source:
+            accepted_any = True
+
         # ONE fact per characteristic per source: real pages repeat the
         # same characteristic in several blocks (summary + full spec
         # table) and sometimes carry near-variants under the same
@@ -484,7 +545,6 @@ async def research_product(
         # 3.0"). Without this, a single page could disagree with ITSELF
         # and ``merge_facts_into_characteristics`` would fail closed to a
         # conflict, dropping a characteristic the source stated plainly.
-        keys_from_this_source: set[str] = set()
         for label, raw_value in extract_spec_lines(page_text):
             key = match_canonical_key(label)
             if key is None or key in keys_from_this_source:
