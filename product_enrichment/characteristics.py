@@ -300,6 +300,57 @@ _SHORT_ENUM_KEYS = frozenset(
 )
 _MAX_SHORT_ENUM_CHARS = 72
 _MAX_SHORT_ENUM_WORDS = 10
+
+_BOOLEAN_SUPPORT_VALUES = frozenset(
+    {
+        "yes", "no", "true", "false", "supported", "not supported",
+        "да", "нет", "есть", "поддерживается", "не поддерживается",
+    }
+)
+_HDR_TOKENS = (
+    "hdr", "dolby vision", "hlg", "technicolor",
+)
+_PANEL_TECH_TOKENS = (
+    "oled", "qled", "qd-oled", "qd oled", "mini led", "mini-led",
+    "microled", "micro led", "lcd", "led", "ips", "va", "tn", "mla",
+)
+_BACKLIGHT_TECH_TOKENS = (
+    "mini led", "mini-led", "direct led", "edge led", "full array",
+    "fald", "oled", "microled",
+)
+_OS_TOKENS = (
+    "google tv", "android tv", "webos", "tizen", "vidaa", "roku",
+    "fire tv", "saphi",
+)
+
+
+def _contains_any_token(text: str, tokens: tuple[str, ...]) -> bool:
+    blob = str(text or "").casefold()
+    return any(token in blob for token in tokens)
+
+
+def _passes_semantic_enum_gate(key: str, text: str) -> bool:
+    """Key-specific semantic validation for canonical enum/support fields.
+
+    These rules are product/model agnostic: they validate that a value
+    belongs to the semantic domain of the canonical field, so short
+    neighboring labels or marketing fragments cannot survive merely
+    because they are brief.
+    """
+    value = _WHITESPACE_RE.sub(" ", str(text or "")).strip()
+    blob = value.casefold()
+    if key in {"wifi_support", "bluetooth_support", "ethernet_support", "smart_tv_support"}:
+        return blob in _BOOLEAN_SUPPORT_VALUES
+    if key == "hdr_formats":
+        return _contains_any_token(value, _HDR_TOKENS)
+    if key == "panel_technology":
+        return _contains_any_token(value, _PANEL_TECH_TOKENS)
+    if key == "backlight_technology":
+        return _contains_any_token(value, _BACKLIGHT_TECH_TOKENS)
+    if key == "operating_system":
+        return _contains_any_token(value, _OS_TOKENS)
+    return True
+
 _SENTENCE_PUNCT_RE = re.compile(r"[.!?;]")
 _DIMENSION_VALUE_RE = re.compile(
     r"^\s*\d+(?:[.,]\d+)?\s*(?:x|×|х)\s*\d+(?:[.,]\d+)?\s*(?:x|×|х)\s*\d+(?:[.,]\d+)?(?:\s*(?:mm|мм|cm|см))?\s*$",
@@ -347,6 +398,8 @@ def _passes_characteristic_value_shape(key: str, text: str) -> bool:
         if not _is_short_spec_value(value):
             return False
         if key == "country_of_origin" and any(ch.isdigit() for ch in value):
+            return False
+        if not _passes_semantic_enum_gate(key, value):
             return False
     if key in {"dimensions_with_stand", "dimensions_without_stand", "package_dimensions"}:
         return bool(_DIMENSION_VALUE_RE.match(value))

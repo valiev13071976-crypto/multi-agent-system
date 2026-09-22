@@ -129,6 +129,46 @@ class GenericCharacteristicValueQualityGateTests(unittest.TestCase):
         self.assertEqual(normalize_characteristic_value("vesa_mount", "300 x 300")[0], "300 x 300")
         self.assertEqual(normalize_characteristic_value("vesa_mount", "Mounting compatible with most wall brackets")[0], "")
 
+class CharacteristicSemanticEnumGateTests(unittest.TestCase):
+    def test_short_neighbor_labels_and_marketing_fragments_are_rejected(self):
+        cases = {
+            "ethernet_support": ("Type", ""),
+            "hdr_formats": ("Ignite your sense with brightness", ""),
+            "panel_technology": ("TCL Pioneer in", ""),
+        }
+        for key, (raw, expected) in cases.items():
+            with self.subTest(key=key, raw=raw):
+                value, _unit = normalize_characteristic_value(key, raw)
+                self.assertEqual(value, expected)
+
+    def test_support_fields_accept_only_explicit_support_semantics(self):
+        for key in ("wifi_support", "bluetooth_support", "ethernet_support", "smart_tv_support"):
+            for raw in ("Yes", "No", "supported", "да", "нет"):
+                with self.subTest(key=key, raw=raw):
+                    value, _unit = normalize_characteristic_value(key, raw)
+                    self.assertEqual(value, raw)
+
+    def test_hdr_requires_hdr_domain_token(self):
+        for raw in ("HDR10+", "Dolby Vision", "HLG", "HDR10+, Dolby Vision, HLG"):
+            with self.subTest(raw=raw):
+                value, _unit = normalize_characteristic_value("hdr_formats", raw)
+                self.assertEqual(value, raw)
+        self.assertEqual(normalize_characteristic_value("hdr_formats", "Brightness Pro")[0], "")
+
+    def test_panel_technology_requires_known_display_technology_token(self):
+        for raw in ("OLED", "QD-Mini LED", "IPS", "VA", "Mini LED"):
+            with self.subTest(raw=raw):
+                value, _unit = normalize_characteristic_value("panel_technology", raw)
+                self.assertEqual(value, raw)
+        self.assertEqual(normalize_characteristic_value("panel_technology", "Pioneer in")[0], "")
+
+    def test_operating_system_requires_platform_token(self):
+        for raw in ("Google TV", "Android TV", "webOS 24", "Tizen", "VIDAA"):
+            with self.subTest(raw=raw):
+                value, _unit = normalize_characteristic_value("operating_system", raw)
+                self.assertEqual(value, raw)
+        self.assertEqual(normalize_characteristic_value("operating_system", "Entertainment for everyone")[0], "")
+
 class BridgeCharacteristicsToBitrixTests(unittest.TestCase):
     def test_verified_key_gets_bitrix_property_id(self):
         chars = {
