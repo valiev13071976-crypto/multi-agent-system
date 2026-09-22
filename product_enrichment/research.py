@@ -23,7 +23,12 @@ from product_enrichment.characteristics import (
     match_canonical_key,
     normalize_characteristic_value,
 )
-from product_enrichment.identity import (\n    detect_variant_conflict,\n    evidence_matches_identity,\n    inferred_model_screen_size_inches,\n)\nfrom product_enrichment.models import (
+from product_enrichment.identity import (
+    detect_variant_conflict,
+    evidence_matches_identity,
+    inferred_model_screen_size_inches,
+)
+from product_enrichment.models import (
     CONFIDENCE_PROBABLE,
     MediaCandidateInput,
     ResolvedIdentity,
