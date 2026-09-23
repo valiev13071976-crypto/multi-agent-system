@@ -222,6 +222,11 @@ _GALLERY_ENV_UNSUPPORTED = (
 # installation (integrations.bitrix.schema.CATALOG_CHARACTERISTICS) --
 # Panda still keeps the source value, it is just never sent to a guessed
 # property.
+_NO_VERIFIED_BRAND_LINK_ID = (
+    "brand_property_100_is_an_element_link_to_iblock_12_and_requires_a_verified_numeric_element_id; "
+    "a_brand_name_string_must_never_be_written_to_the_link_property"
+)
+
 _UNVERIFIED_CHARACTERISTIC = (
     "no_verified_bitrix_property_for_this_characteristic_key_on_this_"
     "installation (see integrations.bitrix.schema.CATALOG_CHARACTERISTICS "
@@ -320,6 +325,7 @@ class SingleProductWriteRequest:
     ean: str = ""
     category_source: str = ""
     brand: str = ""
+    brand_id: str = ""
     purchase_price: str = ""
     product_id: str = ""
     # Complete-product-card follow-up pass (integrations.bitrix.schema
@@ -442,6 +448,7 @@ def build_write_request_from_fields(
         ean=str(fields.get("ean") or ""),
         category_source=str(fields.get("category") or ""),
         brand=str(fields.get("brand") or ""),
+        brand_id=str(fields.get("brand_id") or ""),
         purchase_price=str(fields.get("purchase_price") or ""),
         product_id=product_id,
         subcategory=str(fields.get("subcategory") or ""),
@@ -653,12 +660,14 @@ def _canonical_payload(
         # (default, and currently only real) simple-product case rather
         # than adding a new always-present key to every payload.
         canonical["has_variant_offer"] = True
-    if request.brand:
-        # Property 100 / code BRAND is the verified, PANDA_MANAGED binding
-        # for brand on this installation (integrations.bitrix.schema) --
-        # not a guessed property; the fixture/live create path already
-        # merges any ``properties`` dict supplied on the canonical product.
-        canonical["properties"] = {"brand": request.brand}
+    brand_id = str(request.brand_id or "").strip()
+    if brand_id:
+        if not brand_id.isdigit():
+            raise ValueError("brand_id_must_be_numeric_bitrix_element_id")
+        # BRAND/property100 is an E-type link to an element of IBLOCK 12.
+        # The LIVE audit proved the wire value must be that element ID,
+        # never the human-readable brand name.
+        canonical["properties"] = {"brand_id": brand_id}
     if purchase_price_amount is not None:
         # Native purchasingPrice/purchasingCurrency destination (Block 5.6
         # follow-up defect closure) -- structurally separate top-level key,
@@ -904,6 +913,9 @@ def prepare_single_product_write(
         {"field": "gallery_pictures", "value": f"{len(request.gallery_pictures or ())} image(s)", "reason": _GALLERY_ENV_UNSUPPORTED}
         if request.gallery_pictures and not gallery_has_destination
         else None,
+        {"field": "brand", "value": request.brand, "reason": _NO_VERIFIED_BRAND_LINK_ID}
+        if request.brand and not str(request.brand_id or "").strip()
+        else None,
     ]
     for key in unmapped_characteristics:
         not_written.append(
@@ -922,8 +934,10 @@ def prepare_single_product_write(
             will_write.insert(1, f"article/sku ({article_destination_note})")
         else:
             will_write.insert(1, "article/sku")
-    if request.brand:
-        will_write.append("brand (property 100 / BRAND, verified PANDA_MANAGED)")
+    if str(request.brand_id or "").strip():
+        will_write.append(
+            f"brand (property 100 / BRAND -> IBLOCK 12 element ID {request.brand_id}, verified element-link contract)"
+        )
     if purchase_price_has_destination:
         will_write.append(
             "purchase_price (native purchasingPrice/purchasingCurrency fields, verified -- LIVE only)"
@@ -969,6 +983,7 @@ def prepare_single_product_write(
             "sku": sku,
             "code": canonical.get("code"),
             "brand": request.brand or None,
+            "brand_id": request.brand_id or None,
             "category_source": request.category_source or None,
             "subcategory": request.subcategory or None,
             "resolved_section_id": section_id,
