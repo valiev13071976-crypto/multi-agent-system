@@ -594,7 +594,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         if not name:
             raise BitrixValidationError("name_required")
         active = bool(payload.get("active", False))
-        brand = str((product_in.get("properties") or {}).get("brand") or "").strip()
+        brand_id = str((product_in.get("properties") or {}).get("brand_id") or "").strip()
         sku = str(product_in.get("sku") or product_in.get("article") or "").strip()
         product_code = str(product_in.get("code") or "").strip()
         # TV product-write-contract defect closure (real products 989/990,
@@ -686,7 +686,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             product_id = self._live_create_product(
                 name=name,
                 active=active,
-                brand=brand,
+                brand_id=brand_id,
                 code=product_code,
                 xml_id=xml_id,
                 credential_ref=credential_ref,
@@ -930,7 +930,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         *,
         name: str,
         active: bool,
-        brand: str,
+        brand_id: str,
         code: str,
         xml_id: str,
         credential_ref: str,
@@ -946,10 +946,12 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         }
         if code:
             fields["code"] = code
-        if brand:
+        if brand_id:
             if _BRAND_PROPERTY is None:
                 raise IntegrationNotConfiguredError("bitrix_brand_property_not_verified")
-            fields[_BRAND_PROPERTY.select_key] = brand
+            if not str(brand_id).isdigit():
+                raise BitrixValidationError("brand_id_must_be_numeric_bitrix_element_id")
+            fields[_BRAND_PROPERTY.select_key] = int(brand_id)
         if purchase_price:
             # Native catalog.product fields (Block 5.6 follow-up defect
             # closure) -- structurally separate from retail selling price,
