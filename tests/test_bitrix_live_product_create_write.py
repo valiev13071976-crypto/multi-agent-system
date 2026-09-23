@@ -187,6 +187,7 @@ class _RecordingTransport:
                         "iblockId": 14,
                         "name": match["name"],
                         "active": match["active"],
+                        "code": match.get("code"),
                         "property100": match.get("property100"),
                     }
                     if match.get(schema.SECTION_FIELD) is not None:
@@ -206,6 +207,7 @@ class _RecordingTransport:
                 "id": product_id,
                 "name": body["fields"]["name"],
                 "active": body["fields"]["active"],
+                "code": body["fields"].get("code"),
                 "property100": body["fields"].get("property100"),
                 schema.SECTION_FIELD: body["fields"].get(schema.SECTION_FIELD),
             }
@@ -345,6 +347,8 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         _, product_body = transport.calls[1]
         self.assertEqual(product_body["fields"]["iblockId"], 14)
         self.assertEqual(product_body["fields"]["name"], TARGET_TITLE)
+        self.assertEqual(product_body["fields"]["code"], "32lq63006la-arug")
+        self.assertEqual(result["read_back"]["observed"]["code"], "32lq63006la-arug")
         # 5. proof active=false
         self.assertEqual(product_body["fields"]["active"], "N")
         # BRAND -> verified property 100
