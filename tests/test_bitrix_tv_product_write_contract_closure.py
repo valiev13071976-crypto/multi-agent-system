@@ -64,6 +64,7 @@ TARGET_TITLE = "Телевизор LG 100MRGB96B6.ARUG"
 TARGET_SKU = "100MRGB96B6.ARUG"
 TARGET_EAN = "8806096824788"
 TARGET_BRAND = "LG"
+TARGET_BRAND_ID = "100"
 TARGET_RETAIL_PRICE = "899990"
 TARGET_PURCHASE_PRICE = "699990"
 TV_SECTION_ID = 70
@@ -115,6 +116,7 @@ def _tv_request(**overrides) -> SingleProductWriteRequest:
         retail_price=TARGET_RETAIL_PRICE,
         ean=TARGET_EAN,
         brand=TARGET_BRAND,
+        brand_id=TARGET_BRAND_ID,
         purchase_price=TARGET_PURCHASE_PRICE,
         subcategory="Телевизоры",
         short_description="Телевизор LG с диагональю 100 дюймов.",
