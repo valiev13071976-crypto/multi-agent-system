@@ -96,7 +96,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-import logging
+import re
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Mapping, Sequence
@@ -122,7 +122,6 @@ from integrations.bitrix.product_bridge import (
     BitrixProductBridge,
 )
 
-logger = logging.getLogger(__name__)
 
 STATUS_REQUIRES_APPROVAL = "REQUIRES_APPROVAL"
 STATUS_UNRESOLVED = "UNRESOLVED"
@@ -611,6 +610,19 @@ def _normalize_media_fields(request: SingleProductWriteRequest) -> tuple[dict, s
     return fields, None
 
 
+def _product_code_from_sku(sku: str) -> str:
+    """Deterministic Bitrix element CODE for a product detail URL.
+
+    The governed create path already requires a non-empty canonical SKU and
+    duplicate-protects by that SKU. Reusing the same identity keeps CODE
+    stable across preview/approval/retry and avoids a second naming system.
+    Only Bitrix-safe ASCII letters/digits are retained; runs of other
+    characters collapse to a single hyphen.
+    """
+    normalized = re.sub(r"[^a-z0-9]+", "-", str(sku or "").strip().casefold()).strip("-")
+    return normalized
+
+
 def _canonical_payload(
     request: SingleProductWriteRequest,
     *,
@@ -625,10 +637,12 @@ def _canonical_payload(
     # retail price. Any purchase price lives in its own, sibling
     # ``purchase_price`` key (never nested inside ``price``), so it can
     # never be substituted for -- or read as -- the retail selling price.
+    product_code = _product_code_from_sku(request.sku)
     canonical: dict = {
         "product_id": request.product_id or f"panda-controlled:{request.sku}",
         "title": request.title,
         "sku": request.sku,
+        "code": product_code,
         "price": {"currency": request.currency, "selling_price": retail_amount},
     }
     if request.has_variant_offer:
@@ -756,57 +770,6 @@ def prepare_single_product_write(
                 signals=section_signals,
             )
         except schema.SectionResolutionError as exc:
-            # Temporary production diagnostics for the bounded
-            # section-resolution defect. Deliberately log only safe catalog
-            # metadata and already-derived product classification signals:
-            # no webhook URL, credentials, raw HTTP body, media bytes, or
-            # customer/private data.
-            evidence_concepts = sorted(schema.derive_category_concepts(section_signals))
-            direct_probe = []
-            if "tv" in evidence_concepts:
-                for probe_id in (61, 70):
-                    try:
-                        section = bridge.read_section_by_id(
-                            tenant_id=tenant_id,
-                            section_id=probe_id,
-                            connection_id=connection_id,
-                        )
-                        direct_probe.append(
-                            {
-                                "requested_id": probe_id,
-                                "id": section.get("id"),
-                                "name": section.get("name"),
-                                "iblockId": section.get("iblockId"),
-                                "active": section.get("active"),
-                                "parent": section.get("iblockSectionId") or section.get("parentSectionId"),
-                            }
-                        )
-                    except Exception as probe_exc:  # noqa: BLE001
-                        direct_probe.append(
-                            {
-                                "requested_id": probe_id,
-                                "error": getattr(probe_exc, "code", type(probe_exc).__name__),
-                            }
-                        )
-
-            logger.warning(
-                "bitrix_section_resolution_failed reason=%s category=%r subcategory=%r "
-                "evidence_concepts=%s sections_count=%s direct_probe=%s sections=%s",
-                exc.code,
-                str(request.category_source or ""),
-                str(request.subcategory or ""),
-                evidence_concepts,
-                len(sections),
-                direct_probe,
-                [
-                    {
-                        "id": section.get("id"),
-                        "name": section.get("name"),
-                        "parent": section.get("iblockSectionId") or section.get("parentSectionId"),
-                    }
-                    for section in sections
-                ],
-            )
             return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
         section_id = resolved["section_id"]
         category_has_destination = True
@@ -948,7 +911,7 @@ def prepare_single_product_write(
         )
     not_written = [item for item in not_written if item]
 
-    will_write = ["name", "retail_selling_price"]
+    will_write = ["name", "code (native Bitrix element CODE, deterministic from SKU)", "retail_selling_price"]
     if article_has_destination:
         if bridge.environment == ENV_LIVE:
             article_destination_note = (
@@ -1004,6 +967,7 @@ def prepare_single_product_write(
         "target_product": {
             "title": title,
             "sku": sku,
+            "code": canonical.get("code"),
             "brand": request.brand or None,
             "category_source": request.category_source or None,
             "subcategory": request.subcategory or None,
@@ -1162,7 +1126,12 @@ def execute_single_product_write(
     # only when this write actually resolved/sent one, so an
     # already-existing product with no category data supplied is never
     # false-mismatched against an unset expectation.
-    expected = {"name": preview["target_product"]["title"], "active": False}
+    expected = {
+        "name": preview["target_product"]["title"],
+        "active": False,
+    }
+    if bridge.environment == ENV_LIVE:
+        expected["code"] = preview["target_product"].get("code")
     resolved_section_id = preview["target_product"].get("resolved_section_id")
     if resolved_section_id is not None:
         expected[schema.SECTION_FIELD] = resolved_section_id

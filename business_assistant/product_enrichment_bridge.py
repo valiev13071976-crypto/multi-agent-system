@@ -253,6 +253,9 @@ def format_write_plan_text(
             "Модель товара: обычный товар без торговых предложений (IBLOCK 14) — "
             "нет данных о вариантах товара для этой записи"
         )
+    target_product = dict(write_preview.get("target_product") or {})
+    if target_product.get("code"):
+        lines.append(f"Символьный код URL (Bitrix CODE): {target_product.get('code')}")
     if write_request.brand:
         lines.append(f"Бренд: {write_request.brand}")
     if write_request.ean:
