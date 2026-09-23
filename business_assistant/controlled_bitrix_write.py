@@ -1129,8 +1129,9 @@ def execute_single_product_write(
     expected = {
         "name": preview["target_product"]["title"],
         "active": False,
-        "code": preview["target_product"].get("code"),
     }
+    if bridge.environment == ENV_LIVE:
+        expected["code"] = preview["target_product"].get("code")
     resolved_section_id = preview["target_product"].get("resolved_section_id")
     if resolved_section_id is not None:
         expected[schema.SECTION_FIELD] = resolved_section_id
