@@ -2718,6 +2718,7 @@ class WorkflowPandaConversationGateway:
         the single-product path's own contract."""
         from business_assistant.action_continuation import CONFIRM_BATCH_BITRIX_CREATE, mark_executed
         from business_assistant.controlled_bitrix_write import (
+            STATUS_APPROVAL_PLAN_CHANGED,
             build_write_request_from_fields,
             execute_single_product_write,
         )
@@ -2841,7 +2842,7 @@ class WorkflowPandaConversationGateway:
                 )
             else:
                 failed_count += 1
-                if result.get("status") == "APPROVAL_PLAN_CHANGED":
+                if result.get("status") == STATUS_APPROVAL_PLAN_CHANGED:
                     row_lines.append(
                         f"  - {row_prefix}{sku_label} — {title_label}: не создан "
                         "(план записи изменился после предпросмотра, требуется новый предпросмотр)"
