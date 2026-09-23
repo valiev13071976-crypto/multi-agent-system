@@ -269,19 +269,6 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 items.append(normalized)
             return self._envelope(items)
 
-        if operation == "section_get":
-            section_id = str(params.get("section_id") or params.get("id") or "").strip()
-            if not section_id or not section_id.lstrip("-").isdigit():
-                raise BitrixValidationError("section_id_required")
-            data = self.client.call(
-                "catalog.section.get",
-                credential_ref=credential_ref,
-                params={"id": int(section_id)},
-            )
-            result = data.get("result")
-            section = result.get("section") if isinstance(result, dict) else None
-            return self._envelope([section] if isinstance(section, dict) else [])
-
         if operation in ("section_read", "category_read"):
             # Sections belong to a specific IBLOCK too (products by default;
             # callers reading the offers-IBLOCK's own sections may pass
@@ -299,16 +286,8 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             sections: list = []
             start = None
             for _page in range(_SECTION_LIST_MAX_PAGES):
-                section_filter: dict = {"iblockId": iblock_id}
-                requested_section_ids = [
-                    int(section_id)
-                    for section_id in (params.get("section_ids") or [])
-                    if str(section_id).lstrip("-").isdigit()
-                ]
-                if requested_section_ids:
-                    section_filter["id"] = requested_section_ids
                 page_params: dict = {
-                    "filter": section_filter,
+                    "filter": {"iblockId": iblock_id},
                     "select": ["id", "name", "sort", "iblockSectionId"],
                 }
                 if start is not None:
@@ -617,6 +596,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         active = bool(payload.get("active", False))
         brand = str((product_in.get("properties") or {}).get("brand") or "").strip()
         sku = str(product_in.get("sku") or product_in.get("article") or "").strip()
+        product_code = str(product_in.get("code") or "").strip()
         # TV product-write-contract defect closure (real products 989/990,
         # "Телевизор LG 100MRGB96B6.ARUG" -- created as a SKU-parent with a
         # separate offer, unlike the verified reference Aspro TV card,
@@ -707,6 +687,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 name=name,
                 active=active,
                 brand=brand,
+                code=product_code,
                 xml_id=xml_id,
                 credential_ref=credential_ref,
                 purchase_price=purchase_price_amount,
@@ -950,6 +931,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         name: str,
         active: bool,
         brand: str,
+        code: str,
         xml_id: str,
         credential_ref: str,
         purchase_price: str = "",
@@ -962,6 +944,8 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             "active": "Y" if active else "N",
             "xmlId": xml_id,
         }
+        if code:
+            fields["code"] = code
         if brand:
             if _BRAND_PROPERTY is None:
                 raise IntegrationNotConfiguredError("bitrix_brand_property_not_verified")
