@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from integrations.bitrix.brand import validate_brand_plan, validate_brand_resolution
+
 import logging
 import uuid
 from decimal import Decimal, InvalidOperation
@@ -184,6 +186,11 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         params = params or {}
         operation = str(params.get("operation") or "")
 
+        if operation == "brand_preview":
+            data = self.client.call("panda.brand.preview", credential_ref=credential_ref,
+                                    params={"name": params.get("name"), "expected_id": params.get("expected_id")})
+            return validate_brand_plan(data.get("result"))
+
         if operation == "order_read":
             data = self.client.call(
                 "sale.order.list", credential_ref=credential_ref, params={"filter": {}, "select": ["ID", "NAME"]}
@@ -357,6 +364,22 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
         self._assert_live_configured(credential_ref)
         self._raise_if_bad()
         operation = str(payload.get("operation") or "").strip()
+        if operation == "brand_resolve":
+            plan = validate_brand_plan(payload.get("brand_plan"))
+            if not idempotency_key:
+                raise BitrixValidationError("brand_idempotency_key_required")
+            data = self.client.call("panda.brand.resolve", credential_ref=credential_ref,
+                                    params={**plan, "idempotency_key": idempotency_key})
+            result = validate_brand_resolution(data.get("result"), plan)
+            # Independent read-back: never use a write response alone as proof.
+            observed = self.client.call("panda.brand.preview", credential_ref=credential_ref,
+                                       params={"name": plan["name"], "expected_id": result["brand_id"]})
+            check = validate_brand_plan(observed.get("result"))
+            if check["action"] != "existing" or check["brand_id"] != result["brand_id"] or any(
+                check[k] != plan[k] for k in ("name", "code", "iblock_id")
+            ):
+                raise BitrixValidationError("brand_readback_mismatch")
+            return result
         if operation != "product_create":
             # Every other LIVE write operation (update/price/stock/media/
             # SEO/publish) remains the pre-existing, deliberate,
@@ -805,7 +828,7 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 "name": resolved_name,
                 "active": bool(resolved_active),
                 "article": article_written,
-                "properties": {"brand": brand} if brand else {},
+                "properties": {"brand_id": brand_id} if brand_id else {},
                 "purchase_price_written": purchase_price_written,
                 # Complete-product-card follow-up pass -- all base-product
                 # fields, so (like purchase_price_written) always reflect
