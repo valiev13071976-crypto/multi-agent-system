@@ -286,8 +286,16 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
             sections: list = []
             start = None
             for _page in range(_SECTION_LIST_MAX_PAGES):
+                section_filter: dict = {"iblockId": iblock_id}
+                requested_section_ids = [
+                    int(section_id)
+                    for section_id in (params.get("section_ids") or [])
+                    if str(section_id).lstrip("-").isdigit()
+                ]
+                if requested_section_ids:
+                    section_filter["id"] = requested_section_ids
                 page_params: dict = {
-                    "filter": {"iblockId": iblock_id},
+                    "filter": section_filter,
                     "select": ["id", "name", "sort", "iblockSectionId"],
                 }
                 if start is not None:

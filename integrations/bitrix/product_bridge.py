@@ -167,13 +167,22 @@ class BitrixProductBridge:
 
     # --- catalog / section read (spec section 10) ----------------------
 
-    def read_sections(self, *, tenant_id: str, connection_id: str | None = None) -> dict:
+    def read_sections(
+        self,
+        *,
+        tenant_id: str,
+        connection_id: str | None = None,
+        section_ids: list[int] | None = None,
+    ) -> dict:
+        payload = {"operation": "section_read"}
+        if section_ids:
+            payload["section_ids"] = [int(section_id) for section_id in section_ids]
         out = self._activation.execute_via_gateway(
             tenant_id=tenant_id,
             capability=READ_CAPABILITY,
             environment=self._environment,
             operation_class=OP_READ,
-            payload={"operation": "section_read"},
+            payload=payload,
             connection_id=connection_id,
         )
         return out["result"]
