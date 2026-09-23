@@ -711,7 +711,17 @@ def prepare_single_product_write(
     # resolvable) instead of skipping this lookup outright.
     section_id = None
     category_has_destination = False
-    if bridge.environment == ENV_LIVE:
+    site_ready_section_required = bool(
+        request.subcategory
+        or request.category_source
+        or request.short_description
+        or request.detailed_description
+        or request.preview_picture
+        or request.detail_picture
+        or request.gallery_pictures
+        or request.characteristics
+    )
+    if bridge.environment == ENV_LIVE and site_ready_section_required:
         try:
             # A LIVE site write is never allowed to fall through to the
             # catalog root. Resolve one existing section before approval,
