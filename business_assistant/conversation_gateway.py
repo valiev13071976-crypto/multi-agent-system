@@ -1750,11 +1750,21 @@ class WorkflowPandaConversationGateway:
             request=write_request,
             approved=True,
             idempotency_key=bitrix_write_idem,
+            expected_approval_signature=(getattr(task, "parameters", {}).get("bitrix_brand_approval_signature") or None),
         )
-        if idem and result.get("mutated"):
+        if result.get("status") == "REQUIRES_APPROVAL" and result.get("brand_plan") and task is not None:
+            from business_assistant.controlled_bitrix_write import build_approval_signature
+            task.parameters["bitrix_brand_approval_signature"] = build_approval_signature(result)
+            self._action_store.put(task)
+            return ConversationResult(
+                text=format_bitrix_write_result_text(result), task_id=getattr(task, "task_id", None),
+                metadata={"action_decision": CALL_CONTROLLED_BITRIX_WRITE, "artifacts": [],
+                          "bitrix_write_preview": result, "mutated": False},
+            )
+        if idem and result.get("bitrix_product_id"):
             self._executed_keys.add(idem)
         if task is not None:
-            mark_executed(self._action_store, task, failed=not result.get("mutated"))
+            mark_executed(self._action_store, task, failed=not result.get("bitrix_product_id"))
         return ConversationResult(
             text=format_bitrix_write_result_text(result),
             task_id=getattr(task, "task_id", None),
@@ -1922,6 +1932,9 @@ class WorkflowPandaConversationGateway:
                 result["enrichment"]
             )
             task.parameters["bitrix_enrichment_preview"] = dict(result["enrichment_preview"])
+            if (result.get("write_preview") or {}).get("brand_plan"):
+                from business_assistant.controlled_bitrix_write import build_approval_signature
+                task.parameters["bitrix_brand_approval_signature"] = build_approval_signature(result["write_preview"])
             self._action_store.put(task)
             mark_executed(self._action_store, task, failed=False)
 
@@ -2007,6 +2020,11 @@ class WorkflowPandaConversationGateway:
                 )
             except Exception:  # noqa: BLE001 -- a read-only explanation must never fail on the preview call
                 write_preview = {}
+
+        if task is not None and write_preview.get("brand_plan"):
+            from business_assistant.controlled_bitrix_write import build_approval_signature
+            task.parameters["bitrix_brand_approval_signature"] = build_approval_signature(write_preview)
+            self._action_store.put(task)
 
         text = format_write_plan_text(
             write_request=write_request,
@@ -2745,6 +2763,8 @@ class WorkflowPandaConversationGateway:
 
         row_lines: list[str] = []
         created_count = 0
+        any_mutation = False
+        mutation_unknown = False
         skipped_count = 0
         failed_count = 0
 
@@ -2834,7 +2854,9 @@ class WorkflowPandaConversationGateway:
                 idempotency_key="",
                 expected_approval_signature=approved_signature if isinstance(approved_signature, Mapping) else None,
             )
-            if result.get("mutated"):
+            any_mutation = any_mutation or bool(result.get("mutated"))
+            mutation_unknown = mutation_unknown or result.get("mutation_outcome") == "unknown"
+            if result.get("mutated") and result.get("bitrix_product_id"):
                 created_count += 1
                 row_lines.append(
                     f"  - {row_prefix}{sku_label} — {title_label}: создан "
@@ -2842,7 +2864,10 @@ class WorkflowPandaConversationGateway:
                 )
             else:
                 failed_count += 1
-                if result.get("status") == STATUS_APPROVAL_PLAN_CHANGED:
+                if result.get("status") == "WRITE_PARTIAL_FAILURE":
+                    from business_assistant.controlled_bitrix_write import format_bitrix_write_result_text
+                    row_lines.append(f"  - {row_prefix}{sku_label} — {title_label}: {format_bitrix_write_result_text(result)}")
+                elif result.get("status") == STATUS_APPROVAL_PLAN_CHANGED:
                     row_lines.append(
                         f"  - {row_prefix}{sku_label} — {title_label}: не создан "
                         "(план записи изменился после предпросмотра, требуется новый предпросмотр)"
@@ -2871,7 +2896,8 @@ class WorkflowPandaConversationGateway:
             metadata={
                 "action_decision": CONFIRM_BATCH_BITRIX_CREATE,
                 "artifacts": [],
-                "mutated": created_count > 0,
+                "mutated": True if any_mutation else (None if mutation_unknown else False),
+                "mutation_outcome": "unknown" if mutation_unknown else "known",
                 "bitrix_batch_create_result": {
                     "created": created_count,
                     "skipped": skipped_count,

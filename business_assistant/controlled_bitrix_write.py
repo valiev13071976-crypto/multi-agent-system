@@ -876,6 +876,32 @@ def prepare_single_product_write(
         }
     assert action == SYNC_CREATE
 
+    brand_plan = None
+    if bridge.environment == ENV_LIVE and (request.brand or request.brand_id):
+        # Do not create an orphan brand when a known product prerequisite is
+        # unavailable. The current verified schema is authoritative, not old IDs.
+        if not request.has_variant_offer and schema.catalog_property(code="CML2_ARTICLE") is None:
+            return {"status": STATUS_UNRESOLVED, "reason": "bitrix_article_property_not_verified"}
+        if request.gallery_pictures and not request.has_variant_offer and schema.catalog_property(code="MORE_PHOTO") is None:
+            return {"status": STATUS_UNRESOLVED, "reason": "bitrix_gallery_property_not_verified"}
+        try:
+            bridge.ensure_live_connection_ready(tenant_id=tenant_id)
+            brand_plan = bridge.preview_brand(
+                tenant_id=tenant_id, name=request.brand, expected_id=request.brand_id,
+                connection_id=connection_id,
+            )
+            from integrations.bitrix.brand import validate_brand_plan
+            brand_plan = validate_brand_plan(brand_plan)
+        except Exception as exc:
+            return {"status": STATUS_UNRESOLVED, "reason": "brand_lookup_failed",
+                    "error": getattr(exc, "code", type(exc).__name__)}
+
+    if brand_plan:
+        # Approval binds the stable brand identity; the numeric link is filled
+        # only after governed resolution and independent brand read-back.
+        canonical["brand_intent"] = {k: brand_plan[k] for k in ("name", "code", "iblock_id")}
+        canonical.pop("properties", None)
+
     # TV product-write-contract defect closure (real products 989/990):
     # this write path has never carried genuine variant data, so it always
     # resolves to the SIMPLE product model unless a caller explicitly
@@ -914,7 +940,7 @@ def prepare_single_product_write(
         if request.gallery_pictures and not gallery_has_destination
         else None,
         {"field": "brand", "value": request.brand, "reason": _NO_VERIFIED_BRAND_LINK_ID}
-        if request.brand and not str(request.brand_id or "").strip()
+        if request.brand and not brand_plan and not str(request.brand_id or "").strip()
         else None,
     ]
     for key in unmapped_characteristics:
@@ -934,7 +960,13 @@ def prepare_single_product_write(
             will_write.insert(1, f"article/sku ({article_destination_note})")
         else:
             will_write.insert(1, "article/sku")
-    if str(request.brand_id or "").strip():
+    if brand_plan:
+        if brand_plan["action"] == "create":
+            will_write.append(f"будет создан бренд {brand_plan['name']} в IBLOCK {brand_plan['iblock_id']}")
+        else:
+            will_write.append(f"бренд {brand_plan['name']}: существующий ID {brand_plan['brand_id']}")
+        will_write.append("property100 / BRAND: ID проверенного элемента бренда, до создания товара")
+    elif str(request.brand_id or "").strip():
         will_write.append(
             f"brand (property 100 / BRAND -> IBLOCK 12 element ID {request.brand_id}, verified element-link contract)"
         )
@@ -1000,6 +1032,7 @@ def prepare_single_product_write(
             "is required before it appears live."
         ),
         "canonical_payload": canonical,
+        "brand_plan": brand_plan,
     }
 
 
@@ -1030,6 +1063,7 @@ def build_approval_signature(preview: Mapping) -> dict:
         "retail_price_amount": str(retail.get("amount") or ""),
         "retail_price_currency": str(retail.get("currency") or ""),
         "canonical_sha256": hashlib.sha256(canonical_blob).hexdigest(),
+        **({"brand_plan": preview["brand_plan"]} if preview.get("brand_plan") else {}),
     }
 
 
@@ -1056,6 +1090,9 @@ def execute_single_product_write(
     if preview["status"] != STATUS_REQUIRES_APPROVAL:
         return {**preview, "mutated": False}
 
+    if (preview.get("brand_plan") or {}).get("action") == "create" and not expected_approval_signature:
+        return {**preview, "mutated": False, "reason": "brand_creation_requires_preview_confirmation"}
+
     # Frozen-preview contract: batch approval is permission to execute only
     # the plan the owner actually saw. We deliberately DO re-run the normal
     # prepare/section validation above against current Bitrix state; then we
@@ -1064,6 +1101,15 @@ def execute_single_product_write(
     if expected_approval_signature:
         actual_signature = build_approval_signature(preview)
         expected_signature = dict(expected_approval_signature)
+        # An approved missing brand may have been created by a concurrent
+        # request or a previous timed-out attempt. Reusing that exact identity
+        # narrows the approved write; changing an existing brand ID never does.
+        before = expected_signature.get("brand_plan") or {}
+        after = actual_signature.get("brand_plan") or {}
+        if before.get("action") == "create" and after.get("action") == "existing" and all(
+            before.get(k) == after.get(k) for k in ("name", "code", "iblock_id")
+        ):
+            actual_signature["brand_plan"] = before
         if actual_signature != expected_signature:
             return {
                 "status": STATUS_APPROVAL_PLAN_CHANGED,
@@ -1074,7 +1120,9 @@ def execute_single_product_write(
             }
 
     key = idempotency_key or _default_idempotency_key(tenant_id, request)
-    canonical = preview["canonical_payload"]
+    canonical = dict(preview["canonical_payload"])
+    brand_result = None
+    brand_write_attempted = False
 
     try:
         # Production defect closure: ensure this tenant has an
@@ -1086,6 +1134,15 @@ def execute_single_product_write(
         # credentials are correctly configured -- see
         # BitrixProductBridge.ensure_live_connection_ready.
         bridge.ensure_live_connection_ready(tenant_id=tenant_id)
+        if preview.get("brand_plan"):
+            brand_write_attempted = True
+            brand_result = bridge.resolve_brand(
+                tenant_id=tenant_id, plan=preview["brand_plan"], approved_write=True,
+                connection_id=connection_id,
+            )
+            from integrations.bitrix.brand import validate_brand_resolution
+            brand_result = validate_brand_resolution(brand_result, preview["brand_plan"])
+            canonical["properties"] = {"brand_id": brand_result["brand_id"]}
         result = bridge.sync_product(
             tenant_id=tenant_id,
             canonical_product=canonical,
@@ -1096,15 +1153,20 @@ def execute_single_product_write(
         )
     except Exception as exc:  # noqa: BLE001 -- normalize, never leak raw adapter/HTTP exceptions
         return {
-            "status": STATUS_WRITE_FAILED,
-            "mutated": False,
+            "status": STATUS_WRITE_PARTIAL_FAILURE if brand_write_attempted and (brand_result is None or brand_result.get("created")) else STATUS_WRITE_FAILED,
+            "mutated": None if brand_write_attempted and brand_result is None else bool(brand_result and brand_result.get("created")),
+            "mutation_outcome": "unknown" if brand_write_attempted and brand_result is None else "known",
+            "brand": brand_result,
+            "failed_step": "brand_resolve_or_product_create" if brand_write_attempted else "product_create",
             "error": getattr(exc, "code", type(exc).__name__),
             "error_type": type(exc).__name__,
             "idempotency_key": key,
         }
 
     if result.get("action") != SYNC_CREATE or not result.get("mutated"):
-        return {"status": STATUS_WRITE_NOT_PERFORMED, "mutated": False, "result": result, "idempotency_key": key}
+        return {"status": STATUS_WRITE_PARTIAL_FAILURE if brand_result and brand_result.get("created") else STATUS_WRITE_NOT_PERFORMED,
+                "mutated": bool(brand_result and brand_result.get("created")), "brand": brand_result,
+                "result": result, "idempotency_key": key}
 
     write_result = result.get("result") or {}
     created_product = write_result.get("product") or {}
@@ -1147,6 +1209,8 @@ def execute_single_product_write(
     }
     if bridge.environment == ENV_LIVE:
         expected["code"] = preview["target_product"].get("code")
+    if brand_result:
+        expected["brand_id"] = brand_result["brand_id"]
     resolved_section_id = preview["target_product"].get("resolved_section_id")
     if resolved_section_id is not None:
         expected[schema.SECTION_FIELD] = resolved_section_id
@@ -1163,6 +1227,7 @@ def execute_single_product_write(
         "product_model": preview.get("product_model"),
         "ean_source": request.ean or None,
         "brand": request.brand or None,
+        "brand_resolution": brand_result,
         "category_source": request.category_source or None,
         "resolved_section_id": resolved_section_id,
         "retail_price": preview["retail_price"],
@@ -1277,7 +1342,21 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
         detail = str(result.get("detail") or "").strip()
         text = f"Не удалось подготовить запись в Bitrix: {result.get('reason', 'unresolved')}."
         return f"{text} {detail}" if detail else text
+    if status == STATUS_REQUIRES_APPROVAL:
+        target = result.get("target_product") or {}
+        retail = result.get("retail_price") or {}
+        return "\n".join([
+            f"План записи: {target.get('title')} (артикул {target.get('sku')}).",
+            f"Розничная цена: {retail.get('amount')} {retail.get('currency')}.",
+            *[str(item) for item in result.get("will_write") or []],
+            "Товар будет неактивным. Подтвердите этот план для создания бренда и товара.",
+        ])
     if status == STATUS_WRITE_PARTIAL_FAILURE:
+        if not result.get("bitrix_product_id"):
+            brand = result.get("brand") or {}
+            detail = (f"Бренд создан: ID {brand['brand_id']}. " if brand.get("created") else
+                      "Результат записи бренда требует повторной проверки. ")
+            return detail + "Создание товара не подтверждено. Повторите подтверждение того же плана: бренд будет проверен до продолжения записи."
         step_labels = {
             "offer_create": "создание торгового предложения/артикула (SKU)",
             "price_create": "запись розничной цены",
@@ -1296,6 +1375,8 @@ def format_bitrix_write_result_text(result: Mapping) -> str:
         return f"Запись в Bitrix не удалась: {_describe_write_failure(result)}. Товар не создан."
     if status == STATUS_WRITE_NOT_PERFORMED:
         return "Запись в Bitrix не выполнена."
+    if status == STATUS_APPROVAL_PLAN_CHANGED:
+        return "План записи изменился после предпросмотра. Покажите актуальный план и подтвердите его заново."
     if status == STATUS_APPROVAL_REQUIRED:
         return "Это действие требует явного подтверждения перед записью в Bitrix."
     return "Не удалось выполнить запись в Bitrix."

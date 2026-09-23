@@ -178,6 +178,26 @@ class BitrixProductBridge:
         )
         return out["result"]
 
+    def preview_brand(self, *, tenant_id: str, name: str, expected_id: str = "", connection_id=None) -> dict:
+        out = self._activation.execute_via_gateway(
+            tenant_id=tenant_id, capability=READ_CAPABILITY, environment=self._environment,
+            operation_class=OP_READ,
+            payload={"operation": "brand_preview", "name": name, "expected_id": expected_id},
+            connection_id=connection_id,
+        )
+        return out["result"]
+
+    def resolve_brand(self, *, tenant_id: str, plan: dict, approved_write: bool, connection_id=None) -> dict:
+        # Product-independent identity: all products using this brand share the key.
+        identity = f"{tenant_id}:{plan['iblock_id']}:{plan['name'].casefold()}:{plan['code']}"
+        key = "bitrix-brand:" + hashlib.sha256(identity.encode("utf-8")).hexdigest()
+        out = self._activation.execute_via_gateway(
+            tenant_id=tenant_id, capability=WRITE_CAPABILITY, environment=self._environment,
+            operation_class=OP_WRITE, payload={"operation": "brand_resolve", "brand_plan": plan},
+            idempotency_key=key, approved_write=approved_write, connection_id=connection_id,
+        )
+        return out["result"]
+
     def read_product(self, *, tenant_id: str, bitrix_id: str, connection_id: str | None = None) -> dict:
         """Explicit, independent read-back of one product by its Bitrix id.
 
@@ -220,6 +240,13 @@ class BitrixProductBridge:
             # string; normalize once here so read-back comparisons never
             # false-mismatch on encoding alone.
             normalized["active"] = normalized["active"] in (True, "Y", "y", 1, "1")
+        # The E-property REST value may be a scalar or a {value: ...} envelope.
+        binding = schema.catalog_property(code="BRAND")
+        raw_brand = normalized.get(binding.select_key) if binding else None
+        if isinstance(raw_brand, dict):
+            raw_brand = raw_brand.get("value")
+        if raw_brand is not None:
+            normalized["brand_id"] = str(raw_brand)
         return normalized
 
     # --- production schema binding verification (Block 5.6 final binding) --

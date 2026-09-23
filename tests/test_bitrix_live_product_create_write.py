@@ -175,6 +175,13 @@ class _RecordingTransport:
                     },
                 )
 
+        if rest_method in ("panda.brand.preview", "panda.brand.resolve"):
+            name = body.get("name") or TARGET_BRAND
+            brand = {"name": name, "code": name.lower(), "iblock_id": "12",
+                     "brand_id": str(body.get("expected_id") or body.get("brand_id") or TARGET_BRAND_ID),
+                     "action": "existing", "created": False}
+            return httpx.Response(200, json={"result": brand})
+
         if rest_method == "catalog.product.list":
             if "xmlId" in filt:
                 match = self._products_by_xml_id.get(filt["xmlId"])
@@ -336,6 +343,9 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         self.assertEqual(
             methods_called,
             [
+                "panda.brand.preview",
+                "panda.brand.resolve",
+                "panda.brand.preview",  # independent brand read-back
                 "catalog.product.list",  # idempotency check by xmlId -- not found
                 "catalog.product.add",
                 "catalog.product.offer.list",  # idempotency check by parent -- not found
@@ -346,7 +356,7 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
             ],
         )
 
-        _, product_body = transport.calls[1]
+        product_body = next(body for method, body in transport.calls if method == "catalog.product.add")
         self.assertEqual(product_body["fields"]["iblockId"], 14)
         self.assertEqual(product_body["fields"]["name"], TARGET_TITLE)
         self.assertEqual(product_body["fields"]["code"], "32lq63006la-arug")
@@ -361,7 +371,7 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         self.assertEqual(product_body["fields"]["purchasingPrice"], TARGET_PURCHASE_PRICE)
         self.assertEqual(product_body["fields"]["purchasingCurrency"], "RUB")
 
-        _, offer_body = transport.calls[3]
+        offer_body = next(body for method, body in transport.calls if method == "catalog.product.offer.add")
         self.assertEqual(offer_body["fields"]["iblockId"], 15)
         self.assertEqual(offer_body["fields"]["parentId"], CREATED_PRODUCT_ID)
         self.assertEqual(offer_body["fields"]["active"], "N")
@@ -370,7 +380,7 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         # Purchase price must never leak onto the offer create either.
         self.assertNotIn("purchasingPrice", offer_body["fields"])
 
-        _, price_body = transport.calls[5]
+        price_body = next(body for method, body in transport.calls if method == "catalog.price.add")
         self.assertEqual(price_body["fields"]["productId"], CREATED_PRODUCT_ID)
         self.assertEqual(price_body["fields"]["catalogGroupId"], 7)
         # 6. proof retail 29990 and purchase 22513.70 remain separate --
@@ -507,7 +517,7 @@ class MalformedHttp200ResponseTests(unittest.TestCase):
         # catalog.product.add was reached and returned HTTP 200, but no
         # offer/price step must ever be attempted without a concrete id.
         methods_called = [m for m, _ in transport.calls]
-        self.assertEqual(methods_called, ["catalog.product.list", "catalog.product.add"])
+        self.assertEqual(methods_called, ["panda.brand.preview", "panda.brand.resolve", "panda.brand.preview", "catalog.product.list", "catalog.product.add"])
         self.assertEqual(transport.offer_add_count, 0)
         self.assertEqual(transport.price_add_count, 0)
         text = format_bitrix_write_result_text(result)
