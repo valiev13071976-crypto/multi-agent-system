@@ -64,6 +64,7 @@ TARGET_TITLE = "Телевизор LG 100MRGB96B6.ARUG"
 TARGET_SKU = "100MRGB96B6.ARUG"
 TARGET_EAN = "8806096824788"
 TARGET_BRAND = "LG"
+TARGET_BRAND_ID = "100"
 TARGET_RETAIL_PRICE = "899990"
 TARGET_PURCHASE_PRICE = "699990"
 TV_SECTION_ID = 70
@@ -115,6 +116,7 @@ def _tv_request(**overrides) -> SingleProductWriteRequest:
         retail_price=TARGET_RETAIL_PRICE,
         ean=TARGET_EAN,
         brand=TARGET_BRAND,
+        brand_id=TARGET_BRAND_ID,
         purchase_price=TARGET_PURCHASE_PRICE,
         subcategory="Телевизоры",
         short_description="Телевизор LG с диагональю 100 дюймов.",
@@ -204,6 +206,20 @@ class ElementIdentityFieldMappingTests(unittest.TestCase):
         brand_property = schema.catalog_property(code="BRAND")
         self.assertEqual(product_body["fields"][brand_property.select_key], TARGET_BRAND)
         self.assertEqual(result["brand"], TARGET_BRAND)
+
+    def test_brand_requires_verified_iblock12_element_id(self):
+        result, transport = _execute(_tv_request(brand_id=""))
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertNotIn("property100", product_body["fields"])
+        not_written = {item["field"]: item["reason"] for item in result["not_written"]}
+        self.assertIn("brand", not_written)
+        self.assertIn("requires_a_verified_numeric_element_id", not_written["brand"])
+
+    def test_verified_brand_id_is_written_as_numeric_element_link(self):
+        result, transport = _execute(_tv_request(brand_id="100"))
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"]["property100"], 100)
+        self.assertNotIn("brand", {item["field"] for item in result["not_written"]})
 
     def test_article_sku_writes_to_the_base_product_cml2_article_property(self):
         """SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758

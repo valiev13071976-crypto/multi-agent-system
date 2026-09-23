@@ -347,7 +347,7 @@ class OneProductEndToEndGovernedWriteTests(unittest.IsolatedAsyncioTestCase):
         product_fields = transport.payload_for("catalog.product.add")
         # identity + resolved real catalog section
         self.assertEqual(product_fields["name"], f"LG {TARGET_SKU}")
-        self.assertEqual(product_fields["property100"], TARGET_BRAND)
+        self.assertEqual(product_fields["property100"], int(TARGET_BRAND_ID))
         self.assertEqual(product_fields[schema.SECTION_FIELD], 103)
         self.assertEqual(result.get("section_id_written"), 103)
         # purchase price -> native fields, never mixed into the retail price.

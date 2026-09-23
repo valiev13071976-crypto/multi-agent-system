@@ -50,6 +50,7 @@ TARGET_TITLE = "Телевизор LG 32LQ63006LA.ARUG"
 TARGET_SKU = "32LQ63006LA.ARUG"
 TARGET_EAN = "8806096259955"
 TARGET_BRAND = "LG"
+TARGET_BRAND_ID = "100"
 TARGET_PURCHASE_PRICE = "22513.70"
 TARGET_RETAIL_PRICE = "29990"
 TARGET_CATEGORY = "CE"
@@ -282,6 +283,7 @@ def _request(**overrides) -> SingleProductWriteRequest:
         # catalog.section.list for no reason. Tests that care about
         # category/section pass it explicitly.
         brand=TARGET_BRAND,
+        brand_id=TARGET_BRAND_ID,
         purchase_price=TARGET_PURCHASE_PRICE,
         # TV product-write-contract defect closure: every test in this
         # file was written against, and specifically verifies, the
@@ -352,7 +354,7 @@ class CorrectVerifiedCreatePayloadTests(unittest.TestCase):
         # 5. proof active=false
         self.assertEqual(product_body["fields"]["active"], "N")
         # BRAND -> verified property 100
-        self.assertEqual(product_body["fields"]["property100"], TARGET_BRAND)
+        self.assertEqual(product_body["fields"]["property100"], int(TARGET_BRAND_ID))
         # Purchase price -> native purchasingPrice/purchasingCurrency fields
         # on the SAME catalog.product.add call as the base product (Block
         # 5.6 follow-up defect closure) -- never on the offer or price call.
