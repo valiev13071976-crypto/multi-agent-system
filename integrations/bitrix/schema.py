@@ -804,43 +804,17 @@ CATALOG_PRODUCT_PROPERTIES: tuple[PropertyBinding, ...] = (
     # surfaces the real Russian admin-panel label; see
     # CATALOG_CHARACTERISTICS below for the Panda-facing semantic key each
     # one is exposed under.
-    PropertyBinding(154, "PROP_2053", PANDA_MANAGED, "Screen diagonal, cm ('Диагональ дисплея, см'); see CATALOG_CHARACTERISTICS['screen_diagonal_cm']."),
-    PropertyBinding(156, "PROP_2054", PANDA_MANAGED, "Screen resolution, px ('Разрешение экрана, пикс'); see CATALOG_CHARACTERISTICS['screen_resolution']."),
-    PropertyBinding(206, "PROP_301", PANDA_MANAGED, "Operating system ('Операционная система'); see CATALOG_CHARACTERISTICS['operating_system']."),
-    PropertyBinding(209, "PROP_304", PANDA_MANAGED, "Smart TV support ('Поддержка Smart TV'); see CATALOG_CHARACTERISTICS['smart_tv_support']."),
-    PropertyBinding(246, "COLOR_REF2", PANDA_MANAGED, "Product color, directory-referenced ('Цвет'); see CATALOG_CHARACTERISTICS['color']."),
-    # SIMPLE_PRODUCT TV contract-alignment pass (module docstring items
-    # H/I/J, ticket T-F79758 follow-up): verified directly against
-    # production reference element 992 (IBLOCK 14) and the real admin
-    # form configuration (b_user_option id=36, form_element_14) -- not
-    # the (sometimes misleading) global b_iblock_property.NAME table.
-    PropertyBinding(CML2_ARTICLE_PROPERTY_ID, CML2_ARTICLE_PROPERTY_CODE, PANDA_MANAGED, "SIMPLE_PRODUCT article/SKU identity (reference 992: 'TCL 65C8L'); base-product destination, distinct from OFFER_PROPERTIES' ARTICLE(283)."),
-    PropertyBinding(SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_ID, SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_CODE, PANDA_MANAGED, "SIMPLE_PRODUCT gallery media, multi-value FILE property (reference 992: 8 gallery files); base-product destination, distinct from OFFER_PROPERTIES' MORE_PHOTO(280)."),
-    PropertyBinding(235, "PROP_235", PANDA_MANAGED, "TV type/display technology label (reference 992: 'SQD-Mini LED'); see CATALOG_CHARACTERISTICS['type']."),
-    PropertyBinding(163, "PROP_163", PANDA_MANAGED, "Screen diagonal, formatted (reference 992: '65\" (165 см)'); see CATALOG_CHARACTERISTICS['screen_diagonal']."),
-    PropertyBinding(147, "PROP_147", PANDA_MANAGED, "Refresh rate, Hz (reference 992: '144 Гц'); see CATALOG_CHARACTERISTICS['refresh_rate_hz']."),
-    PropertyBinding(144, "PROP_144", PANDA_MANAGED, "HD resolution label (reference 992: '4K UHD'); see CATALOG_CHARACTERISTICS['hd_resolution']."),
-    PropertyBinding(210, "PROP_210", PANDA_MANAGED, "Resolution, pixels (reference 992: '3840x2160'); see CATALOG_CHARACTERISTICS['resolution']."),
-    PropertyBinding(250, "PROP_250", PANDA_MANAGED, "Backlight type (reference 992: 'Mini LED'); see CATALOG_CHARACTERISTICS['backlight_type']."),
-    PropertyBinding(248, "PROP_248", PANDA_MANAGED, "Display/extended screen technology (reference 992: 'QLED'); see CATALOG_CHARACTERISTICS['display_technology']/['extended_screen_technology']."),
-    PropertyBinding(166, "PROP_166", PANDA_MANAGED, "Panel/matrix type (reference 992: 'HVA'); see CATALOG_CHARACTERISTICS['panel_type']/['matrix_type']."),
-    PropertyBinding(260, "PROP_260", PANDA_MANAGED, "Sound features (reference 992: 'B&O, Dolby Atmos, DTS:X'); see CATALOG_CHARACTERISTICS['sound_features']."),
-    PropertyBinding(247, "PROP_247", PANDA_MANAGED, "Sound power (reference 992: '40 Вт'); see CATALOG_CHARACTERISTICS['sound_power']."),
-    PropertyBinding(160, "PROP_160", PANDA_MANAGED, "Speaker count (reference 992: '2'); see CATALOG_CHARACTERISTICS['speaker_count']."),
-    PropertyBinding(187, "PROP_187", PANDA_MANAGED, "HDMI version (reference 992: '2.1'); see CATALOG_CHARACTERISTICS['hdmi_version']."),
-    PropertyBinding(253, "PROP_253", PANDA_MANAGED, "Wireless interfaces (reference 992: 'Bluetooth, Wi-Fi'); see CATALOG_CHARACTERISTICS['wireless_interfaces']."),
-    PropertyBinding(178, "PROP_178", PANDA_MANAGED, "Smart TV platform (reference 992: 'Google TV'); see CATALOG_CHARACTERISTICS['smart_tv_platform']."),
-    PropertyBinding(221, "PROP_221", PANDA_MANAGED, "Digital TV tuner support (reference 992: 'DVB-C,DVB-S,DVB-S2,DVB-T,DVB-T2,analog'); see CATALOG_CHARACTERISTICS['digital_tv_support']."),
-    PropertyBinding(258, "PROP_258", PANDA_MANAGED, "Feature list (reference 992: gaming/hotel/timer/voice/smartphone-related features); see CATALOG_CHARACTERISTICS['features']."),
-    PropertyBinding(184, "PROP_184", PANDA_MANAGED, "VESA mount, mm (reference 992: '300×300 мм'); see CATALOG_CHARACTERISTICS['vesa_mount']."),
-    PropertyBinding(175, "PROP_175", PANDA_MANAGED, "Voice control assistant (reference 992: 'Google Assistant'); see CATALOG_CHARACTERISTICS['voice_control']."),
-    PropertyBinding(186, "PROP_186", PANDA_MANAGED, "Power consumption, W (reference 992: '400 Вт'); see CATALOG_CHARACTERISTICS['power_consumption']."),
-    PropertyBinding(177, "PROP_177", PANDA_MANAGED, "Dimensions with stand, mm (reference 992: '1436 x 860 x 368 мм'); see CATALOG_CHARACTERISTICS['dimensions_with_stand']."),
-    PropertyBinding(203, "PROP_203", PANDA_MANAGED, "Weight with stand, kg (reference 992: '30.4 кг'); see CATALOG_CHARACTERISTICS['weight_with_stand']."),
-    PropertyBinding(189, "PROP_189", PANDA_MANAGED, "Dimensions without stand, mm (reference 992: '1436 x 824 x 50 мм'); see CATALOG_CHARACTERISTICS['dimensions_without_stand']."),
-    PropertyBinding(159, "PROP_159", PANDA_MANAGED, "Weight without stand, kg (reference 992: '28.4 кг'); see CATALOG_CHARACTERISTICS['weight_without_stand']."),
-    PropertyBinding(157, "PROP_157", PANDA_MANAGED, "Country of origin (reference 992: 'Китай'); see CATALOG_CHARACTERISTICS['country_of_origin']."),
-    PropertyBinding(252, "PROP_252", PANDA_MANAGED, "Service life / warranty period (reference 992: '5 лет'); see CATALOG_CHARACTERISTICS['service_life']."),
+    # Canonical LIVE TV characteristic destinations (audit 2026-09-23).
+    # Only properties confirmed simultaneously by current IBLOCK 14
+    # metadata, current Aspro behavior and pre-Panda reference televisions
+    # are PANDA_MANAGED. Everything else remains UNMANAGED_PRESERVE.
+    PropertyBinding(147, "PROP_159", PANDA_MANAGED, "Вес, кг; canonical TV weight property."),
+    PropertyBinding(154, "PROP_2053", PANDA_MANAGED, "Диагональ дисплея, см."),
+    PropertyBinding(156, "PROP_2054", PANDA_MANAGED, "Разрешение экрана, пикс; requires explicit WxH pixel value."),
+    PropertyBinding(174, "PROP_2084", PANDA_MANAGED, "Страна производства."),
+    PropertyBinding(206, "PROP_301", PANDA_MANAGED, "Операционная система."),
+    PropertyBinding(209, "PROP_304", PANDA_MANAGED, "Поддержка Smart TV."),
+    PropertyBinding(210, "PROP_305", PANDA_MANAGED, "Wi-Fi."),
     # NOTE: property 154 remains bound to 'screen_diagonal_cm'/PROP_2053
     # above (Block 5.6 pass); the reference element's real PROPERTY_154
     # value is a ports/interfaces list, not a screen diagonal -- this
@@ -909,57 +883,19 @@ class CharacteristicBinding:
 # Panda may still carry that source data, it is simply never written to a
 # guessed property.
 CATALOG_CHARACTERISTICS: tuple[CharacteristicBinding, ...] = (
+    # Canonical LIVE TV schema audit, 2026-09-23:
+    # current IBLOCK 14 metadata + Aspro output + pre-Panda reference TVs
+    # Mirt 174 / Makaria 194 are the source of truth. Historical
+    # form_element_14 aliases are intentionally NOT writable because the
+    # live audit proved many labels pointed at unrelated cross-category
+    # properties (for example property147 is really "Вес, кг").
+    CharacteristicBinding("weight_kg", 147, "PROP_159", "Вес, кг", unit="kg"),
     CharacteristicBinding("screen_diagonal_cm", 154, "PROP_2053", "Диагональ дисплея, см", unit="cm"),
     CharacteristicBinding("screen_resolution", 156, "PROP_2054", "Разрешение экрана, пикс", unit="px (WxH)"),
+    CharacteristicBinding("country_of_origin", 174, "PROP_2084", "Страна производства"),
     CharacteristicBinding("operating_system", 206, "PROP_301", "Операционная система"),
     CharacteristicBinding("smart_tv_support", 209, "PROP_304", "Поддержка Smart TV"),
-    CharacteristicBinding("color", 246, "COLOR_REF2", "Цвет"),
-    # SIMPLE_PRODUCT TV contract-alignment pass (module docstring item J,
-    # ticket T-F79758 follow-up): semantic labels come from the real
-    # production admin form configuration (form_element_14), each
-    # cross-checked against a real, non-empty value on reference element
-    # 992 (never a label-only guess). ``bitrix_name`` here is Panda's own
-    # semantic field name from the ticket's verified TV property map
-    # (the form's exact Russian admin label text was not independently
-    # captured for these -- only the property id + example value were),
-    # kept in that spirit as documentation evidence, same role as the
-    # Russian admin labels above.
-    CharacteristicBinding("type", 235, "PROP_235", "TV type / display technology label (e.g. 'SQD-Mini LED')"),
-    CharacteristicBinding("screen_diagonal", 163, "PROP_163", "Screen diagonal, formatted (e.g. '65\" (165 см)')"),
-    CharacteristicBinding("refresh_rate_hz", 147, "PROP_147", "Refresh rate (e.g. '144 Гц')", unit="Hz"),
-    CharacteristicBinding("hd_resolution", 144, "PROP_144", "HD resolution label (e.g. '4K UHD')"),
-    CharacteristicBinding("resolution", 210, "PROP_210", "Resolution, pixels (e.g. '3840x2160')", unit="px (WxH)"),
-    CharacteristicBinding("backlight_type", 250, "PROP_250", "Backlight type (e.g. 'Mini LED')"),
-    CharacteristicBinding("display_technology", 248, "PROP_248", "Display/extended screen technology (e.g. 'QLED')"),
-    CharacteristicBinding("extended_screen_technology", 248, "PROP_248", "Display/extended screen technology (e.g. 'QLED')"),
-    CharacteristicBinding("panel_type", 166, "PROP_166", "Panel/matrix type (e.g. 'HVA')"),
-    CharacteristicBinding("matrix_type", 166, "PROP_166", "Panel/matrix type (e.g. 'HVA')"),
-    CharacteristicBinding("sound_features", 260, "PROP_260", "Sound features (e.g. 'B&O, Dolby Atmos, DTS:X')"),
-    CharacteristicBinding("sound_power", 247, "PROP_247", "Sound power (e.g. '40 Вт')", unit="W"),
-    CharacteristicBinding("speaker_count", 160, "PROP_160", "Speaker count (e.g. '2')"),
-    CharacteristicBinding("hdmi_version", 187, "PROP_187", "HDMI version (e.g. '2.1')"),
-    CharacteristicBinding("wireless_interfaces", 253, "PROP_253", "Wireless interfaces (e.g. 'Bluetooth, Wi-Fi')"),
-    CharacteristicBinding("smart_tv_platform", 178, "PROP_178", "Smart TV platform (e.g. 'Google TV')"),
-    CharacteristicBinding("digital_tv_support", 221, "PROP_221", "Digital TV tuner support (e.g. 'DVB-C,DVB-S,DVB-S2,DVB-T,DVB-T2,analog')"),
-    CharacteristicBinding("features", 258, "PROP_258", "Feature list (gaming/hotel/timer/voice/smartphone-related)"),
-    CharacteristicBinding("vesa_mount", 184, "PROP_184", "VESA mount (e.g. '300×300 мм')", unit="mm"),
-    CharacteristicBinding("voice_control", 175, "PROP_175", "Voice control assistant (e.g. 'Google Assistant')"),
-    CharacteristicBinding("power_consumption", 186, "PROP_186", "Power consumption (e.g. '400 Вт')", unit="W"),
-    CharacteristicBinding("dimensions_with_stand", 177, "PROP_177", "Dimensions with stand (e.g. '1436 x 860 x 368 мм')", unit="mm"),
-    CharacteristicBinding("weight_with_stand", 203, "PROP_203", "Weight with stand (e.g. '30.4 кг')", unit="kg"),
-    CharacteristicBinding("dimensions_without_stand", 189, "PROP_189", "Dimensions without stand (e.g. '1436 x 824 x 50 мм')", unit="mm"),
-    CharacteristicBinding("weight_without_stand", 159, "PROP_159", "Weight without stand (e.g. '28.4 кг')", unit="kg"),
-    CharacteristicBinding("country_of_origin", 157, "PROP_157", "Country of origin (e.g. 'Китай')"),
-    CharacteristicBinding("service_life", 252, "PROP_252", "Service life / warranty period (e.g. '5 лет')"),
-    # Deliberately NOT added (module docstring item J): 'ports'/
-    # 'interfaces' (property 154 is already bound to a different,
-    # already-shipped semantic key -- 'screen_diagonal_cm' -- and
-    # resolving that conflict is a schema correction outside this bounded
-    # task's scope) and a second 'screen_resolution'-shaped binding on
-    # property 183 (the existing 'screen_resolution' key is already
-    # verified on property 156 with a different value shape -- reusing
-    # the same key for a second property would be exactly the guessed
-    # duplicate-destination ambiguity this module refuses to resolve).
+    CharacteristicBinding("wifi_support", 210, "PROP_305", "Wi-Fi"),
 )
 
 _CHARACTERISTIC_BY_KEY = {c.key: c for c in CATALOG_CHARACTERISTICS}
@@ -967,6 +903,25 @@ _CHARACTERISTIC_BY_KEY = {c.key: c for c in CATALOG_CHARACTERISTICS}
 
 def characteristic_binding(key: str) -> CharacteristicBinding | None:
     return _CHARACTERISTIC_BY_KEY.get(key)
+
+
+def _canonical_tv_property_value(key: str, value):
+    """Normalize only values whose current Bitrix/Aspro storage vocabulary
+    is proven by the 2026-09-23 LIVE audit. Unknown shapes fail closed in
+    the enrichment layer and never reach this function."""
+    text = str(value).strip()
+    lowered = text.casefold()
+    if key == "smart_tv_support":
+        if lowered in {"yes", "true", "supported", "да", "есть", "поддерживается"}:
+            return "Есть"
+        if lowered in {"no", "false", "not supported", "нет", "не поддерживается"}:
+            return "Нет"
+    if key == "wifi_support":
+        if lowered in {"yes", "true", "supported", "да", "есть", "поддерживается"}:
+            return "Встроенный"
+        if lowered in {"no", "false", "not supported", "нет", "не поддерживается"}:
+            return "Нет"
+    return value
 
 
 def map_characteristics_to_properties(characteristics) -> tuple[dict, list[str]]:
@@ -988,7 +943,7 @@ def map_characteristics_to_properties(characteristics) -> tuple[dict, list[str]]
         if binding is None:
             unmapped.append(key)
             continue
-        fields[f"property{binding.property_id}"] = value
+        fields[f"property{binding.property_id}"] = _canonical_tv_property_value(key, value)
     return fields, unmapped
 
 
