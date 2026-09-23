@@ -84,6 +84,30 @@ def test_existing_brand_is_reused_not_added():
     assert transport.brand_adds == 0
 
 
+def test_simple_product_brand_article_and_gallery_use_confirmed_catalog_fields():
+    transport = BrandTransport(sections=[{'id': 70, 'name': 'Телевизоры', 'code': 'televizory'}])
+    pictures = ({'filename': 'gallery.jpg', 'base64': 'Z2FsbGVyeQ=='},)
+    request = _request(brand_id='', has_variant_offer=False, gallery_pictures=pictures, subcategory='Телевизоры')
+    with _LiveEnv(), patch.object(BoundedHttpClient, 'request', side_effect=transport):
+        bridge, _ = _bridge_and_activation()
+        preview = prepare_single_product_write(bridge, tenant_id=TARGET_TENANT, request=request)
+        assert preview['status'] == STATUS_REQUIRES_APPROVAL
+        assert transport.brand_adds == transport.product_add_count == 0
+        result = execute_single_product_write(
+            bridge, tenant_id=TARGET_TENANT, request=request, approved=True,
+            expected_approval_signature=build_approval_signature(preview),
+        )
+    assert result['status'] == STATUS_WRITE_VERIFIED
+    fields = next(body['fields'] for method, body in transport.calls if method == 'catalog.product.add')
+    assert fields['property241'] == request.sku
+    assert fields['property124'] == [{'value': {'fileData': ['gallery.jpg', 'Z2FsbGVyeQ==']}}]
+    assert fields['property100'] == 601
+    assert fields['active'] == 'N'
+    assert 'property283' not in fields and 'property280' not in fields
+    assert transport.offer_add_count == 0
+    assert result['read_back']['observed']['brand_id'] == '601'
+
+
 def test_ambiguous_or_unavailable_lookup_blocks_all_writes():
     transport = BrandTransport(fail_preview=True)
     with _LiveEnv(), patch.object(BoundedHttpClient, 'request', side_effect=transport):

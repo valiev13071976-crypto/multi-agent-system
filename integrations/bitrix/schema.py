@@ -779,6 +779,12 @@ class PropertyBinding:
 # UNMANAGED_PRESERVE by ``property_ownership`` below -- unknown data is
 # never assumed writable.
 CATALOG_PRODUCT_PROPERTIES: tuple[PropertyBinding, ...] = (
+    # Current admin metadata supplied by the owner, 2026-09-23:
+    # IBLOCK 14 / 241: Артикул, CML2_ARTICLE, S, MULTIPLE=N;
+    # IBLOCK 14 / 124: Картинки, MORE_PHOTO, F, MULTIPLE=Y.
+    # These are product properties, separate from offer properties 283/280.
+    PropertyBinding(CML2_ARTICLE_PROPERTY_ID, CML2_ARTICLE_PROPERTY_CODE, PANDA_MANAGED, "Confirmed IBLOCK 14 article: string, single value."),
+    PropertyBinding(SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_ID, SIMPLE_PRODUCT_MORE_PHOTO_PROPERTY_CODE, PANDA_MANAGED, "Confirmed IBLOCK 14 gallery: file, multiple values."),
     PropertyBinding(97, "MINIMUM_PRICE", DERIVED, "Bitrix-computed rollup across offers; never written directly."),
     PropertyBinding(98, "MAXIMUM_PRICE", DERIVED, "Bitrix-computed rollup across offers; never written directly."),
     PropertyBinding(99, "HIT", BITRIX_MANAGED, "Merchandising flag curated by site editors."),
