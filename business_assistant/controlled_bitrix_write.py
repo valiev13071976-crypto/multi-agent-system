@@ -761,14 +761,36 @@ def prepare_single_product_write(
             # metadata and already-derived product classification signals:
             # no webhook URL, credentials, raw HTTP body, media bytes, or
             # customer/private data.
+            evidence_concepts = sorted(schema.derive_category_concepts(section_signals))
+            direct_probe = []
+            if "tv" in evidence_concepts:
+                try:
+                    probe_result = bridge.read_sections(
+                        tenant_id=tenant_id,
+                        connection_id=connection_id,
+                        section_ids=[61, 70],
+                    )
+                    probe_sections = probe_result.get("items") or probe_result.get("sections") or []
+                    direct_probe = [
+                        {
+                            "id": section.get("id"),
+                            "name": section.get("name"),
+                            "parent": section.get("iblockSectionId") or section.get("parentSectionId"),
+                        }
+                        for section in probe_sections
+                    ]
+                except Exception as probe_exc:  # noqa: BLE001
+                    direct_probe = [{"error": getattr(probe_exc, "code", type(probe_exc).__name__)}]
+
             logger.warning(
                 "bitrix_section_resolution_failed reason=%s category=%r subcategory=%r "
-                "evidence_concepts=%s sections_count=%s sections=%s",
+                "evidence_concepts=%s sections_count=%s direct_probe=%s sections=%s",
                 exc.code,
                 str(request.category_source or ""),
                 str(request.subcategory or ""),
-                sorted(schema.derive_category_concepts(section_signals)),
+                evidence_concepts,
                 len(sections),
+                direct_probe,
                 [
                     {
                         "id": section.get("id"),
