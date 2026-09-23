@@ -112,6 +112,13 @@ class ResolveSectionIdUnitTests(unittest.TestCase):
             schema.resolve_section_id(subcategory="Холодильники", sections=[TV_SECTION, ELECTRONICS_SECTION])
         self.assertEqual(ctx.exception.code, "no_matching_section_found")
 
+    def test_no_supplier_category_can_resolve_from_prepared_product_evidence(self):
+        resolved = schema.resolve_section_id(
+            sections=[TV_SECTION, ELECTRONICS_SECTION],
+            signals=("TCL 65RM7L", "operating_system", "Google TV", "screen_resolution", "4K"),
+        )
+        self.assertEqual(resolved["section_id"], TV_SECTION_ID)
+        self.assertEqual(resolved["match_kind"], "product_evidence_concept")
     def test_no_category_or_subcategory_supplied_fails_closed(self):
         with self.assertRaises(schema.SectionResolutionError) as ctx:
             schema.resolve_section_id(sections=[TV_SECTION])
@@ -207,6 +214,48 @@ class SectionResolutionOrchestrationTests(unittest.TestCase):
         self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
         self.assertEqual(result["section_id_written"], 61)
 
+    def test_site_ready_card_without_supplier_category_uses_characteristic_value_evidence(self):
+        transport = _RecordingTransport(sections=[TV_SECTION, ELECTRONICS_SECTION])
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(
+                bridge,
+                tenant_id=TARGET_TENANT,
+                request=_request(
+                    category_source="",
+                    subcategory="",
+                    short_description="Prepared site card",
+                    characteristics={"operating_system": "Google TV", "screen_resolution": "4K"},
+                ),
+                approved=True,
+            )
+
+        self.assertEqual(result["status"], STATUS_WRITE_VERIFIED)
+        self.assertEqual(result["resolved_section_id"], TV_SECTION_ID)
+        self.assertEqual(result["section_id_written"], TV_SECTION_ID)
+        _, product_body = next((m, b) for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"][schema.SECTION_FIELD], TV_SECTION_ID)
+
+    def test_site_ready_card_with_no_resolvable_section_never_creates_at_root(self):
+        transport = _RecordingTransport(sections=[TV_SECTION, ELECTRONICS_SECTION])
+        with _LiveEnv(), patch.object(BoundedHttpClient, "request", side_effect=transport):
+            bridge, _ = _bridge_and_activation()
+            result = execute_single_product_write(
+                bridge,
+                tenant_id=TARGET_TENANT,
+                request=_request(
+                    category_source="",
+                    subcategory="",
+                    short_description="Prepared site card",
+                    characteristics={"color": "Black"},
+                ),
+                approved=True,
+            )
+
+        self.assertEqual(result["status"], STATUS_UNRESOLVED)
+        self.assertIn(result["reason"], {"section_name_not_supplied", "no_matching_section_found"})
+        self.assertFalse(result.get("mutated"))
+        self.assertNotIn("catalog.product.add", [m for m, _ in transport.calls])
     def test_ambiguous_section_fails_closed_with_zero_mutating_calls(self):
         duplicate_tv = dict(TV_SECTION, id=71)
         transport = _RecordingTransport(sections=[TV_SECTION, duplicate_tv])
