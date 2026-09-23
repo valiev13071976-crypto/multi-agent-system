@@ -606,9 +606,6 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
     candidate = subcategory.strip() if subcategory and subcategory.strip() else (
         category.strip() if category and category.strip() else ""
     )
-    if not candidate:
-        raise SectionResolutionError("section_name_not_supplied", "no category/subcategory supplied to resolve")
-
     evidence_concepts = derive_category_concepts(signals)
 
     sections = list(sections)
@@ -628,6 +625,43 @@ def resolve_section_id(*, category: str = "", subcategory: str = "", sections: l
         name = str(section.get("name") or "").strip().casefold()
         if name:
             by_name.setdefault(name, []).append(section)
+
+    # Site-ready product writes may come from supplier files that carry a
+    # strong model/SKU but no category column at all. In that case use only
+    # already-prepared product evidence (title + canonical characteristic
+    # keys/values) against the EXISTING section tree. This is still
+    # fail-closed: exactly one concept/section must survive; nothing is
+    # guessed and no section id is ever invented.
+    if not candidate:
+        if not evidence_concepts:
+            raise SectionResolutionError(
+                "section_name_not_supplied",
+                "no category/subcategory supplied and prepared product evidence does not identify a catalog section",
+            )
+        matches = _sections_for_concepts(evidence_concepts, sections)
+        if len(matches) > 1:
+            deepest = _deepest_of_single_lineage(matches, sections)
+            matches = [deepest] if deepest is not None else matches
+        if len(matches) == 1:
+            match = matches[0]
+            return {
+                "section_id": match.get("id"),
+                "name": match.get("name"),
+                "code": match.get("code"),
+                "matched_on": "",
+                "match_kind": "product_evidence_concept",
+            }
+        if len(matches) > 1:
+            raise SectionResolutionError(
+                "ambiguous_section_name",
+                f"{len(matches)} existing Bitrix sections match prepared product evidence "
+                f"({', '.join(sorted(str(m.get('name')) for m in matches))}); refusing to guess which one",
+            )
+        raise SectionResolutionError(
+            "no_matching_section_found",
+            f"prepared product evidence did not match any existing Bitrix section "
+            f"(checked {len(sections)} sections read from catalog.section.list)",
+        )
 
     matches = by_name.get(candidate.casefold()) or []
     match_kind = "exact_name"
