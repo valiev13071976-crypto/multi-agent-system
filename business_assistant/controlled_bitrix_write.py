@@ -711,48 +711,43 @@ def prepare_single_product_write(
     # resolvable) instead of skipping this lookup outright.
     section_id = None
     category_has_destination = False
-    if request.subcategory or request.category_source:
-        if bridge.environment == ENV_LIVE:
-            try:
-                # Idempotent, LIVE-only bootstrap (no-op if already active)
-                # -- section resolution below is the first governed
-                # operation this preview performs, and it needs an ACTIVE
-                # connection just as much as the later actual write does
-                # (``execute_single_product_write`` calls this again right
-                # before ``sync_product``; calling it twice is harmless).
-                # Without this, a preview-only call (before approval) would
-                # always fail closed with IntegrationNotConfiguredError on
-                # a tenant's very first request, even with correctly
-                # configured LIVE credentials.
-                bridge.ensure_live_connection_ready(tenant_id=tenant_id)
-                sections_result = bridge.read_sections(tenant_id=tenant_id, connection_id=connection_id)
-            except Exception as exc:  # noqa: BLE001 -- normalize, never leak a raw adapter exception from a preview
-                return {
-                    "status": STATUS_UNRESOLVED,
-                    "reason": "section_lookup_failed",
-                    "error": getattr(exc, "code", type(exc).__name__),
-                }
-            sections = sections_result.get("items") or sections_result.get("sections") or []
-            try:
-                resolved = schema.resolve_section_id(
-                    category=request.category_source,
-                    subcategory=request.subcategory,
-                    sections=sections,
-                    # A supplier price list's category column is only ONE
-                    # classification signal, and it is often a broad
-                    # internal code ("CE") that names no section at all.
-                    # These are the product-type signals the prepared card
-                    # ALREADY carries -- its title and the canonical
-                    # characteristic keys enrichment resolved -- reused
-                    # here as evidence; nothing is fetched or inferred
-                    # anew during the write.
-                    signals=(title, *dict(request.characteristics or {}).keys()),
-                )
-            except schema.SectionResolutionError as exc:
-                return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
-            section_id = resolved["section_id"]
-            category_has_destination = True
-
+    if bridge.environment == ENV_LIVE:
+        try:
+            # A LIVE site write is never allowed to fall through to the
+            # catalog root. Resolve one existing section before approval,
+            # even when the supplier file omitted category/subcategory.
+            # The resolver may use only already-prepared product evidence
+            # and still fails closed unless exactly one real section matches.
+            bridge.ensure_live_connection_ready(tenant_id=tenant_id)
+            sections_result = bridge.read_sections(tenant_id=tenant_id, connection_id=connection_id)
+        except Exception as exc:  # noqa: BLE001
+            return {
+                "status": STATUS_UNRESOLVED,
+                "reason": "section_lookup_failed",
+                "error": getattr(exc, "code", type(exc).__name__),
+            }
+        sections = sections_result.get("items") or sections_result.get("sections") or []
+        characteristic_items = dict(request.characteristics or {})
+        section_signals = (
+            title,
+            *characteristic_items.keys(),
+            *characteristic_items.values(),
+        )
+        try:
+            resolved = schema.resolve_section_id(
+                category=request.category_source,
+                subcategory=request.subcategory,
+                sections=sections,
+                signals=section_signals,
+            )
+        except schema.SectionResolutionError as exc:
+            return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
+        section_id = resolved["section_id"]
+        category_has_destination = True
+    elif request.subcategory or request.category_source:
+        # Non-LIVE adapters do not have the authoritative real section tree.
+        # Keep their historical preview behavior unchanged.
+        category_has_destination = False
     retail_amount = _normalize_money(request.retail_price)
     if retail_amount is None:
         # Still fails closed on the retail price exactly as before (never
