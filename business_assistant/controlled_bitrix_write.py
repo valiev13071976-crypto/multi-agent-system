@@ -96,6 +96,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Mapping, Sequence
@@ -120,6 +121,8 @@ from integrations.bitrix.product_bridge import (
     SYNC_UPDATE,
     BitrixProductBridge,
 )
+
+logger = logging.getLogger(__name__)
 
 STATUS_REQUIRES_APPROVAL = "REQUIRES_APPROVAL"
 STATUS_UNRESOLVED = "UNRESOLVED"
@@ -753,6 +756,28 @@ def prepare_single_product_write(
                 signals=section_signals,
             )
         except schema.SectionResolutionError as exc:
+            # Temporary production diagnostics for the bounded
+            # section-resolution defect. Deliberately log only safe catalog
+            # metadata and already-derived product classification signals:
+            # no webhook URL, credentials, raw HTTP body, media bytes, or
+            # customer/private data.
+            logger.warning(
+                "bitrix_section_resolution_failed reason=%s category=%r subcategory=%r "
+                "evidence_concepts=%s sections_count=%s sections=%s",
+                exc.code,
+                str(request.category_source or ""),
+                str(request.subcategory or ""),
+                sorted(schema.derive_category_concepts(section_signals)),
+                len(sections),
+                [
+                    {
+                        "id": section.get("id"),
+                        "name": section.get("name"),
+                        "parent": section.get("iblockSectionId") or section.get("parentSectionId"),
+                    }
+                    for section in sections
+                ],
+            )
             return {"status": STATUS_UNRESOLVED, "reason": exc.code, "detail": str(exc)}
         section_id = resolved["section_id"]
         category_has_destination = True
