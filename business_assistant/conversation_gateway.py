@@ -2231,6 +2231,8 @@ class WorkflowPandaConversationGateway:
             is_explicit_bitrix_write_confirmation,
         )
         from business_assistant.controlled_bitrix_write import (
+            STATUS_REQUIRES_APPROVAL,
+            build_approval_signature,
             build_write_request_from_fields,
             prepare_single_product_write,
         )
@@ -2363,12 +2365,33 @@ class WorkflowPandaConversationGateway:
                     characteristic_status=characteristic_status,
                     enrichment_preview=enrichment_preview,
                 )
+                rendered.extend(["", f"=== {index}. {sku} ===", rendered_plan])
+
+                # READY means the exact write validator accepted the card,
+                # not merely that enrichment/serialization completed. This
+                # prevents an UNRESOLVED card from ever being counted or
+                # frozen as approved-to-create.
+                if write_preview.get("status") != STATUS_REQUIRES_APPROVAL:
+                    preparation_failures.append(
+                        {
+                            "sku": sku,
+                            "reason": str(
+                                write_preview.get("reason")
+                                or write_preview.get("status")
+                                or "write_preview_not_ready"
+                            ),
+                        }
+                    )
+                    rendered.append(
+                        "Товар НЕ включён в список на создание: предпросмотр записи не готов к подтверждению."
+                    )
+                    continue
 
                 frozen = dict(row)
                 frozen["title"] = str(write_request.title or safe_title)
                 frozen["prepared_write_request"] = serialized
+                frozen["approved_write_signature"] = build_approval_signature(write_preview)
                 prepared_rows.append(frozen)
-                rendered.extend(["", f"=== {index}. {sku} ===", rendered_plan])
             except Exception as exc:
                 logger.exception("batch_bitrix_subset_row_failed sku=%s", sku)
                 preparation_failures.append({
@@ -2789,12 +2812,26 @@ class WorkflowPandaConversationGateway:
             # tenant+sku+title-deterministic default key rather than any
             # ephemeral per-turn id, keeping this row's create durably
             # idempotent on Bitrix's own side too.
+            approved_signature = row.get("approved_write_signature")
+            if prepared_write_request and not approved_signature:
+                # A prepared site-card row from an older deployment has no
+                # proof of what the owner actually previewed. Fail closed
+                # and require a fresh preview rather than silently applying
+                # the post-#126 contract to stale approval state.
+                failed_count += 1
+                row_lines.append(
+                    f"  - {row_prefix}{sku_label} — {title_label}: не создан "
+                    "(предпросмотр устарел, требуется повторный предпросмотр)"
+                )
+                continue
+
             result = execute_single_product_write(
                 self._bitrix_bridge,
                 tenant_id=tenant_id,
                 request=write_request,
                 approved=True,
                 idempotency_key="",
+                expected_approval_signature=approved_signature if isinstance(approved_signature, Mapping) else None,
             )
             if result.get("mutated"):
                 created_count += 1
@@ -2804,10 +2841,16 @@ class WorkflowPandaConversationGateway:
                 )
             else:
                 failed_count += 1
-                row_lines.append(
-                    f"  - {row_prefix}{sku_label} — {title_label}: не создан "
-                    f"({result.get('status') or 'unknown'})"
-                )
+                if result.get("status") == "APPROVAL_PLAN_CHANGED":
+                    row_lines.append(
+                        f"  - {row_prefix}{sku_label} — {title_label}: не создан "
+                        "(план записи изменился после предпросмотра, требуется новый предпросмотр)"
+                    )
+                else:
+                    row_lines.append(
+                        f"  - {row_prefix}{sku_label} — {title_label}: не создан "
+                        f"({result.get('status') or 'unknown'})"
+                    )
 
         if task is not None:
             mark_executed(self._action_store, task, failed=(created_count == 0 and bool(ready_rows)))
