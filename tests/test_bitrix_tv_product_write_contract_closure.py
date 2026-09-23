@@ -207,6 +207,20 @@ class ElementIdentityFieldMappingTests(unittest.TestCase):
         self.assertEqual(product_body["fields"][brand_property.select_key], TARGET_BRAND)
         self.assertEqual(result["brand"], TARGET_BRAND)
 
+    def test_brand_requires_verified_iblock12_element_id(self):
+        result, transport = _execute(_tv_request(brand_id=""))
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertNotIn("property100", product_body["fields"])
+        not_written = {item["field"]: item["reason"] for item in result["not_written"]}
+        self.assertIn("brand", not_written)
+        self.assertIn("requires_a_verified_numeric_element_id", not_written["brand"])
+
+    def test_verified_brand_id_is_written_as_numeric_element_link(self):
+        result, transport = _execute(_tv_request(brand_id="100"))
+        product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
+        self.assertEqual(product_body["fields"]["property100"], 100)
+        self.assertNotIn("brand", {item["field"] for item in result["not_written"]})
+
     def test_article_sku_writes_to_the_base_product_cml2_article_property(self):
         """SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
         follow-up, production reference element 992/IBLOCK 14): article/
