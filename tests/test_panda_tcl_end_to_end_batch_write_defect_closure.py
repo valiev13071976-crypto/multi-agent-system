@@ -770,6 +770,7 @@ class BitrixBatchSubsetPreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({r.get("sku") for r in frozen}, {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
         self.assertTrue(all(r.get("title") for r in frozen))
         self.assertTrue(all(r.get("prepared_write_request") for r in frozen))
+        self.assertTrue(all(r.get("approved_write_signature") for r in frozen))
 
         confirm = await panda.respond(
             ConversationRequest(
@@ -797,6 +798,127 @@ class BitrixBatchSubsetPreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase):
         rerun_check = rerun.metadata.get("bitrix_existence_check") or {}
         self.assertEqual({r["sku"] for r in rerun_check.get("existing") or []}, {SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2})
         self.assertEqual(rerun_check.get("new") or [], [])
+
+
+    async def test_unresolved_preview_row_is_never_counted_or_frozen_as_ready(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        await self._upload_two_new(panda, artifact_service)
+
+        await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="unresolved-r1",
+                conversation_id=CONV,
+            )
+        )
+        before_catalog_size = len(store.catalog(TENANT))
+
+        import business_assistant.product_enrichment_bridge as enrichment_bridge
+
+        original_prepare = enrichment_bridge.prepare_complete_card
+        calls = {"n": 0}
+
+        async def _one_unresolved(**kwargs):
+            card = await original_prepare(**kwargs)
+            calls["n"] += 1
+            if calls["n"] == 1:
+                card = dict(card)
+                card["write_preview"] = {
+                    "status": "UNRESOLVED",
+                    "reason": "synthetic_unresolved_section",
+                }
+            return card
+
+        with mock.patch.object(enrichment_bridge, "prepare_complete_card", side_effect=_one_unresolved):
+            subset = await panda.respond(
+                ConversationRequest(
+                    text=(
+                        f"Подготовь для сайта только товары {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                        "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                        "Пока ничего не записывай."
+                    ),
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="unresolved-r2",
+                    conversation_id=CONV,
+                )
+            )
+
+        preview = subset.metadata.get("bitrix_batch_subset_preview") or {}
+        self.assertEqual(preview.get("count"), 1)
+        self.assertEqual(len(preview.get("failed") or []), 1)
+        self.assertIn("НЕ включён в список на создание", subset.text)
+
+        task = panda._action_store.get(tenant_id=TENANT, owner_id=OWNER, conversation_id=CONV)  # noqa: SLF001
+        frozen = list(task.parameters.get("bitrix_batch_ready_rows") or [])
+        self.assertEqual(len(frozen), 1)
+        self.assertTrue(frozen[0].get("approved_write_signature"))
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertFalse(subset.metadata.get("mutated"))
+
+    async def test_confirmation_blocks_when_recomputed_plan_drifted_from_approved_preview(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        await self._upload_two_new(panda, artifact_service)
+
+        await panda.respond(
+            ConversationRequest(
+                text=BATCH_CHECK_TEXT,
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="drift-r1",
+                conversation_id=CONV,
+            )
+        )
+        subset = await panda.respond(
+            ConversationRequest(
+                text=(
+                    f"Подготовь для сайта только товары {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                    "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                    "Пока ничего не записывай."
+                ),
+                tenant_id=TENANT,
+                user_id=OWNER,
+                request_id="drift-r2",
+                conversation_id=CONV,
+            )
+        )
+        self.assertEqual((subset.metadata.get("bitrix_batch_subset_preview") or {}).get("count"), 2)
+        before_catalog_size = len(store.catalog(TENANT))
+
+        import business_assistant.controlled_bitrix_write as controlled_write
+
+        original_prepare = controlled_write.prepare_single_product_write
+
+        def _drifted_prepare(*args, **kwargs):
+            preview = original_prepare(*args, **kwargs)
+            if preview.get("status") == controlled_write.STATUS_REQUIRES_APPROVAL:
+                preview = dict(preview)
+                target = dict(preview.get("target_product") or {})
+                target["title"] = str(target.get("title") or "") + " DRIFT"
+                preview["target_product"] = target
+            return preview
+
+        with mock.patch.object(controlled_write, "prepare_single_product_write", side_effect=_drifted_prepare):
+            confirm = await panda.respond(
+                ConversationRequest(
+                    text=BATCH_CONFIRM_TEXT,
+                    tenant_id=TENANT,
+                    user_id=OWNER,
+                    request_id="drift-r3",
+                    conversation_id=CONV,
+                )
+            )
+
+        result = confirm.metadata.get("bitrix_batch_create_result") or {}
+        self.assertEqual(result.get("created"), 0)
+        self.assertEqual(result.get("failed"), 2)
+        self.assertIn("план записи изменился после предпросмотра", confirm.text)
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size)
+        self.assertFalse(confirm.metadata.get("mutated"))
 
 
 class TclStyleBatchWriteAndRerunAcceptanceTests(unittest.IsolatedAsyncioTestCase):
