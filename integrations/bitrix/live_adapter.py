@@ -269,6 +269,19 @@ class LiveBitrixAdapter(BitrixFixtureAdapter):
                 items.append(normalized)
             return self._envelope(items)
 
+        if operation == "section_get":
+            section_id = str(params.get("section_id") or params.get("id") or "").strip()
+            if not section_id or not section_id.lstrip("-").isdigit():
+                raise BitrixValidationError("section_id_required")
+            data = self.client.call(
+                "catalog.section.get",
+                credential_ref=credential_ref,
+                params={"id": int(section_id)},
+            )
+            result = data.get("result")
+            section = result.get("section") if isinstance(result, dict) else None
+            return self._envelope([section] if isinstance(section, dict) else [])
+
         if operation in ("section_read", "category_read"):
             # Sections belong to a specific IBLOCK too (products by default;
             # callers reading the offers-IBLOCK's own sections may pass
