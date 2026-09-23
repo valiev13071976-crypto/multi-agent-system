@@ -1403,6 +1403,18 @@ _BATCH_CREATE_TARGET_STEMS = (
     "new products",
 )
 
+# Natural-language plural batch targets. This intentionally recognizes the
+# BUSINESS SCOPE (multiple products), not one magic confirmation phrase:
+# "товары", "товаров", "обе позиции", "выбранные товары", etc. The
+# actual resolver still requires an active frozen FAMILY_EXCEL batch before
+# any write can execute, so this broader linguistic recognition cannot create
+# an ad-hoc batch or bypass preview/approval state.
+_BATCH_CREATE_PLURAL_TARGET_RE = re.compile(
+    r"\b(?:эти|все|оба|обе|выбранные|подготовленные|новые|these|all|both|selected|prepared|new)?\s*"
+    r"(?:товары|товаров|позиции|позиций|products|items)\b",
+    re.I,
+)
+
 
 def is_batch_bitrix_create_confirmation(text: str) -> bool:
     """True only for an explicit, unambiguous confirmation to create the
@@ -1422,7 +1434,10 @@ def is_batch_bitrix_create_confirmation(text: str) -> bool:
         return False
     if not _has_stem(blob, _BITRIX_TARGET_MARKER_STEMS):
         return False
-    if not _has_stem(blob, _BATCH_CREATE_TARGET_STEMS):
+    if not (
+        _has_stem(blob, _BATCH_CREATE_TARGET_STEMS)
+        or _BATCH_CREATE_PLURAL_TARGET_RE.search(blob)
+    ):
         return False
     return _has_stem(blob, _BITRIX_CREATE_VERB_STEMS) or bool(_BITRIX_WRITE_ACTION_RE.search(blob))
 
@@ -2393,32 +2408,26 @@ def resolve_action_turn(
     active = store.get(tenant_id=tenant, owner_id=owner, conversation_id=conv)
     has_spreadsheet_attachment = spreadsheet_attachment_count > 0
 
-    # PANDA -- first controlled production Bitrix product write (PR #43):
-    # checked unconditionally, before follow-up/continuation heuristics --
-    # an explicit, self-confirming Bitrix create instruction must never be
-    # reclassified by e.g. a REFERENT/TRANSFORM follow-up guess. This ONLY
-    # matches when the message itself carries all three explicit signals
-    # (see ``is_explicit_bitrix_write_confirmation``); it never fires for a
-    # bare "да"/"ок"/"давай"/"продолжай"/"делай дальше".
-    if is_explicit_bitrix_write_confirmation(current):
-        return resolve_bitrix_write_confirmation(
+    # Explicit batch approval is checked BEFORE the single-product write
+    # confirmation. Natural business language for a frozen multi-product
+    # preview does not have to say the historic magic phrase "эти новые
+    # товары"; e.g. "Подтверждаю создание в Bitrix только товаров A и B"
+    # is still a batch approval. The batch resolver itself remains fail-
+    # closed unless the active FAMILY_EXCEL task carries the exact frozen
+    # preview rows for the same dataset.
+    if is_batch_bitrix_create_confirmation(current):
+        return resolve_batch_bitrix_create_confirmation(
             current,
             active=active,
             store=store,
             request_id=request_id,
         )
 
-    # TCL.xlsx end-to-end defect closure (Step 5): the explicit BATCH
-    # create confirmation ("Подтверждаю: создай эти новые товары в
-    # Bitrix.") is checked immediately after the single-product write
-    # confirmation above, for the exact same reason -- an explicit,
-    # self-confirming write instruction must never be reclassified by a
-    # follow-up/continuation guess. ``is_batch_bitrix_create_confirmation``
-    # requires the PLURAL "эти/все новые товары" target, so it can never
-    # also satisfy ``is_explicit_bitrix_write_confirmation`` (singular "этот
-    # товар") -- the two are mutually exclusive by construction.
-    if is_batch_bitrix_create_confirmation(current):
-        return resolve_batch_bitrix_create_confirmation(
+    # PANDA -- controlled single-product Bitrix write. Checked only after
+    # the plural batch shape above, so a human plural confirmation can never
+    # be misrouted into the single-card path and receive "no prepared card".
+    if is_explicit_bitrix_write_confirmation(current):
+        return resolve_bitrix_write_confirmation(
             current,
             active=active,
             store=store,
