@@ -545,6 +545,53 @@ class DirectMultiSkuSitePreviewAcceptanceTests(unittest.IsolatedAsyncioTestCase)
     async def test_fresh_attachment_two_named_skus_previews_both_with_managed_agent_disabled(self):
         await self._assert_direct_multi_preview(managed_enabled=False, request_suffix="managed-off")
 
+    async def test_natural_plural_confirmation_after_two_sku_preview_executes_frozen_batch(self):
+        bridge, store = _bitrix_bridge_and_store()
+        panda, artifact_service = _panda(bridge)
+        ref = await _register_upload(artifact_service, content=_tcl_subset_two_new_no_title_bytes())
+        before_catalog_size = len(store.catalog(TENANT))
+
+        preview = await panda.respond(
+            ConversationRequest(
+                text=(
+                    f"Подготовь для сайта только товары {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                    "Покажи полный предпросмотр того, что будет записано в Bitrix. "
+                    "Пока ничего не записывай."
+                ),
+                tenant_id=TENANT, user_id=OWNER, request_id="natural-batch-r1",
+                conversation_id=CONV, attachment_refs=(ref,),
+            )
+        )
+        self.assertEqual(preview.metadata.get("action_decision"), "PREVIEW_BATCH_BITRIX_SUBSET")
+        self.assertEqual((preview.metadata.get("bitrix_batch_subset_preview") or {}).get("count"), 2)
+
+        confirm = await panda.respond(
+            ConversationRequest(
+                text=(
+                    f"Подтверждаю создание в Bitrix только товаров {SUBSET_NEW_SKU_1} и {SUBSET_NEW_SKU_2}. "
+                    "Перед созданием каждого товара повторно проверь, что товар с таким артикулом/SKU "
+                    "ещё не существует в Bitrix, включая неактивные. Создай оба товара неактивными. "
+                    "Другие товары не изменяй."
+                ),
+                tenant_id=TENANT, user_id=OWNER, request_id="natural-batch-r2",
+                conversation_id=CONV,
+            )
+        )
+
+        self.assertEqual(confirm.metadata.get("action_decision"), CONFIRM_BATCH_BITRIX_CREATE)
+        batch = confirm.metadata.get("bitrix_batch_create_result") or {}
+        self.assertEqual(batch.get("total"), 2)
+        self.assertEqual(batch.get("created"), 2)
+        self.assertTrue(confirm.metadata.get("mutated"))
+        self.assertEqual(len(store.catalog(TENANT)), before_catalog_size + 2)
+        for sku in (SUBSET_NEW_SKU_1, SUBSET_NEW_SKU_2):
+            matches = bridge.check_live_existence(tenant_id=TENANT, sku=sku)
+            self.assertEqual(len(matches), 1)
+            bitrix_id = str(matches[0].get("id") or matches[0].get("external_product_id") or "")
+            self.assertTrue(bitrix_id)
+            read_back = bridge.read_product(tenant_id=TENANT, bitrix_id=bitrix_id)
+            self.assertFalse(read_back.get("active"))
+
     async def test_one_product_postprocessing_failure_does_not_abort_other_selected_product(self):
         bridge, store = _bitrix_bridge_and_store()
         panda, artifact_service = _panda(bridge)
