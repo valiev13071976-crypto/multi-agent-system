@@ -58,6 +58,7 @@ CANONICAL_CHARACTERISTIC_ALIASES: Mapping[str, tuple[str, tuple[str, ...]]] = {
     "weight_with_stand_kg": ("kg", ("вес с подставкой", "weight with stand")),
     "weight_without_stand_kg": ("kg", ("вес без подставки", "weight without stand")),
     "package_weight_kg": ("kg", ("вес в упаковке", "package weight")),
+    "weight_kg": ("kg", ("вес, кг", "масса, кг", "weight, kg", "product weight")),
     "model_year": ("", ("год модели", "model year")),
     "country_of_origin": ("", ("страна происхождения", "country of origin", "made in")),
 }
@@ -367,7 +368,7 @@ _VESA_VALUE_RE = re.compile(
     re.I,
 )
 _RESOLUTION_VALUE_RE = re.compile(
-    r"^\s*(?:\d{3,5}\s*(?:x|×|х)\s*\d{3,5}|(?:hd|full\s*hd|fhd|uhd|4k|8k)(?:\s+uhd)?)\s*$",
+    r"^\s*\d{3,5}\s*(?:x|×|х)\s*\d{3,5}\s*$",
     re.I,
 )
 
@@ -420,7 +421,7 @@ def _passes_characteristic_value_shape(key: str, text: str) -> bool:
         return bool(_REFRESH_RATE_RE.search(value))
     if key == "audio_power_w":
         return bool(_AUDIO_POWER_RE.search(value))
-    if key in {"weight_with_stand_kg", "weight_without_stand_kg", "package_weight_kg"}:
+    if key in {"weight_kg", "weight_with_stand_kg", "weight_without_stand_kg", "package_weight_kg"}:
         return bool(_WEIGHT_RE.match(value))
     return True
 
@@ -523,8 +524,12 @@ def extract_compact_feature_facts(text: str) -> tuple[tuple[str, str], ...]:
     if tuner_matches:
         found.append(("tuners", ", ".join(dict.fromkeys(tuner_matches))))
 
-    # Resolution shorthand is kept literally (e.g. 4K UHD), never expanded.
-    res_match = re.search(r"\b(?:8k|4k|uhd|full\s*hd|fhd|\d{3,5}\s*[x×х]\s*\d{3,5})\b", blob, re.I)
+    # The live Bitrix destination PROP_2054 is explicitly "Разрешение
+    # экрана, пикс", so only an actual WxH pixel pair may become the
+    # writable screen_resolution semantic. Marketing classes such as 4K,
+    # UHD or Full HD remain available to content generation but are never
+    # coerced into a pixel property.
+    res_match = re.search(r"\b\d{3,5}\s*[x×х]\s*\d{3,5}\b", blob, re.I)
     if res_match:
         found.append(("screen_resolution", res_match.group(0)))
 

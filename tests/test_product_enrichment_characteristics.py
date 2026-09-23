@@ -126,6 +126,8 @@ class GenericCharacteristicValueQualityGateTests(unittest.TestCase):
 
     def test_resolution_and_vesa_reject_prose_but_keep_valid_shapes(self):
         self.assertEqual(normalize_characteristic_value("screen_resolution", "3840x2160")[0], "3840x2160")
+        self.assertEqual(normalize_characteristic_value("screen_resolution", "4K")[0], "")
+        self.assertEqual(normalize_characteristic_value("screen_resolution", "4K UHD")[0], "")
         self.assertEqual(normalize_characteristic_value("screen_resolution", "Ultra detailed picture for movies")[0], "")
         self.assertEqual(normalize_characteristic_value("vesa_mount", "300 x 300")[0], "300 x 300")
         self.assertEqual(normalize_characteristic_value("vesa_mount", "Mounting compatible with most wall brackets")[0], "")
@@ -195,7 +197,7 @@ class FinalGenericEvidenceQualityTests(unittest.TestCase):
         self.assertEqual(facts["wifi_support"], "Yes")
         self.assertEqual(facts["bluetooth_support"], "Yes")
         self.assertIn("DVB", facts["tuners"].upper())
-        self.assertEqual(facts["screen_resolution"].upper(), "4K")
+        self.assertNotIn("screen_resolution", facts)
 
     def test_compact_feature_extractor_does_not_promote_hdr_brightness_marketing(self):
         facts = dict(extract_compact_feature_facts("Up to HDR 2000nits Brightness | Ignite your sense with brightness"))
@@ -240,11 +242,13 @@ class BridgeCharacteristicsToBitrixTests(unittest.TestCase):
         from product_enrichment.models import CONFIDENCE_UNVERIFIED
 
         chars = {
-            "color": NormalizedCharacteristic(key="color", value="black", confidence=CONFIDENCE_UNVERIFIED)
+            "screen_diagonal_cm": NormalizedCharacteristic(
+                key="screen_diagonal_cm", value="139", unit="cm", confidence=CONFIDENCE_UNVERIFIED
+            )
         }
         bridged = bridge_characteristics_to_bitrix(chars)
-        self.assertEqual(bridged["color"].bitrix_property_id, 246)
-        self.assertFalse(bridged["color"].bitrix_writable)
+        self.assertEqual(bridged["screen_diagonal_cm"].bitrix_property_id, 154)
+        self.assertFalse(bridged["screen_diagonal_cm"].bitrix_writable)
 
 
 class MergeFactsIntoCharacteristicsTests(unittest.TestCase):

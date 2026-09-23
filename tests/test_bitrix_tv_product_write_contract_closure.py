@@ -76,40 +76,34 @@ GALLERY_PICTURES = (
     {"filename": "gallery-2.jpg", "base64": "Z2FsbGVyeS10d28="},
 )
 
-# Every canonical TV characteristic key requested in the task. Only the
-# five actually verified on this installation's IBLOCK 14
-# (schema.CATALOG_CHARACTERISTICS) may ever reach a real property field;
-# the rest have NO verified destination and must stay unmapped.
+# Canonical TV characteristics from the 2026-09-23 LIVE audit of the
+# CURRENT IBLOCK 14 + Aspro storefront + pre-Panda reference televisions
+# (Mirt 174, Makaria 194). Historical form_element_14 aliases are not
+# evidence: production proved many of them point to unrelated properties.
 ALL_REQUESTED_TV_CHARACTERISTICS = {
-    "screen_diagonal_cm": "254",  # verified
-    "screen_resolution": "3840x2160",  # verified
-    "operating_system": "webOS",  # verified
-    "smart_tv_support": "Да",  # verified
-    "color": "Черный",  # verified
-    "wifi": "Да",  # NOT verified
-    "hdr_support": "Dolby Vision, HDR10+",  # NOT verified
-    "backlight_type": "Mini LED",  # NOT verified
-    "screen_format": "16:9",  # NOT verified
-    "refresh_rate_hz": "120",  # NOT verified
-    "sound_power_w": "40",  # NOT verified
-    "speaker_count": "4",  # NOT verified
-    "smart_home_ecosystem": "ThinQ",  # NOT verified
-    "warranty_months": "12",  # NOT verified
+    "weight_kg": "13.6",  # verified -> property147 / "Вес, кг"
+    "screen_diagonal_cm": "124",  # verified -> property154
+    "screen_resolution": "1920x1080",  # verified -> property156, pixels only
+    "operating_system": "Android",  # verified -> property206
+    "smart_tv_support": "Да",  # verified -> property209, stored as "Есть"
+    "wifi_support": "Да",  # verified -> property210, stored as "Встроенный"
+    "country_of_origin": "Китай",  # verified -> property174
+    "refresh_rate_hz": "120 Гц",  # UNKNOWN destination: must NOT be written
+    "panel_technology": "Mini LED",  # UNKNOWN destination
+    "bluetooth_support": "Да",  # UNKNOWN destination
+    "hdmi_count": "4",  # UNKNOWN destination
+    "audio_power_w": "40 Вт",  # UNKNOWN destination
+    "speaker_count": "2",  # UNKNOWN destination
+    "vesa_mount": "300x300 мм",  # UNKNOWN destination
 }
 VERIFIED_TV_CHARACTERISTIC_KEYS = {
+    "weight_kg",
     "screen_diagonal_cm",
     "screen_resolution",
     "operating_system",
     "smart_tv_support",
-    "color",
-    # SIMPLE_PRODUCT TV contract-alignment pass (ticket T-F79758
-    # follow-up, production reference element 992/IBLOCK 14, real admin
-    # form form_element_14): these three requested keys now ALSO have a
-    # verified property destination (147/250/160) -- see
-    # integrations.bitrix.schema.CATALOG_CHARACTERISTICS.
-    "refresh_rate_hz",
-    "backlight_type",
-    "speaker_count",
+    "wifi_support",
+    "country_of_origin",
 }
 
 
@@ -265,10 +259,15 @@ class TvCharacteristicsMappingTests(unittest.TestCase):
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
         fields = product_body["fields"]
 
+        expected_wire_values = {
+            **ALL_REQUESTED_TV_CHARACTERISTICS,
+            "smart_tv_support": "Есть",
+            "wifi_support": "Встроенный",
+        }
         for key in VERIFIED_TV_CHARACTERISTIC_KEYS:
             binding = schema.characteristic_binding(key)
             self.assertIsNotNone(binding, f"{key} should be verified")
-            self.assertEqual(fields[f"property{binding.property_id}"], ALL_REQUESTED_TV_CHARACTERISTICS[key])
+            self.assertEqual(fields[f"property{binding.property_id}"], expected_wire_values[key])
         self.assertEqual(set(result["characteristics_written"]), VERIFIED_TV_CHARACTERISTIC_KEYS)
 
     def test_unverified_tv_characteristics_are_reported_unmapped_never_guessed(self):
@@ -315,51 +314,70 @@ class TvCharacteristicsMappingTests(unittest.TestCase):
 
 
 class RepresentativeTvCharacteristicMappingTests(unittest.TestCase):
-    """3b. Representative TV characteristic mapping test (task's own
-    "TESTS" list, item 3): a bounded, representative subset of the
-    VERIFIED TV PROPERTY MAP -- refresh_rate_hz, vesa_mount, hdmi_version,
-    wireless_interfaces, smart_tv_platform, and the four
-    dimension/weight fields -- each cross-checked at the schema-binding
-    level AND on an actual end-to-end write, using the verified
-    production reference element 992's own property ids as evidence
-    (integrations.bitrix.schema.CATALOG_CHARACTERISTICS)."""
+    """Canonical LIVE TV map regression.
+
+    The current site audit is authoritative. In particular property147 is
+    "Вес, кг"; refresh rate has no verified destination and must never be
+    sent to property147 or any other guessed property.
+    """
 
     REPRESENTATIVE_MAPPING = {
-        "refresh_rate_hz": 147,
-        "vesa_mount": 184,
-        "hdmi_version": 187,
-        "wireless_interfaces": 253,
-        "smart_tv_platform": 178,
-        "dimensions_with_stand": 177,
-        "weight_with_stand": 203,
-        "dimensions_without_stand": 189,
-        "weight_without_stand": 159,
+        "weight_kg": 147,
+        "screen_diagonal_cm": 154,
+        "screen_resolution": 156,
+        "country_of_origin": 174,
+        "operating_system": 206,
+        "smart_tv_support": 209,
+        "wifi_support": 210,
     }
 
-    def test_schema_bindings_match_the_verified_production_property_ids(self):
+    def test_schema_bindings_match_current_live_property_ids(self):
         for key, expected_property_id in self.REPRESENTATIVE_MAPPING.items():
             binding = schema.characteristic_binding(key)
             self.assertIsNotNone(binding, f"{key} should be verified")
             self.assertEqual(binding.property_id, expected_property_id, key)
 
-    def test_representative_characteristics_reach_the_wire_on_an_actual_write(self):
+    def test_historical_cross_category_aliases_are_not_writable(self):
+        for key in (
+            "refresh_rate_hz",
+            "panel_technology",
+            "backlight_type",
+            "speaker_count",
+            "hdmi_version",
+            "wireless_interfaces",
+            "smart_tv_platform",
+            "dimensions_with_stand",
+            "weight_with_stand",
+            "dimensions_without_stand",
+            "weight_without_stand",
+            "service_life",
+        ):
+            self.assertIsNone(schema.characteristic_binding(key), key)
+
+    def test_refresh_rate_can_never_land_in_weight_property(self):
         values = {
-            "refresh_rate_hz": "144",
-            "vesa_mount": "300×300 мм",
-            "hdmi_version": "2.1",
-            "wireless_interfaces": "Bluetooth, Wi-Fi",
-            "smart_tv_platform": "Google TV",
-            "dimensions_with_stand": "1436 x 860 x 368 мм",
-            "weight_with_stand": "30.4 кг",
-            "dimensions_without_stand": "1436 x 824 x 50 мм",
-            "weight_without_stand": "28.4 кг",
+            "weight_kg": "13.6",
+            "refresh_rate_hz": "144 Гц",
         }
         result, transport = _execute(_tv_request(characteristics=values))
         product_body = next(b for m, b in transport.calls if m == "catalog.product.add")
         fields = product_body["fields"]
 
-        for key, property_id in self.REPRESENTATIVE_MAPPING.items():
-            self.assertEqual(fields[f"property{property_id}"], values[key], key)
+        self.assertEqual(fields["property147"], "13.6")
+        self.assertNotIn("144", json.dumps(fields))
+        self.assertEqual(set(result["characteristics_written"]), {"weight_kg"})
+        self.assertIn(
+            "characteristic:refresh_rate_hz",
+            {item["field"] for item in result["not_written"]},
+        )
+
+    def test_site_string_vocab_is_normalized_for_smart_tv_and_wifi(self):
+        values = {"smart_tv_support": "Yes", "wifi_support": "Yes"}
+        result, transport = _execute(_tv_request(characteristics=values))
+        fields = next(b for m, b in transport.calls if m == "catalog.product.add")["fields"]
+
+        self.assertEqual(fields["property209"], "Есть")
+        self.assertEqual(fields["property210"], "Встроенный")
         self.assertEqual(set(result["characteristics_written"]), set(values))
 
 
