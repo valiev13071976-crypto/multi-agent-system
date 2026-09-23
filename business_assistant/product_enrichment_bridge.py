@@ -257,7 +257,10 @@ def format_write_plan_text(
     if target_product.get("code"):
         lines.append(f"Символьный код URL (Bitrix CODE): {target_product.get('code')}")
     if write_request.brand:
-        lines.append(f"Бренд: {write_request.brand}")
+        if write_request.brand_id:
+            lines.append(f"Бренд: {write_request.brand} (Bitrix BRAND -> IBLOCK 12 ID {write_request.brand_id})")
+        else:
+            lines.append(f"Бренд: {write_request.brand} (не будет записан без проверенного ID элемента IBLOCK 12)")
     if write_request.ean:
         lines.append(f"EAN: {write_request.ean}")
     if write_request.purchase_price:
