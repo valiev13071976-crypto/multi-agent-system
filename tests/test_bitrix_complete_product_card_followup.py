@@ -68,6 +68,7 @@ def _request(**overrides) -> SingleProductWriteRequest:
         sku=TARGET_SKU,
         retail_price=TARGET_RETAIL_PRICE,
         brand=TARGET_BRAND,
+        brand_id=TARGET_BRAND_ID,
         purchase_price=TARGET_PURCHASE_PRICE,
     )
     base.update(overrides)
