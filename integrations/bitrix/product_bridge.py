@@ -187,6 +187,20 @@ class BitrixProductBridge:
         )
         return out["result"]
 
+    def read_section_by_id(
+        self, *, tenant_id: str, section_id: int, connection_id: str | None = None
+    ) -> dict:
+        out = self._activation.execute_via_gateway(
+            tenant_id=tenant_id,
+            capability=READ_CAPABILITY,
+            environment=self._environment,
+            operation_class=OP_READ,
+            payload={"operation": "section_get", "section_id": int(section_id)},
+            connection_id=connection_id,
+        )
+        items = list(out["result"].get("items") or [])
+        return dict(items[0]) if items else {}
+
     def read_product(self, *, tenant_id: str, bitrix_id: str, connection_id: str | None = None) -> dict:
         """Explicit, independent read-back of one product by its Bitrix id.
 
