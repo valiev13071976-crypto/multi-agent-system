@@ -95,6 +95,7 @@ straight into this same, unchanged write/approval/read-back path via
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Mapping, Sequence
@@ -130,6 +131,7 @@ STATUS_WRITE_VERIFICATION_MISMATCH = "WRITE_VERIFICATION_MISMATCH"
 STATUS_WRITE_FAILED = "WRITE_FAILED"
 STATUS_WRITE_PARTIAL_FAILURE = "WRITE_PARTIAL_FAILURE"
 STATUS_WRITE_NOT_PERFORMED = "WRITE_NOT_PERFORMED"
+STATUS_APPROVAL_PLAN_CHANGED = "APPROVAL_PLAN_CHANGED"
 
 # TV product-write-contract defect closure -- the two supported product
 # models for this single-product write path. ``PRODUCT_MODEL_SIMPLE`` is
@@ -968,6 +970,36 @@ def prepare_single_product_write(
     }
 
 
+def build_approval_signature(preview: Mapping) -> dict:
+    """Compact immutable expectation captured from the exact preview the
+    owner approved. It is NOT a write payload: confirmation still reruns
+    the existing prepare/validation path against current Bitrix state, then
+    compares the resulting plan with this expectation before any mutation.
+
+    The hash covers the whole canonical payload (including content/media/
+    characteristics) while the explicit fields make drift diagnostics
+    readable without ever persisting or echoing the raw payload here.
+    """
+    target = dict(preview.get("target_product") or {})
+    retail = dict(preview.get("retail_price") or {})
+    canonical = preview.get("canonical_payload") or {}
+    canonical_blob = json.dumps(
+        canonical,
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return {
+        "version": 1,
+        "title": str(target.get("title") or ""),
+        "resolved_section_id": target.get("resolved_section_id"),
+        "retail_price_amount": str(retail.get("amount") or ""),
+        "retail_price_currency": str(retail.get("currency") or ""),
+        "canonical_sha256": hashlib.sha256(canonical_blob).hexdigest(),
+    }
+
+
 def execute_single_product_write(
     bridge: BitrixProductBridge,
     *,
@@ -976,6 +1008,7 @@ def execute_single_product_write(
     approved: bool,
     idempotency_key: str = "",
     connection_id: str | None = None,
+    expected_approval_signature: Mapping | None = None,
 ) -> dict:
     """Governed, single-product Bitrix create. Zero mutation unless
     ``approved`` is True -- and even then, ``BitrixProductBridge.sync_product``
@@ -989,6 +1022,23 @@ def execute_single_product_write(
     preview = prepare_single_product_write(bridge, tenant_id=tenant_id, request=request, connection_id=connection_id)
     if preview["status"] != STATUS_REQUIRES_APPROVAL:
         return {**preview, "mutated": False}
+
+    # Frozen-preview contract: batch approval is permission to execute only
+    # the plan the owner actually saw. We deliberately DO re-run the normal
+    # prepare/section validation above against current Bitrix state; then we
+    # compare that current plan with the compact signature captured at
+    # preview time. Any drift fails closed before the write boundary.
+    if expected_approval_signature:
+        actual_signature = build_approval_signature(preview)
+        expected_signature = dict(expected_approval_signature)
+        if actual_signature != expected_signature:
+            return {
+                "status": STATUS_APPROVAL_PLAN_CHANGED,
+                "mutated": False,
+                "reason": "approved_write_plan_changed_since_preview",
+                "expected_signature": expected_signature,
+                "actual_signature": actual_signature,
+            }
 
     key = idempotency_key or _default_idempotency_key(tenant_id, request)
     canonical = preview["canonical_payload"]
