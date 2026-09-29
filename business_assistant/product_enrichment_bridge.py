@@ -36,6 +36,7 @@ from business_assistant.controlled_bitrix_write import (
     prepare_single_product_write,
 )
 from product_enrichment.cache import EnrichmentCache
+from product_enrichment.characteristics import CANONICAL_CHARACTERISTIC_ALIASES
 from product_enrichment.media_fetch import ImageFetchPort
 from product_enrichment.models import EnrichmentResult, MediaCandidateInput, ProductIdentityQuery
 from product_enrichment.observability import EnrichmentObserver
@@ -222,6 +223,30 @@ def serialize_characteristic_status(enrichment: EnrichmentResult) -> dict:
     }
 
 
+def _characteristic_label(key: str) -> str:
+    aliases = CANONICAL_CHARACTERISTIC_ALIASES.get(key)
+    return aliases[1][0] if aliases else key
+
+
+def _characteristic_value(key: str, value: object, info: Mapping) -> str:
+    text = str(value)
+    aliases = CANONICAL_CHARACTERISTIC_ALIASES.get(key)
+    unit = info.get("unit") or (aliases[0] if aliases else "")
+    if unit and text.strip().lstrip("+-").replace(".", "", 1).replace(",", "", 1).isdigit():
+        unit = {"cm": "см", "mm": "мм", "kg": "кг", "Hz": "Гц", "W": "Вт"}.get(unit, unit)
+        return f"{text} {unit}"
+    return text
+
+
+def _confidence_label(value: str) -> str:
+    return {
+        "verified": "подтверждено источниками",
+        "probable": "предположительно — требуется проверка",
+        "unverified": "не подтверждено",
+        "conflicting": "источники противоречат друг другу",
+    }.get(value, "не подтверждено")
+
+
 def format_write_plan_text(
     *,
     write_request: SingleProductWriteRequest,
@@ -247,20 +272,34 @@ def format_write_plan_text(
     ]
     product_model = write_preview.get("product_model") or {}
     if product_model.get("model") == "SKU_WITH_OFFER":
-        lines.append("Модель товара: товар с торговым предложением (SKU/offer, IBLOCK 15)")
+        lines.append("Модель товара: товар с торговым предложением")
     elif product_model.get("model") == "SIMPLE_PRODUCT":
         lines.append(
-            "Модель товара: обычный товар без торговых предложений (IBLOCK 14) — "
+            "Модель товара: обычный товар без торговых предложений — "
             "нет данных о вариантах товара для этой записи"
         )
     target_product = dict(write_preview.get("target_product") or {})
     if target_product.get("code"):
-        lines.append(f"Символьный код URL (Bitrix CODE): {target_product.get('code')}")
+        lines.append(f"Код товара в адресе страницы: {target_product.get('code')}")
+    brand_plan = dict(write_preview.get("brand_plan") or {})
     if write_request.brand:
-        if write_request.brand_id:
-            lines.append(f"Бренд: {write_request.brand} (Bitrix BRAND -> IBLOCK 12 ID {write_request.brand_id})")
+        if brand_plan.get("action") == "create":
+            lines.append(
+                f"Бренд: {write_request.brand} — будет создан после подтверждения, "
+                "до создания товара. Связь с товаром Panda заполнит автоматически."
+            )
+        elif brand_plan.get("action") == "existing" or write_request.brand_id:
+            lines.append(f"Бренд: {write_request.brand} — будет использован существующий бренд.")
         else:
-            lines.append(f"Бренд: {write_request.brand} (не будет записан без проверенного ID элемента IBLOCK 12)")
+            lines.append(f"Бренд: {write_request.brand} — привязка не подтверждена; бренд не будет записан.")
+    if write_preview.get("status") == "REQUIRES_APPROVAL":
+        active = write_preview.get("active_after_create")
+        if active is False:
+            lines.append("Статус после создания: неактивный — товар не будет опубликован на сайте.")
+        elif active is True:
+            lines.append("Статус после создания: активный — товар будет опубликован на сайте.")
+        else:
+            lines.append("Статус активности после создания: не указан в плане.")
     if write_request.ean:
         lines.append(f"EAN: {write_request.ean}")
     if write_request.purchase_price:
@@ -273,10 +312,7 @@ def format_write_plan_text(
     for key in sorted(written):
         info = dict(status_map.get(key) or {})
         confidence = str(info.get("confidence") or "")
-        status = "verified" if confidence == "verified" else (confidence or "probable")
-        prop = info.get("bitrix_property_id")
-        prop_text = f", свойство Bitrix {prop}" if prop else ""
-        lines.append(f"  - {key}: {written[key]} ({status}{prop_text})")
+        lines.append(f"  - {_characteristic_label(key)}: {_characteristic_value(key, written[key], info)} ({_confidence_label(confidence)})")
 
     skipped = [key for key in sorted(status_map) if key not in written]
     lines.append(f"ХАРАКТЕРИСТИКИ, КОТОРЫЕ НЕ БУДУТ ЗАПИСАНЫ: {len(skipped)}")
@@ -286,8 +322,26 @@ def format_write_plan_text(
         if not info.get("bitrix_writable"):
             reason = "нет проверенного свойства в Bitrix" if not info.get("bitrix_property_id") else "не подтверждено для записи"
         else:
-            reason = f"статус {confidence or 'не подтверждён'}"
-        lines.append(f"  - {key}: {info.get('value', '')} ({confidence or 'не подтверждено'}) — {reason}")
+            reason = _confidence_label(confidence)
+        lines.append(f"  - {_characteristic_label(key)}: {_characteristic_value(key, info.get('value', ''), info)} ({_confidence_label(confidence)}) — {reason}")
+
+    if skipped:
+        lines.append("Эти характеристики не заполнят отдельные поля каталога, но могут присутствовать в описании ниже.")
+    uncertain = [key for key in set(status_map) | set(written)
+                 if (status_map.get(key) or {}).get("confidence") != "verified"]
+    if uncertain:
+        lines.append(
+            "ТРЕБУЕТ ПРОВЕРКИ: в исходных данных есть неподтверждённые характеристики: "
+            + ", ".join(_characteristic_label(key) for key in sorted(uncertain))
+            + ". Проверьте их также в описании перед подтверждением записи."
+        )
+    for field, label in (
+        ("weight_g", "Вес, г"), ("length_mm", "Длина, мм"),
+        ("width_mm", "Ширина, мм"), ("height_mm", "Высота, мм"),
+    ):
+        value = getattr(write_request, field)
+        if value:
+            lines.append(f"{label}: {value}")
 
     preview_picture = dict(write_request.preview_picture or {})
     detail_picture = dict(write_request.detail_picture or {})
@@ -312,17 +366,13 @@ def format_write_plan_text(
             item.get("field") == "gallery_pictures" for item in write_preview.get("will_not_write") or []
         )
         if not gallery_not_written:
-            gallery_destination = (
-                "MORE_PHOTO/офер (property 280)" if write_request.has_variant_offer else "MORE_PHOTO/базовый товар (property 124)"
-            )
             lines.append(
-                f"  - галерея: {len(gallery_pictures)} изображени(й) (загружается в Bitrix через {gallery_destination}, не ссылка)"
+                f"  - галерея: {len(gallery_pictures)} изображений (файлы будут загружены в карточку товара)"
             )
         else:
             lines.append(
                 f"  - галерея: {len(gallery_pictures)} изображени(й) подготовлено, но НЕ будет записано "
-                "(проверенное назначение MORE_PHOTO есть, но текущий адаптер записи (fixture/sandbox) "
-                "пока не сохраняет галерею — запись выполняется только LIVE-адаптером)"
+                "(текущее подключение не поддерживает запись галереи)"
             )
     else:
         gallery_count = int((preview.get("media") or {}).get("gallery_image_count") or 0)
@@ -330,9 +380,9 @@ def format_write_plan_text(
             lines.append(f"  - галерея: {gallery_count} — не подготовлена для записи (нет обработанных файлов)")
 
     lines.append("ОПИСАНИЕ, КОТОРОЕ БУДЕТ ЗАПИСАНО:")
-    lines.append(f"  Короткое (previewText): {write_request.short_description or '(нет)'}")
+    lines.append(f"  Короткое: {write_request.short_description or '(нет)'}")
     detailed = write_request.detailed_description or "(нет)"
-    lines.append("  Подробное (detailText):")
+    lines.append("  Подробное:")
     for line in detailed.splitlines() or [detailed]:
         lines.append(f"    {line}")
 
@@ -347,17 +397,30 @@ def format_write_plan_text(
     if resolved_section_id is None:
         resolved_section_id = (write_preview.get("target_product") or {}).get("resolved_section_id")
     if resolved_section_id is not None:
-        lines.append(f"Раздел каталога (Bitrix): ID {resolved_section_id}")
+        lines.append(f"Раздел каталога: №{resolved_section_id}")
+        category_source = write_request.subcategory or write_request.category_source
+        if category_source:
+            lines.append(f"Категория из карточки: {category_source}")
 
     if write_preview.get("status") == "REQUIRES_APPROVAL":
-        will_write = write_preview.get("will_write") or []
-        if will_write:
-            lines.append(f"Поля записи (по текущей политике записи): {', '.join(str(i) for i in will_write)}")
+        lines.append("План подготовлен. Создание выполнится только после вашего подтверждения.")
         for item in write_preview.get("will_not_write") or []:
-            lines.append(f"НЕ будет записано: {item.get('field')} = {item.get('value')} — {item.get('reason')}")
+            field = str(item.get("field") or "")
+            label, reason = {
+                "ean": ("Штрихкод", "не настроено поле для записи"),
+                "purchase_price": ("Закупочная цена", "текущее подключение не поддерживает запись закупочной цены"),
+                "category": ("Раздел каталога", "текущее подключение не поддерживает запись раздела"),
+                "gallery_pictures": ("Галерея", "текущее подключение не поддерживает запись галереи"),
+                "brand": ("Бренд", "привязка не подтверждена"),
+            }.get(field, (field, str(item.get("reason") or "")))
+            if field.startswith("characteristic:"):
+                label = _characteristic_label(field.partition(":")[2])
+                reason = "нет проверенного поля для записи"
+            lines.append(f"НЕ будет записано: {label} = {item.get('value')} — {reason}")
     elif write_preview.get("status"):
         lines.append(
-            f"Статус подготовки записи в Bitrix: {write_preview.get('status')} ({write_preview.get('reason', '')})".rstrip(" ()")
+            f"Статус подготовки записи в Bitrix: {write_preview.get('status')} "
+            + (f"({write_preview['reason']})" if write_preview.get("reason") else "")
         )
     else:
         lines.append(
