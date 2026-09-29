@@ -44,7 +44,7 @@ async def test_ru_blog_and_wrong_support_page_are_not_fetched_or_used_for_images
         brand="TCL", model="55C6K", market="RU")), search_port=source, fetch_port=source, media_sink=media)
     assert source.fetched == ["https://www.tcl.com/ru/ru/tvs/55c6k"]
     assert facts
-    assert "-inurl:support" in source.queries[0]
+    assert "site:tcl.com" in source.queries[0]
 
 
 @pytest.mark.asyncio

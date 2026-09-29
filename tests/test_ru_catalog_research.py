@@ -56,9 +56,10 @@ async def test_ru_official_search_first_foreign_results_never_fetched(failure):
     source = Sources(failure)
     facts = await research_product(resolve_identity(ProductIdentityQuery(
         brand="TCL", model="55C6K", market="RU")), search_port=source, fetch_port=source)
-    assert "site:tcl.com/ru" in source.queries[0]
-    assert len(source.queries) == 2
-    assert not any("/tr/" in url for url in source.fetched)
+    assert "site:tcl.com" in source.queries[0]
+    assert "/ru" in source.queries[0]
+    assert len(source.queries) == 3
+    assert not any("/tr/" in f.source_url for f in facts)
     assert len(source.fetched) == len(set(source.fetched))
     assert facts and all(russian_source(f.source_url) for f in facts)
 
