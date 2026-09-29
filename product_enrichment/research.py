@@ -415,8 +415,8 @@ def _source_conflicts_with_model_screen_size(identity: ResolvedIdentity, page_te
     return False
 
 
-# These facts can differ by market/stock variant. Model-only research keeps
-# them visible for review, but cannot establish the supplier's exact variant.
+# These facts need exact-product evidence: an official model page/document
+# or a matching supplied EAN. A suffix/EAN is not universally required.
 _VARIANT_SENSITIVE_KEYS = frozenset({
     "country_of_origin", "screen_diagonal_cm", "hdmi_count", "usb_count",
     "weight_kg", "weight_with_stand_kg", "weight_without_stand_kg",
@@ -425,13 +425,29 @@ _VARIANT_SENSITIVE_KEYS = frozenset({
 })
 
 
-def _verification_blocker(identity: ResolvedIdentity, key: str, raw_value: str, page_text: str) -> str:
+def _verification_blocker(
+    identity: ResolvedIdentity, key: str, raw_value: str, page_text: str,
+    *, url: str, source_type: str,
+) -> str:
+    # A provided identifier remains a constraint, never silently discarded.
+    if identity.ean:
+        text = " ".join(node for node, _ in html_text_nodes(page_text))
+        declared_eans = set(re.findall(
+            r"\b(?:EAN(?:-13)?|GTIN(?:-\d{2})?)\s*[:：-]?\s*(\d{8,14})\b", text, re.I))
+        if declared_eans and identity.ean not in declared_eans:
+            return "ean_mismatch"
     if key == "screen_diagonal_cm":
         # Converting the nominal inch class does not measure the visible panel.
         if re.search(r'(?:inch|дюйм|["″])', raw_value, re.I) and not re.search(r"(?:cm|см)", raw_value, re.I):
             return "nominal_diagonal_not_measured"
     if key in _VARIANT_SENSITIVE_KEYS:
-        if not identity.ean or not re.search(r"(?<!\d)" + re.escape(identity.ean) + r"(?!\d)", page_text):
+        ean_matches = bool(identity.ean and re.search(
+            r"(?<!\d)" + re.escape(identity.ean) + r"(?!\d)", page_text))
+        official_exact_model = (
+            source_type in (SOURCE_MANUFACTURER, SOURCE_MANUFACTURER_DOCUMENTATION)
+            and evidence_matches_identity(identity, text=page_text, url=url)
+        )
+        if not ean_matches and not official_exact_model:
             return "stock_variant_not_verified"
     return ""
 
@@ -486,7 +502,8 @@ async def research_product(
                     source_domain=domain,
                     confidence=CONFIDENCE_PROBABLE,
                     retrieved_at=retrieved_at,
-                    verification_blocker=_verification_blocker(identity, key, raw_value, page_text),
+                    verification_blocker=_verification_blocker(
+                        identity, key, raw_value, page_text, url=url, source_type=source_type),
                 )
             )
     discovered_media: list[MediaCandidateInput] = []
@@ -560,7 +577,8 @@ async def research_product(
                     source_domain=domain,
                     confidence=CONFIDENCE_PROBABLE,
                     retrieved_at=retrieved_at,
-                    verification_blocker=_verification_blocker(identity, key, raw_value, page_text),
+                    verification_blocker=_verification_blocker(
+                        identity, key, raw_value, page_text, url=url, source_type=source_type),
                 )
             )
             accepted_any = True

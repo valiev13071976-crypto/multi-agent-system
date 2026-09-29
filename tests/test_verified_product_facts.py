@@ -81,11 +81,11 @@ class Source:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("ean,body_diagonal,expected", [
-    ("", "138.8 cm", "probable"),
+    ("", "138.8 cm", "verified"),
     ("1234567890123", "138.8 cm", "verified"),
     ("1234567890123", '55"', "probable"),
 ])
-async def test_market_measurements_need_stock_match_and_literal_metric(ean, body_diagonal, expected):
+async def test_official_exact_model_needs_literal_metric_but_not_mandatory_ean(ean, body_diagonal, expected):
     source = Source(f"<p>EAN: 1234567890123</p><p>Диагональ экрана: {body_diagonal}</p>"
                     "<p>Операционная система: Google TV</p>")
     facts = await research_product(identity(ean), search_port=source, fetch_port=source)
