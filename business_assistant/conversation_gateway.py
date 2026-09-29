@@ -2297,6 +2297,26 @@ class WorkflowPandaConversationGateway:
                 "write plan",
             )
         )
+        # A follow-up need not repeat "Bitrix/site" once this conversation
+        # has a prepared batch for the current source dataset. Only explicit
+        # preview requests inherit that target; "show average price" stays Excel.
+        if not has_target and any(token in blob for token in ("предпросмотр", "preview")):
+            from business_assistant import workset as workset_lib
+
+            workset = workset_lib.get_workset(task)
+            current_dataset_id = str(getattr(workset, "current_dataset_id", "") or "")
+            preview_dataset_id = str(task.parameters.get("bitrix_batch_dataset_id") or "")
+            prepared = task.parameters.get("bitrix_batch_ready_rows") or []
+            has_target = bool(
+                current_dataset_id
+                and preview_dataset_id == current_dataset_id
+                and any(
+                    isinstance(row, Mapping)
+                    and row.get("prepared_write_request")
+                    and row.get("approved_write_signature")
+                    for row in prepared
+                )
+            )
         if not (has_target and has_preview_intent):
             return None
 
