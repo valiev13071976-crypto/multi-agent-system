@@ -92,7 +92,7 @@ class GenericCharacteristicValueQualityGateTests(unittest.TestCase):
 
     def test_compact_real_spec_tokens_survive(self):
         expected = {
-            "panel_technology": "QD-Mini LED",
+            "panel_technology": "HVA Pro",
             "backlight_technology": "Mini LED",
             "operating_system": "Google TV",
             "hdr_formats": "HDR10+, Dolby Vision, HLG",
@@ -159,7 +159,7 @@ class CharacteristicSemanticEnumGateTests(unittest.TestCase):
         self.assertEqual(normalize_characteristic_value("hdr_formats", "Brightness Pro")[0], "")
 
     def test_panel_technology_requires_known_display_technology_token(self):
-        for raw in ("OLED", "QD-Mini LED", "IPS", "VA", "Mini LED"):
+        for raw in ("OLED", "HVA Pro", "IPS", "VA"):
             with self.subTest(raw=raw):
                 value, _unit = normalize_characteristic_value("panel_technology", raw)
                 self.assertEqual(value, raw)

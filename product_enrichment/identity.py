@@ -107,7 +107,10 @@ def evidence_matches_identity(identity: ResolvedIdentity, *, text: str, url: str
     if not identity.model:
         return False
     haystack = f"{text} {url}".casefold()
-    return identity.model.casefold() in haystack
+    return bool(re.search(
+        r"(?<![\w-])" + re.escape(identity.model.casefold()) + r"(?![\w-]|\.(?!(?:pdf|html?)(?:\W|$))[a-z0-9])",
+        haystack,
+    ))
 
 
 def detect_variant_conflict(identity: ResolvedIdentity, *, text: str) -> str | None:

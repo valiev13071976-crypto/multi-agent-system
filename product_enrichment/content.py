@@ -42,7 +42,7 @@ _PHRASE_TEMPLATES: Mapping[str, str] = {
     "weight_without_stand_kg": "вес без подставки {value}",
 }
 
-_USABLE_CONFIDENCE = {"verified", "probable"}
+_USABLE_CONFIDENCE = {"verified"}
 
 
 def _usable_facts(characteristics: Mapping[str, NormalizedCharacteristic]) -> list[NormalizedCharacteristic]:
@@ -60,7 +60,7 @@ def _phrase_for(characteristic: NormalizedCharacteristic) -> str | None:
 def generate_content(identity: ResolvedIdentity, characteristics: Mapping[str, NormalizedCharacteristic]) -> ContentDraft:
     """Builds short/detailed descriptions + SEO metadata strictly from
     ``identity`` and the subset of ``characteristics`` that are usable
-    (verified/probable -- never unverified/conflicting) facts."""
+    (verified only) facts."""
     usable = _usable_facts(characteristics)
     phrases = [p for p in (_phrase_for(c) for c in usable) if p]
     facts_used = tuple(sorted(c.key for c in usable if _phrase_for(c)))

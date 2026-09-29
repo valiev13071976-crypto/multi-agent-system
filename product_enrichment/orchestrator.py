@@ -77,8 +77,8 @@ async def enrich_product(
             observer.emit(STAGE_PREVIEW_READY, cache_hit=True)
             return EnrichmentResult(
                 identity=cached.identity,
-                characteristics=cached.characteristics,
-                content=cached.content,
+                characteristics=bridge_characteristics_to_bitrix(cached.characteristics),
+                content=generate_content(cached.identity, cached.characteristics),
                 media=cached.media,
                 facts=cached.facts,
                 conflicts=cached.conflicts,

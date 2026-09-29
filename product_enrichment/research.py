@@ -415,6 +415,27 @@ def _source_conflicts_with_model_screen_size(identity: ResolvedIdentity, page_te
     return False
 
 
+# These facts can differ by market/stock variant. Model-only research keeps
+# them visible for review, but cannot establish the supplier's exact variant.
+_VARIANT_SENSITIVE_KEYS = frozenset({
+    "country_of_origin", "screen_diagonal_cm", "hdmi_count", "usb_count",
+    "weight_kg", "weight_with_stand_kg", "weight_without_stand_kg",
+    "package_weight_kg", "dimensions_with_stand", "dimensions_without_stand",
+    "package_dimensions",
+})
+
+
+def _verification_blocker(identity: ResolvedIdentity, key: str, raw_value: str, page_text: str) -> str:
+    if key == "screen_diagonal_cm":
+        # Converting the nominal inch class does not measure the visible panel.
+        if re.search(r'(?:inch|дюйм|["″])', raw_value, re.I) and not re.search(r"(?:cm|см)", raw_value, re.I):
+            return "nominal_diagonal_not_measured"
+    if key in _VARIANT_SENSITIVE_KEYS:
+        if not identity.ean or not re.search(r"(?<!\d)" + re.escape(identity.ean) + r"(?!\d)", page_text):
+            return "stock_variant_not_verified"
+    return ""
+
+
 async def research_product(
     identity: ResolvedIdentity,
     *,
@@ -465,6 +486,7 @@ async def research_product(
                     source_domain=domain,
                     confidence=CONFIDENCE_PROBABLE,
                     retrieved_at=retrieved_at,
+                    verification_blocker=_verification_blocker(identity, key, raw_value, page_text),
                 )
             )
     discovered_media: list[MediaCandidateInput] = []
@@ -508,36 +530,6 @@ async def research_product(
         # label/value specs and compact feature bullets/headings.
         keys_from_this_source: set[str] = set()
 
-        # Search-result title/snippet can contain high-precision compact
-        # features even when the product page hides its spec table behind
-        # client-side rendering. Identity was already verified above.
-        _append_compact_facts(
-            f"{title} {snippet}",
-            url=url,
-            source_type=source_type,
-            domain=domain,
-            retrieved_at=retrieved_at,
-            seen_keys=keys_from_this_source,
-        )
-
-        # Modern manufacturer pages often render features as standalone
-        # headings/bullets rather than label/value rows. Scan individual
-        # text nodes so only compact literal feature phrases are considered.
-        for node_text, in_anchor in html_text_nodes(page_text):
-            if in_anchor or len(node_text) > 160:
-                continue
-            _append_compact_facts(
-                node_text,
-                url=url,
-                source_type=source_type,
-                domain=domain,
-                retrieved_at=retrieved_at,
-                seen_keys=keys_from_this_source,
-            )
-
-        if keys_from_this_source:
-            accepted_any = True
-
         # ONE fact per characteristic per source: real pages repeat the
         # same characteristic in several blocks (summary + full spec
         # table) and sometimes carry near-variants under the same
@@ -568,9 +560,28 @@ async def research_product(
                     source_domain=domain,
                     confidence=CONFIDENCE_PROBABLE,
                     retrieved_at=retrieved_at,
+                    verification_blocker=_verification_blocker(identity, key, raw_value, page_text),
                 )
             )
             accepted_any = True
+        # Modern manufacturer pages often render features as standalone
+        # headings/bullets rather than label/value rows. Scan individual
+        # text nodes so only compact literal feature phrases are considered.
+        for node_text, in_anchor in html_text_nodes(page_text):
+            if in_anchor or len(node_text) > 160:
+                continue
+            _append_compact_facts(
+                node_text,
+                url=url,
+                source_type=source_type,
+                domain=domain,
+                retrieved_at=retrieved_at,
+                seen_keys=keys_from_this_source,
+            )
+
+        if keys_from_this_source:
+            accepted_any = True
+
         observer.emit(
             STAGE_SOURCE_ACCEPTED if accepted_any else STAGE_SOURCE_REJECTED,
             url=url,

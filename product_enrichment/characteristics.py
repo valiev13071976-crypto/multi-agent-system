@@ -309,15 +309,15 @@ _BOOLEAN_SUPPORT_VALUES = frozenset(
     }
 )
 _HDR_TOKENS = (
-    "hdr", "dolby vision", "hlg", "technicolor",
+    "hdr", "hdr10", "hdr10+", "dolby vision", "hlg", "technicolor",
 )
 _PANEL_TECH_TOKENS = (
-    "oled", "qled", "qd-oled", "qd oled", "mini led", "mini-led",
-    "microled", "micro led", "lcd", "led", "ips", "va", "tn", "mla",
+    "qd-oled", "qd oled", "oled", "qled", "microled", "micro led",
+    "lcd", "ips", "hva pro", "hva", "va", "tn",
 )
 _BACKLIGHT_TECH_TOKENS = (
     "mini led", "mini-led", "direct led", "edge led", "full array",
-    "fald", "oled", "microled",
+    "fald",
 )
 _OS_TOKENS = (
     "google tv", "android tv", "webos", "tizen", "vidaa", "roku",
@@ -331,7 +331,7 @@ _WEIGHT_RE = re.compile(r"^\s*\d{1,3}(?:[.,]\d+)?\s*(?:kg|кг)?\s*$", re.I)
 
 def _contains_any_token(text: str, tokens: tuple[str, ...]) -> bool:
     blob = str(text or "").casefold()
-    return any(token in blob for token in tokens)
+    return any(re.search(r"(?<!\w)" + re.escape(token) + r"(?!\w)", blob) for token in tokens)
 
 
 def _passes_semantic_enum_gate(key: str, text: str) -> bool:
@@ -484,14 +484,16 @@ def extract_compact_feature_facts(text: str) -> tuple[tuple[str, str], ...]:
             found.append(("operating_system", blob[idx : idx + len(token)]))
             break
 
-    # Display/panel technology. Prefer more specific tokens first.
-    panel_tokens = ("qd-mini led", "mini led", "qd-oled", "oled", "qled", "hva pro", "hva", "ips", "va", "tn", "lcd", "led")
-    for token in panel_tokens:
-        idx = lowered.find(token)
-        if idx >= 0:
-            display = blob[idx : idx + len(token)]
-            found.append(("panel_technology", display))
-            break
+    # Panel and backlight are independent; Mini LED must not mask HVA/IPS.
+    for key, tokens in (
+        ("panel_technology", _PANEL_TECH_TOKENS),
+        ("backlight_technology", ("rgb mini led", "qd-mini led", *_BACKLIGHT_TECH_TOKENS)),
+    ):
+        for token in tokens:
+            match = re.search(r"(?<!\w)" + re.escape(token) + r"(?!\w)", blob, re.I)
+            if match:
+                found.append((key, match.group(0)))
+                break
 
     # Refresh rate only when a refresh/native/VRR cue is nearby.
     for match in _REFRESH_RATE_RE.finditer(blob):
@@ -557,7 +559,7 @@ def bridge_characteristics_to_bitrix(
             confidence=characteristic.confidence,
             supporting_facts=characteristic.supporting_facts,
             bitrix_property_id=binding.property_id,
-            bitrix_writable=characteristic.confidence in (CONFIDENCE_VERIFIED, CONFIDENCE_PROBABLE),
+            bitrix_writable=characteristic.confidence == CONFIDENCE_VERIFIED,
         )
     return out
 
@@ -592,8 +594,10 @@ def merge_facts_into_characteristics(
 
         if len(by_value) == 1:
             value, supporting = next(iter(by_value.items()))
-            domains = {f.source_domain for f in supporting}
-            max_trust = max(SOURCE_TRUST_RANK.get(f.source_type, 0) for f in supporting)
+            eligible = [f for f in supporting if not f.verification_blocker
+                        and f.confidence not in ("unverified", "conflicting")]
+            domains = {f.source_domain for f in eligible if f.source_domain}
+            max_trust = max((SOURCE_TRUST_RANK.get(f.source_type, 0) for f in eligible), default=0)
             confidence = (
                 CONFIDENCE_VERIFIED
                 if len(domains) >= 2 or max_trust >= SOURCE_TRUST_RANK.get("manufacturer", 4)

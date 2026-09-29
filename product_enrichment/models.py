@@ -102,6 +102,8 @@ class SourceFact:
     source_domain: str
     confidence: str
     retrieved_at: str = ""
+    # Nonempty prevents source reputation/corroboration from verifying this fact.
+    verification_blocker: str = ""
 
 
 @dataclass(frozen=True)
