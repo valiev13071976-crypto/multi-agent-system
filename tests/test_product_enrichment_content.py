@@ -1,6 +1,6 @@
 """Product enrichment pipeline: fact-only, Russian-default content
 generation contract (requirement 4) -- every factual claim in generated
-content must be supported by a verified/probable enrichment fact, never
+content must be supported by a verified enrichment fact, never
 invented."""
 
 from __future__ import annotations
@@ -44,12 +44,15 @@ class GenerateContentTests(unittest.TestCase):
         self.assertIn("139.7", draft.short_description)
         self.assertIn("screen_diagonal_cm", draft.facts_used)
 
-    def test_probable_characteristic_is_usable_too(self):
+    def test_probable_characteristic_is_excluded_from_content_and_seo(self):
         chars = {
             "color": NormalizedCharacteristic(key="color", value="черный", confidence=CONFIDENCE_PROBABLE)
         }
         draft = generate_content(_identity(), chars)
-        self.assertIn("черный", draft.short_description)
+        self.assertNotIn("черный", draft.short_description)
+        self.assertNotIn("черный", draft.detailed_description)
+        self.assertNotIn("черный", draft.seo_description)
+        self.assertNotIn("color", draft.facts_used)
 
     def test_unverified_characteristic_never_appears_in_generated_text(self):
         chars = {

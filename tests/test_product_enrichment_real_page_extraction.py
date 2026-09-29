@@ -279,8 +279,8 @@ class RealPageEnrichmentPipelineTests(unittest.TestCase):
         name = f"{self.BRAND} {self.MODEL}"
         return _FixtureFetchPort(
             {
-                self.RETAILER_URL: RETAILER_PAGE_HTML.format(name=name),
-                self.DISTRIBUTOR_URL: DISTRIBUTOR_PAGE_HTML.format(name=name),
+                self.RETAILER_URL: RETAILER_PAGE_HTML.format(name=name) + "<p>Операционная система: Google TV</p>",
+                self.DISTRIBUTOR_URL: DISTRIBUTOR_PAGE_HTML.format(name=name) + "<p>Операционная система: Google TV</p>",
             }
         )
 
@@ -326,12 +326,12 @@ class RealPageEnrichmentPipelineTests(unittest.TestCase):
         self.assertEqual(result.characteristics["refresh_rate_hz"].unit, "Hz")
         self.assertEqual(result.characteristics["color"].value, "черный")
 
-    def test_independent_sources_agreeing_yield_a_verified_characteristic(self):
+    def test_independent_sources_cannot_verify_a_nominal_diagonal(self):
         result = self._enrich()
         diagonal = result.characteristics["screen_diagonal_cm"]
         self.assertEqual(diagonal.value, "139.7")
         self.assertEqual(diagonal.unit, "cm")
-        self.assertEqual(diagonal.confidence, CONFIDENCE_VERIFIED)
+        self.assertEqual(diagonal.confidence, "probable")
         self.assertGreaterEqual(len({f.source_domain for f in diagonal.supporting_facts}), 2)
 
     def test_no_characteristic_value_is_invented(self):
@@ -367,8 +367,9 @@ class RealPageEnrichmentPipelineTests(unittest.TestCase):
         result = self._enrich()
         detailed = result.content.detailed_description
         self.assertIn("Основные характеристики", detailed)
-        self.assertIn("139.7", detailed)
-        self.assertIn("120", detailed)
+        self.assertNotIn("139.7", detailed)
+        self.assertNotIn("120", detailed)
+        self.assertIn("Google TV", detailed)
         self.assertTrue(result.content.facts_used)
         # Every number in the description is backed by a characteristic.
         for key in result.content.facts_used:
@@ -435,7 +436,8 @@ class RealPageEnrichmentPipelineTests(unittest.TestCase):
             enrich_product(tenant_id="tenant-1", query=query, search_port=search, fetch_port=fetch)
         )
         self.assertEqual(result.characteristics["screen_resolution"].value, "3840x2160")
-        self.assertIn("3840x2160", result.content.detailed_description)
+        self.assertEqual(result.characteristics["screen_resolution"].confidence, "probable")
+        self.assertNotIn("3840x2160", result.content.detailed_description)
 
 
 class DegradedResultIsNotCachedTests(unittest.TestCase):

@@ -37,6 +37,7 @@ from business_assistant.controlled_bitrix_write import (
 )
 from product_enrichment.cache import EnrichmentCache
 from product_enrichment.characteristics import CANONICAL_CHARACTERISTIC_ALIASES
+from product_enrichment.content import generate_content
 from product_enrichment.media_fetch import ImageFetchPort
 from product_enrichment.models import EnrichmentResult, MediaCandidateInput, ProductIdentityQuery
 from product_enrichment.observability import EnrichmentObserver
@@ -136,7 +137,9 @@ def build_enriched_write_request(
     base = build_write_request_from_fields(
         dict(product_fields), tenant_id=tenant_id, retail_price=retail_price, currency=currency, product_id=product_id
     )
-    characteristics = {key: c.value for key, c in enrichment.characteristics.items() if c.bitrix_writable}
+    content = generate_content(enrichment.identity, enrichment.characteristics)
+    characteristics = {key: c.value for key, c in enrichment.characteristics.items()
+                       if c.bitrix_writable and c.confidence == "verified"}
     merged_characteristics = {**characteristics, **dict(base.characteristics)}
 
     preview_asset = next((a for a in enrichment.media.assets if a.role == "preview"), None)
@@ -161,8 +164,8 @@ def build_enriched_write_request(
         brand=base.brand or enrichment.identity.brand,
         subcategory=base.subcategory or enrichment.identity.subcategory,
         category_source=base.category_source or enrichment.identity.category,
-        short_description=base.short_description or enrichment.content.short_description,
-        detailed_description=base.detailed_description or enrichment.content.detailed_description,
+        short_description=base.short_description or content.short_description,
+        detailed_description=base.detailed_description or content.detailed_description,
         characteristics=merged_characteristics,
         preview_picture=dict(base.preview_picture)
         or ({"filename": preview_asset.filename, "base64": preview_asset.base64_content} if preview_asset else {}),
