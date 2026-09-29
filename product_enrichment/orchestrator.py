@@ -7,6 +7,8 @@ docstring): identity -> research -> characteristics -> content -> media ->
 from __future__ import annotations
 
 from typing import Sequence
+import logging
+from collections import Counter
 from dataclasses import replace
 
 from product_enrichment.cache import EnrichmentCache
@@ -110,6 +112,14 @@ async def enrich_product(
             observer.emit(STAGE_FAILED, component="research", reason=type(exc).__name__)
             researched = ()
         facts = facts + researched
+        # Counts/reason codes only: never log page bodies, credentials or product facts.
+        logging.getLogger(__name__).info(
+            "catalog_research market=%s facts=%d media=%d rejected=%s search_failures=%d searches=%s",
+            identity.market, len(researched), len(discovered_media_candidates),
+            dict(Counter(e.get("reason", "unknown") for e in observer.events if e["stage"] == "source_rejected")),
+            sum(e["stage"] == "source_search_failed" for e in observer.events),
+            [(e.get("phase"), e.get("result_count")) for e in observer.events if e["stage"] == "source_search_completed"],
+        )
         observer.emit(
             STAGE_RESEARCH_COMPLETED,
             fact_count=len(researched),

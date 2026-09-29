@@ -18,6 +18,8 @@ import os
 import uuid
 from datetime import datetime, timezone
 from typing import Protocol
+from types import SimpleNamespace
+from html.parser import HTMLParser
 from urllib.parse import urljoin
 
 from product_enrichment.characteristics import (
@@ -71,13 +73,41 @@ def manufacturer_domains(brand: str) -> tuple[str, ...]:
                                _MANUFACTURER_DOMAINS.get(brand.strip().casefold(), ())))
 
 
+def catalog_domains() -> tuple[str, ...]:
+    return tuple(x.strip().lower() for x in os.environ.get(
+        "PANDA_RESEARCH_CATALOG_DOMAINS",
+        "mvideo.ru,dns-shop.ru,citilink.ru,eldorado.ru,technopark.ru").split(",") if x.strip())
+
+
 def trusted_ru_catalog(url: str, brand: str) -> bool:
     domain = source_domain(url)
-    catalogs = tuple(x.strip().lower() for x in
-                     os.environ.get("PANDA_RESEARCH_CATALOG_DOMAINS",
-                                    "mvideo.ru,dns-shop.ru,citilink.ru,eldorado.ru,technopark.ru").split(",") if x.strip())
-    allowed = (*manufacturer_domains(brand), *catalogs)
+    allowed = (*manufacturer_domains(brand), *catalog_domains())
     return bool(domain and any(domain == d or domain.endswith("." + d) for d in allowed))
+
+
+def official_regional_links(page_text: str, *, base_url: str, identity: ResolvedIdentity) -> tuple[str, ...]:
+    """Follow declared exact-model RU links, never manufacture localized URLs.
+
+    Foreign manufacturer pages are navigation only: none of their facts,
+    descriptions or images enter the RU product evidence.
+    """
+    links: list[str] = []
+
+    class Links(HTMLParser):
+        def handle_starttag(self, tag, attrs):
+            if tag not in {"a", "link"}:
+                return
+            url = urljoin(base_url, dict(attrs).get("href") or "")
+            domain = source_domain(url)
+            if (url not in links and russian_source(url)
+                    and any(domain == d or domain.endswith("." + d)
+                            for d in manufacturer_domains(identity.brand))
+                    and not re.search(r"/support[^/]*(?:/|$)", url, re.I)
+                    and evidence_matches_identity(identity, text="", url=url)):
+                links.append(url)
+
+    Links().feed(page_text)
+    return tuple(links[:2])
 
 
 def source_product_title(page_text: str, identity: ResolvedIdentity, url: str) -> str:
@@ -508,17 +538,30 @@ async def research_product(
             domains = manufacturer_domains(identity.brand)
             results = []
             if domains:
-                sites = " OR ".join(f"site:{d}/ru" for d in domains)
-                try:
-                    results = list(await search_port.search(
-                        f'"{identity.model}" ({sites}) -inurl:support', max_results=max_sources) or [])
-                except Exception:
-                    results = []
+                # Reserve result slots for a second discovery query and catalogs.
+                # Do not exhaust the gateway's ten-result allowance on one query.
+                for regional in (True, False):
+                    sites = " OR ".join(f"site:{d}" + ("/ru" if regional else "") for d in domains)
+                    if len(domains) > 1:
+                        sites = f"({sites})"
+                    try:
+                        found = list(await search_port.search(
+                            f'{identity.brand} "{identity.model}" {sites} -inurl:support',
+                            max_results=min(max_sources, 3)) or [])
+                        results.extend(found)
+                        observer.emit("source_search_completed", phase="official_regional" if regional else "official_domain",
+                                      result_count=len(found))
+                    except Exception as exc:
+                        observer.emit("source_search_failed", phase="official", reason=type(exc).__name__)
             # Bounded Russian catalog fallback, also covers unregistered brands/categories.
             try:
+                sites = " OR ".join(f"site:{d}" for d in catalog_domains())
                 secondary = await search_port.search(
-                    f'"{identity.brand}" "{identity.model}" характеристики site:ru', max_results=max_sources)
-            except Exception:
+                    f'"{identity.brand}" "{identity.model}" характеристики ({sites})',
+                    max_results=min(max_sources, 4) if domains else max_sources) if sites else []
+                observer.emit("source_search_completed", phase="catalog", result_count=len(secondary or []))
+            except Exception as exc:
+                observer.emit("source_search_failed", phase="catalog", reason=type(exc).__name__)
                 secondary = []
             seen = set()
             unique = []
@@ -572,10 +615,32 @@ async def research_product(
     discovered_media: list[MediaCandidateInput] = []
     seen_media_urls: set[str] = set()
     retrieved_at = datetime.now(timezone.utc).isoformat()
-    for result in results or []:
+    # At most two discovery fetches and four linked regional pages per product.
+    # Search still uses the existing ten-result gateway budget; no resets here.
+    results = list(results or [])
+    discovery_fetches = 0
+    seen_urls: set[str] = set()
+    for result in results:
         url = str(getattr(result, "url", "") or "")
         title = str(getattr(result, "title", "") or "")
         snippet = str(getattr(result, "snippet", "") or "")
+        if url in seen_urls:
+            continue
+        seen_urls.add(url)
+        if identity.market == "RU" and not russian_source(url):
+            domain = source_domain(url)
+            official = any(domain == d or domain.endswith("." + d)
+                           for d in manufacturer_domains(identity.brand))
+            if (official and discovery_fetches < 2
+                    and evidence_matches_identity(identity, text="", url=url)):
+                discovery_fetches += 1
+                try:
+                    navigation = await fetch_port.fetch_text(url)
+                    for regional_url in official_regional_links(navigation, base_url=url, identity=identity):
+                        results.append(SimpleNamespace(url=regional_url, title="", snippet=""))
+                except Exception:
+                    observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="regional_discovery_failed")
+            # A foreign page is never used as product evidence.
         if identity.market == "RU":
             if not russian_source(url) or not trusted_ru_catalog(url, identity.brand):
                 observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="untrusted_or_foreign_source")

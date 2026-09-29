@@ -10,9 +10,15 @@ default. Only RU and empty/unscoped are currently supported; invalid settings fa
 preparation rather than silently widening research.
 
 RU research:
-- Queries the registered manufacturer's Russian site section first, then Russian
-  catalogs (at most two research searches, with URL deduplication).
-- Rejects foreign/global pages before fetching specifications or discovering media:
+- Queries the registered manufacturer's Russian site section, then its whole
+  domain, then trusted Russian catalogs. Three searches reserve 3 + 3 + 4 result
+  slots within the existing ten-result gateway budget; URLs are deduplicated.
+- Exact-model foreign manufacturer pages can supply navigation only: at most two
+  such pages are fetched to read declared links to the same model's Russian page.
+  No regional URL is guessed and no foreign facts/images enter the RU preview.
+  At most two regional links are followed per navigation page. Support pages stay
+  excluded. Brands without a registry entry use the configured catalog query.
+- Accepts Russian specifications/media only:
   accepted scopes are .ru/.рф domains, /ru/ localized paths and /region/russia/
   or /region/ru/ document paths. This is source scoping, not proof of legal
   distribution or country of manufacture.
@@ -53,3 +59,9 @@ Resolution extraction requires resolution/pixel context and excludes dimension
 units/triples. Linked model/size selectors are not spec values. Differing
 structured values on the same page remain contradictions rather than selecting
 the first row silently.
+
+Research emits search-phase counts and failure types. The `catalog_research` log
+summary records fact/media counts, rejection reason counts and search-failure
+counts, without page bodies, credential values or specification payloads. This
+distinguishes empty discovery from rejected/failing fetches during production
+preview validation.
