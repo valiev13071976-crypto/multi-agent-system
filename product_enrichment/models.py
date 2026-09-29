@@ -60,12 +60,15 @@ class ProductIdentityQuery:
     ean: str = ""
     category: str = ""
     subcategory: str = ""
+    market: str = ""
 
 
-def compute_identity_key(*, brand: str, model: str, ean: str) -> str:
+def compute_identity_key(*, brand: str, model: str, ean: str, market: str = "") -> str:
     """Deterministic cache/dedup key (requirement 13: EAN + brand + exact
     model). Stable across process restarts -- never random."""
     basis = f"{brand.strip().casefold()}|{model.strip().casefold()}|{ean.strip()}"
+    if market:
+        basis += f"|market:{market.upper()}"
     return hashlib.sha256(basis.encode("utf-8")).hexdigest()[:32]
 
 
@@ -82,6 +85,7 @@ class ResolvedIdentity:
     identity_key: str
     # "ean_and_model" (strongest) | "model_only" | "article_only"
     strength: str = "model_only"
+    market: str = ""
 
 
 @dataclass(frozen=True)

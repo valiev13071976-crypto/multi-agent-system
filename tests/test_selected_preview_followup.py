@@ -70,3 +70,22 @@ async def test_contextual_preview_does_not_capture_unrelated_operations(case):
         text=text, tenant_id=TENANT, user_id=OWNER, conversation_id=conv, request_id=case,
     ))
     assert result is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_refresh_reaches_selected_card_preparation():
+    from business_assistant import product_enrichment_bridge as bridge_module
+    panda, store = await prepared()
+    original = bridge_module.prepare_complete_card
+    calls = []
+    async def spy(**kwargs):
+        calls.append(kwargs.get("force_refresh"))
+        return await original(**kwargs)
+    before = len(store.catalog(TENANT))
+    with patch.object(bridge_module, "prepare_complete_card", side_effect=spy):
+        result = await panda.respond(ConversationRequest(
+            text="Заново подготовь предпросмотр 55C6K и 65RM7L для сайта. Ничего не записывай.",
+            tenant_id=TENANT, user_id=OWNER, conversation_id=CONV, request_id="refresh"))
+    assert calls == [True, True]
+    assert result.metadata["mutated"] is False
+    assert len(store.catalog(TENANT)) == before

@@ -68,7 +68,7 @@ def resolve_identity(query: ProductIdentityQuery) -> ResolvedIdentity:
 
     effective_model = model or article
     strength = "ean_and_model" if (ean and model) else ("model_only" if model else "article_only")
-    identity_key = compute_identity_key(brand=brand, model=effective_model, ean=ean)
+    identity_key = compute_identity_key(brand=brand, model=effective_model, ean=ean, market=query.market)
 
     return ResolvedIdentity(
         brand=brand,
@@ -79,6 +79,7 @@ def resolve_identity(query: ProductIdentityQuery) -> ResolvedIdentity:
         subcategory=subcategory,
         identity_key=identity_key,
         strength=strength,
+        market=query.market.upper(),
     )
 
 
