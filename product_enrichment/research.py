@@ -13,6 +13,8 @@ fabricate a fact.
 from __future__ import annotations
 
 import re
+import json
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Protocol
@@ -62,6 +64,31 @@ _MANUFACTURER_DOMAINS: dict[str, tuple[str, ...]] = {
     "hisense": ("hisense.com",),
 }
 _AUTHORIZED_DISTRIBUTOR_DOMAINS = ("citilink.ru", "mvideo.ru", "dns-shop.ru", "eldorado.ru")
+
+def manufacturer_domains(brand: str) -> tuple[str, ...]:
+    configured = json.loads(os.environ.get("PANDA_RESEARCH_MANUFACTURER_DOMAINS") or "{}")
+    return tuple(configured.get(brand.strip().casefold(),
+                               _MANUFACTURER_DOMAINS.get(brand.strip().casefold(), ())))
+
+
+def trusted_ru_catalog(url: str, brand: str) -> bool:
+    domain = source_domain(url)
+    catalogs = tuple(x.strip().lower() for x in
+                     os.environ.get("PANDA_RESEARCH_CATALOG_DOMAINS",
+                                    "mvideo.ru,dns-shop.ru,citilink.ru,eldorado.ru,technopark.ru").split(",") if x.strip())
+    allowed = (*manufacturer_domains(brand), *catalogs)
+    return bool(domain and any(domain == d or domain.endswith("." + d) for d in allowed))
+
+
+def source_product_title(page_text: str, identity: ResolvedIdentity, url: str) -> str:
+    # Category evidence comes from the fetched product heading, never navigation.
+    for tag in ("h1", "title"):
+        for match in re.finditer(rf"<{tag}\b[^>]*>(.*?)</{tag}>", page_text, re.I | re.S):
+            title = " ".join(text for text, _ in html_text_nodes(match.group(1)))
+            if evidence_matches_identity(identity, text=title, url=url):
+                return title
+    return ""
+
 
 # Best-effort image-candidate discovery from an already fetched,
 # identity-verified page (requirement 7's "MEDIA GAP" -- Brave is a web
@@ -321,8 +348,8 @@ def classify_source_type(url: str, *, brand: str) -> str:
     domain = source_domain(url)
     if not domain:
         return SOURCE_UNKNOWN
-    manufacturer_domains = _MANUFACTURER_DOMAINS.get(brand.strip().casefold(), ())
-    if any(domain == d or domain.endswith(f".{d}") for d in manufacturer_domains):
+    known_domains = manufacturer_domains(brand)
+    if any(domain == d or domain.endswith(f".{d}") for d in known_domains):
         if domain.endswith((".pdf",)) or "manual" in url.casefold() or "spec" in url.casefold():
             return SOURCE_MANUFACTURER_DOCUMENTATION
         return SOURCE_MANUFACTURER
@@ -478,13 +505,13 @@ async def research_product(
     query = f"{identity.brand} {identity.model} характеристики specifications"
     try:
         if identity.market == "RU":
-            domains = _MANUFACTURER_DOMAINS.get(identity.brand.casefold(), ())
+            domains = manufacturer_domains(identity.brand)
             results = []
             if domains:
-                sites = " OR ".join(f"site:{d}/ru/ OR site:{d}/content/dam/brandsite/region/russia/" for d in domains)
+                sites = " OR ".join(f"site:{d}/ru" for d in domains)
                 try:
                     results = list(await search_port.search(
-                        f'"{identity.model}" ({sites}) характеристики', max_results=max_sources) or [])
+                        f'"{identity.model}" ({sites}) -inurl:support', max_results=max_sources) or [])
                 except Exception:
                     results = []
             # Bounded Russian catalog fallback, also covers unregistered brands/categories.
@@ -513,7 +540,15 @@ async def research_product(
     ) -> None:
         for key, raw_value in extract_compact_feature_facts(compact_text):
             if key in seen_keys:
-                continue
+                # A literal RGB/QD qualifier refines generic Mini LED; do not
+                # let an earlier generic headline erase the more precise fact.
+                specific_backlight = key == "backlight_technology" and raw_value.casefold().startswith(("rgb", "qd"))
+                generic = [f for f in facts if f.source_url == url and f.characteristic_key == key
+                           and f.raw_label == "feature" and f.normalized_value.casefold() in ("mini led", "mini-led")]
+                if not specific_backlight or not generic:
+                    continue
+                for fact in generic:
+                    facts.remove(fact)
             normalized_value, unit = normalize_characteristic_value(key, raw_value)
             if not normalized_value:
                 continue
@@ -541,9 +576,13 @@ async def research_product(
         url = str(getattr(result, "url", "") or "")
         title = str(getattr(result, "title", "") or "")
         snippet = str(getattr(result, "snippet", "") or "")
-        if identity.market == "RU" and not russian_source(url):
-            observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="market_mismatch")
-            continue
+        if identity.market == "RU":
+            if not russian_source(url) or not trusted_ru_catalog(url, identity.brand):
+                observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="untrusted_or_foreign_source")
+                continue
+            if re.search(r"/support[^/]*(?:/|$)", url, re.I):
+                observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="support_page_not_product")
+                continue
         if not evidence_matches_identity(identity, text=f"{title} {snippet}", url=url):
             observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="identity_not_confirmed")
             continue
@@ -565,6 +604,16 @@ async def research_product(
             observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="screen_size_variant_mismatch")
             continue
 
+        product_title = source_product_title(page_text, identity, url)
+        if product_title and (source_type in (SOURCE_MANUFACTURER, SOURCE_MANUFACTURER_DOCUMENTATION)
+                              or trusted_ru_catalog(url, identity.brand)):
+            facts.append(SourceFact(
+                characteristic_key="", raw_label="product_category_title",
+                raw_value=product_title, normalized_value=product_title, unit="",
+                source_url=url, source_type=source_type, source_domain=source_domain(url),
+                confidence="verified", retrieved_at=retrieved_at,
+            ))
+
         if media_sink is not None and len(discovered_media) < MAX_MEDIA_CANDIDATES_PER_RUN:
             for image_url in extract_image_candidate_urls(page_text, base_url=url):
                 if image_url in seen_media_urls:
@@ -578,16 +627,12 @@ async def research_product(
         # label/value specs and compact feature bullets/headings.
         keys_from_this_source: set[str] = set()
 
-        # ONE fact per characteristic per source: real pages repeat the
-        # same characteristic in several blocks (summary + full spec
-        # table) and sometimes carry near-variants under the same
-        # canonical key (e.g. "Количество USB 2.0" and "Количество USB
-        # 3.0"). Without this, a single page could disagree with ITSELF
-        # and ``merge_facts_into_characteristics`` would fail closed to a
-        # conflict, dropping a characteristic the source stated plainly.
+        # Deduplicate equal facts, but preserve differing values so the
+        # merger can report contradictions within one source.
+        structured_values: set[tuple[str, str]] = set()
         for label, raw_value in extract_spec_lines(page_text):
             key = match_canonical_key(label)
-            if key is None or key in keys_from_this_source:
+            if key is None:
                 continue
             page_conflict = detect_variant_conflict(identity, text=raw_value)
             if page_conflict:
@@ -595,6 +640,9 @@ async def research_product(
             normalized_value, unit = normalize_characteristic_value(key, raw_value)
             if not normalized_value:
                 continue
+            if (key, normalized_value) in structured_values:
+                continue
+            structured_values.add((key, normalized_value))
             keys_from_this_source.add(key)
             facts.append(
                 SourceFact(

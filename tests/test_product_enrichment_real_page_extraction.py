@@ -280,7 +280,7 @@ class RealPageEnrichmentPipelineTests(unittest.TestCase):
         return _FixtureFetchPort(
             {
                 self.RETAILER_URL: RETAILER_PAGE_HTML.format(name=name) + "<p>Операционная система: Google TV</p>",
-                self.DISTRIBUTOR_URL: DISTRIBUTOR_PAGE_HTML.format(name=name) + "<p>Операционная система: Google TV</p>",
+                self.DISTRIBUTOR_URL: DISTRIBUTOR_PAGE_HTML.format(name=name).replace("webOS 24", "Google TV"),
             }
         )
 

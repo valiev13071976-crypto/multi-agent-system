@@ -7,6 +7,7 @@ docstring): identity -> research -> characteristics -> content -> media ->
 from __future__ import annotations
 
 from typing import Sequence
+from dataclasses import replace
 
 from product_enrichment.cache import EnrichmentCache
 from product_enrichment.characteristics import bridge_characteristics_to_bitrix, merge_facts_into_characteristics
@@ -114,6 +115,14 @@ async def enrich_product(
             fact_count=len(researched),
             media_candidate_count=len(discovered_media_candidates),
         )
+
+    if not identity.category and not identity.subcategory:
+        from integrations.bitrix.schema import derive_category_concepts
+        category_signals = [f.normalized_value for f in facts
+                            if f.raw_label == "product_category_title" and f.confidence == "verified"]
+        concepts = derive_category_concepts(category_signals)
+        if len(concepts) == 1:
+            identity = replace(identity, category=next(iter(concepts)))
 
     characteristics, conflicts = merge_facts_into_characteristics(facts)
     characteristics = bridge_characteristics_to_bitrix(characteristics)

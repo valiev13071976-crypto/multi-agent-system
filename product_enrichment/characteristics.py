@@ -312,7 +312,7 @@ _HDR_TOKENS = (
     "hdr", "hdr10", "hdr10+", "dolby vision", "hlg", "technicolor",
 )
 _PANEL_TECH_TOKENS = (
-    "qd-oled", "qd oled", "oled", "qled", "microled", "micro led",
+    "qd-oled", "qd oled", "oled", "microled", "micro led",
     "lcd", "ips", "hva pro", "hva", "va", "tn",
 )
 _BACKLIGHT_TECH_TOKENS = (
@@ -532,7 +532,10 @@ def extract_compact_feature_facts(text: str) -> tuple[tuple[str, str], ...]:
     # UHD or Full HD remain available to content generation but are never
     # coerced into a pixel property.
     res_match = re.search(r"\b\d{3,5}\s*[x×х]\s*\d{3,5}\b", blob, re.I)
-    if res_match:
+    if (res_match
+            and re.search(r"разрешени|resolution|pixels?|пиксел", blob, re.I)
+            and not re.search(r"\b(?:mm|cm|мм|см)\b|габарит|dimensions?|vesa", blob, re.I)
+            and not re.search(r"\d+\s*[x×х]\s*\d+\s*[x×х]\s*\d+", blob, re.I)):
         found.append(("screen_resolution", res_match.group(0)))
 
     return tuple(found)
@@ -717,6 +720,8 @@ def extract_spec_lines(page_text: str) -> Iterable[tuple[str, str]]:
         if not label or match_canonical_key(label) is None:
             continue
         if index + 1 >= len(nodes):
+            continue
+        if nodes[index + 1][1]:
             continue
         value = nodes[index + 1][0].strip()
         if _plausible_structural_value(value):
