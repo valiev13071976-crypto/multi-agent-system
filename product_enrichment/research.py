@@ -25,6 +25,7 @@ from product_enrichment.characteristics import (
     match_canonical_key,
     normalize_characteristic_value,
 )
+from product_enrichment.market import russian_source
 from product_enrichment.identity import (
     detect_variant_conflict,
     evidence_matches_identity,
@@ -158,7 +159,7 @@ def _display_brand_name(key: str) -> str:
 
 
 async def resolve_brand_from_model(
-    model: str, *, search_port: SearchPort, max_results: int = 5
+    model: str, *, search_port: SearchPort, max_results: int = 5, market: str = ""
 ) -> str:
     """Conservatively infer a missing brand from exact-model search evidence.
 
@@ -189,6 +190,8 @@ async def resolve_brand_from_model(
             title = str(getattr(result, "title", "") or "")
             snippet = str(getattr(result, "snippet", "") or "")
             domain = source_domain(url)
+            if market == "RU" and not russian_source(url):
+                continue
             text = f"{title} {snippet} {url}".casefold()
 
             if model_folded not in text:
@@ -212,7 +215,7 @@ async def resolve_brand_from_model(
             return _display_brand_name(strong[0])
         return ""
 
-    first_results = await _search(model)
+    first_results = await _search(f'{model} site:ru' if market == "RU" else model)
     first = _evaluate(first_results)
     if first:
         return first
@@ -223,7 +226,7 @@ async def resolve_brand_from_model(
     # This remains generic and bounded: no SKU-specific branch and no N
     # searches per manufacturer.
     fallback_results = await _search(
-        _manufacturer_discovery_query(model),
+        (_manufacturer_discovery_query(model) + " Россия /ru/") if market == "RU" else _manufacturer_discovery_query(model),
     )
     # Deduplicate by URL so one result returned by both searches never
     # counts twice toward the two-source corroboration threshold.
@@ -474,7 +477,32 @@ async def research_product(
     observer = observer or EnrichmentObserver()
     query = f"{identity.brand} {identity.model} характеристики specifications"
     try:
-        results = await search_port.search(query, max_results=max_sources)
+        if identity.market == "RU":
+            domains = _MANUFACTURER_DOMAINS.get(identity.brand.casefold(), ())
+            results = []
+            if domains:
+                sites = " OR ".join(f"site:{d}/ru/ OR site:{d}/content/dam/brandsite/region/russia/" for d in domains)
+                try:
+                    results = list(await search_port.search(
+                        f'"{identity.model}" ({sites}) характеристики', max_results=max_sources) or [])
+                except Exception:
+                    results = []
+            # Bounded Russian catalog fallback, also covers unregistered brands/categories.
+            try:
+                secondary = await search_port.search(
+                    f'"{identity.brand}" "{identity.model}" характеристики site:ru', max_results=max_sources)
+            except Exception:
+                secondary = []
+            seen = set()
+            unique = []
+            for result in [*results, *(secondary or [])]:
+                url = str(getattr(result, "url", "") or "")
+                if url and url not in seen:
+                    seen.add(url)
+                    unique.append(result)
+            results = unique
+        else:
+            results = await search_port.search(query, max_results=max_sources)
     except Exception:  # noqa: BLE001 -- search unavailable is a normal, expected outcome
         return ()
 
@@ -513,6 +541,9 @@ async def research_product(
         url = str(getattr(result, "url", "") or "")
         title = str(getattr(result, "title", "") or "")
         snippet = str(getattr(result, "snippet", "") or "")
+        if identity.market == "RU" and not russian_source(url):
+            observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="market_mismatch")
+            continue
         if not evidence_matches_identity(identity, text=f"{title} {snippet}", url=url):
             observer.emit(STAGE_SOURCE_REJECTED, url=url, reason="identity_not_confirmed")
             continue

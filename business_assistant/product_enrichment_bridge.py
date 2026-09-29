@@ -38,6 +38,7 @@ from business_assistant.controlled_bitrix_write import (
 from product_enrichment.cache import EnrichmentCache
 from product_enrichment.characteristics import CANONICAL_CHARACTERISTIC_ALIASES
 from product_enrichment.content import generate_content
+from product_enrichment.market import catalog_market
 from product_enrichment.media_fetch import ImageFetchPort
 from product_enrichment.models import EnrichmentResult, MediaCandidateInput, ProductIdentityQuery
 from product_enrichment.observability import EnrichmentObserver
@@ -68,6 +69,7 @@ async def run_enrichment(
     media_fetcher: ImageFetchPort | None = None,
     media_candidates: Sequence[MediaCandidateInput] = (),
     cache: EnrichmentCache | None = None,
+    force_refresh: bool = False,
     observer: EnrichmentObserver | None = None,
 ) -> EnrichmentResult:
     """Runs the enrichment pipeline for one supplier row. ``tool_gateway``
@@ -75,7 +77,7 @@ async def run_enrichment(
     see ``product_enrichment.orchestrator.enrich_product``'s own
     docstring), and the resulting preview reports it under
     ``missing_source_data``."""
-    query = build_identity_query_from_fields(product_fields)
+    query = dataclasses.replace(build_identity_query_from_fields(product_fields), market=catalog_market(tenant_id))
     search_port = fetch_port = None
     if tool_gateway is not None:
         adapter = ToolGatewayResearchAdapter(tool_gateway, tenant_id=tenant_id)
@@ -96,7 +98,7 @@ async def run_enrichment(
         if not query.brand and (query.model or query.article):
             brand_discovery_attempted = True
             discovered_brand = await resolve_brand_from_model(
-                query.model or query.article, search_port=adapter
+                query.model or query.article, search_port=adapter, market=query.market
             )
             if discovered_brand:
                 query = dataclasses.replace(query, brand=discovered_brand)
@@ -107,6 +109,9 @@ async def run_enrichment(
         # must not leave zero budget for the actual product research.
         if brand_discovery_attempted and query.brand and hasattr(tool_gateway, "reset_budget"):
             tool_gateway.reset_budget()
+    if force_refresh and cache is not None:
+        from product_enrichment.identity import resolve_identity
+        cache.clear(tenant_id=tenant_id, identity_key=resolve_identity(query).identity_key)
     return await enrich_product(
         tenant_id=tenant_id,
         query=query,
@@ -310,6 +315,13 @@ def format_write_plan_text(
     if write_request.retail_price:
         lines.append(f"Розничная цена: {write_request.retail_price} {write_request.currency}")
 
+    research = dict(enrichment_preview or {})
+    if research.get("research_market"):
+        lines.append(f"Рынок поиска: {research['research_market']}")
+        lines.append("Источники: " + ("сохранённый результат" if research.get("cache_hit") else "новая проверка"))
+        for source in research.get("sources", []):
+            lines.append(f"  - {source['url']} (проверено: {source['retrieved_at']})")
+
     written = dict(write_request.characteristics or {})
     lines.append(f"ХАРАКТЕРИСТИКИ, КОТОРЫЕ БУДУТ ЗАПИСАНЫ: {len(written)}")
     for key in sorted(written):
@@ -449,6 +461,7 @@ async def prepare_complete_card(
     media_fetcher: ImageFetchPort | None = None,
     media_candidates: Sequence[MediaCandidateInput] = (),
     cache: EnrichmentCache | None = None,
+    force_refresh: bool = False,
     observer: EnrichmentObserver | None = None,
 ) -> dict:
     """The single entry point the conversational layer calls for
@@ -463,6 +476,7 @@ async def prepare_complete_card(
         media_fetcher=media_fetcher,
         media_candidates=media_candidates,
         cache=cache,
+        force_refresh=force_refresh,
         observer=observer,
     )
     write_request = build_enriched_write_request(

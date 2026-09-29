@@ -107,6 +107,11 @@ def enrichment_preview_dict(result: EnrichmentResult) -> dict:
         "not_writable_or_unresolved": not_writable,
         "missing_source_data": missing,
         "cache_hit": result.cache_hit,
+        "research_market": identity.market,
+        "sources": [
+            {"url": url, "retrieved_at": stamp}
+            for url, stamp in sorted({(f.source_url, f.retrieved_at) for f in result.facts})
+        ],
     }
 
 

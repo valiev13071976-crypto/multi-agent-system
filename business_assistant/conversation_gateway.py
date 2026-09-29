@@ -6,6 +6,8 @@ import logging
 import re
 import time
 import uuid
+from product_enrichment.market import requests_fresh_research
+
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Protocol, runtime_checkable
 
@@ -1508,7 +1510,7 @@ class WorkflowPandaConversationGateway:
 
         if task is None or getattr(task, "family", None) != FAMILY_EXCEL:
             return
-        if dict(task.parameters.get("bitrix_enrichment_write_request") or {}):
+        if dict(task.parameters.get("bitrix_enrichment_write_request") or {}) and not requests_fresh_research(request.text):
             return
         product_fields = dict(task.parameters.get("bitrix_product_fields") or {})
         if not product_fields.get("sku"):
@@ -1537,6 +1539,7 @@ class WorkflowPandaConversationGateway:
                 tool_gateway=self._tool_gateway,
                 media_fetcher=None if skip_media else self._media_fetcher,
                 cache=self._enrichment_cache,
+                force_refresh=requests_fresh_research(request.text),
             )
         except Exception:  # noqa: BLE001 -- auto-preparation must never fail an otherwise working preview/write turn
             return
@@ -1871,7 +1874,7 @@ class WorkflowPandaConversationGateway:
 
         task = action.task
         idem = str(action.idempotency_key or request.request_id or "")
-        if idem and idem in self._executed_keys:
+        if idem and idem in self._executed_keys and not requests_fresh_research(request.text):
             return ConversationResult(
                 text="Полная карточка для этого товара уже была подготовлена ранее.",
                 task_id=getattr(task, "task_id", None),
@@ -1891,6 +1894,7 @@ class WorkflowPandaConversationGateway:
                 tool_gateway=self._tool_gateway,
                 media_fetcher=self._media_fetcher,
                 cache=self._enrichment_cache,
+                force_refresh=requests_fresh_research(request.text),
             )
         except Exception:
             if task is not None:
@@ -2379,6 +2383,7 @@ class WorkflowPandaConversationGateway:
                         tool_gateway=self._tool_gateway,
                         media_fetcher=self._media_fetcher,
                         cache=self._enrichment_cache,
+                        force_refresh=requests_fresh_research(request.text),
                     )
                     write_request = card["write_request"]
                     write_preview = dict(card.get("write_preview") or {})
