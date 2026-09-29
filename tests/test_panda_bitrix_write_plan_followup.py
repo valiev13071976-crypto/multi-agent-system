@@ -155,29 +155,35 @@ class WritePlanFollowUpAnswersFromPreparedCardTests(unittest.IsolatedAsyncioTest
         write_request = dict(task.parameters["bitrix_enrichment_write_request"])
         status_map = dict(task.parameters["bitrix_enrichment_characteristic_status"])
         self.assertTrue(status_map)
+        from product_enrichment.characteristics import CANONICAL_CHARACTERISTIC_ALIASES
+        def label(key):
+            aliases = CANONICAL_CHARACTERISTIC_ALIASES.get(key)
+            return aliases[1][0] if aliases else key
         for key in write_request.get("characteristics") or {}:
-            self.assertIn(key, text)
+            self.assertIn(label(key), text)
         for key, info in status_map.items():
-            self.assertIn(key, text)
-            self.assertIn(str(info.get("confidence")), text)
+            self.assertIn(label(key), text)
+        self.assertIn("подтверждено источниками", text)
         self.assertTrue(any(str(i.get("confidence")) == "verified" for i in status_map.values()))
         # A characteristic without a verified Bitrix property is reported as
         # excluded, with the reason -- never silently dropped.
         excluded = [key for key in status_map if key not in (write_request.get("characteristics") or {})]
         self.assertTrue(excluded)
         for key in excluded:
-            self.assertIn(f"{key}: {status_map[key].get('value')}", text)
+            self.assertIn(f"{label(key)}: {status_map[key].get('value')}", text)
         self.assertIn("нет проверенного свойства в Bitrix", text)
 
         # What the EXISTING write path would include/exclude (read-only
         # prepare_single_product_write output, rendered verbatim).
         write_preview = answer.metadata.get("bitrix_write_preview") or {}
         self.assertEqual(write_preview.get("status"), "REQUIRES_APPROVAL")
-        self.assertIn("Поля записи (по текущей политике записи):", text)
-        for item in write_preview.get("will_write") or []:
-            self.assertIn(str(item), text)
+        self.assertIn("План подготовлен.", text)
+        self.assertIn("Статус после создания: неактивный", text)
+        self.assertNotIn("Поля записи (по текущей политике записи):", text)
+        # Technical contract stays available in metadata, not customer copy.
+        self.assertTrue(write_preview.get("will_write"))
         for item in write_preview.get("will_not_write") or []:
-            self.assertIn(str(item.get("reason")), text)
+            self.assertIn(str(item.get("value")), text)
 
         # Prepared media (uploaded file names, never an external hotlink)
         # and the prepared description.
